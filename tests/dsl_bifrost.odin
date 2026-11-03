@@ -3,6 +3,7 @@ package bifrost_tests
 import "core:strings"
 import "core:testing"
 import "../bifrost"
+import actor "../deps/sleipnir/actor"
 
 // =============================================================================
 // Layer 2: Domain-Specific Language (Composable BDD Steps for Layout & Render)
@@ -454,4 +455,122 @@ then_parsed_resize_at_is :: proc(
 		}
 	}
 }
+
+// =============================================================================
+// Layer 2: Domain-Specific Language (Sleipnir Actor Runtime + xitdb Inspector)
+// =============================================================================
+
+given_actor_xitdb_inspector :: proc(
+	s: ^Suite_Ctx,
+	t: ^testing.T,
+	w: i32 = 80,
+	h: i32 = 24,
+	num_workers: int = 2,
+	active_collection: string = "",
+) {
+	driver_actor_xitdb_init(s, t, w, h, num_workers, active_collection)
+}
+
+upon_worker_transacting_script :: proc(s: ^Suite_Ctx, script: string, tag_name: string = "") {
+	actor.send(&s.sched, s.worker_pid, bifrost.Xitdb_Worker_Msg(bifrost.Worker_Msg_Transact_Script{
+		script   = script,
+		tag_name = tag_name,
+	}))
+}
+
+upon_worker_committing_batch :: proc(
+	s: ^Suite_Ctx,
+	map_name: string,
+	key_prefix: string,
+	start_id: int,
+	count: int,
+	sorted: bool = true,
+	tag_name: string = "",
+) {
+	actor.send(&s.sched, s.worker_pid, bifrost.Xitdb_Worker_Msg(bifrost.Worker_Msg_Commit_Batch{
+		map_name   = map_name,
+		key_prefix = key_prefix,
+		start_id   = start_id,
+		count      = count,
+		sorted     = sorted,
+		tag_name   = tag_name,
+	}))
+}
+
+upon_worker_running_datalog :: proc(s: ^Suite_Ctx, query_source: string) {
+	actor.send(&s.sched, s.worker_pid, bifrost.Xitdb_Worker_Msg(bifrost.Worker_Msg_Run_Datalog{
+		query_source = query_source,
+	}))
+}
+
+upon_worker_diffing_moments :: proc(s: ^Suite_Ctx, moment_a, moment_b: i64) {
+	actor.send(&s.sched, s.worker_pid, bifrost.Xitdb_Worker_Msg(bifrost.Worker_Msg_Diff_Moments{
+		moment_a = moment_a,
+		moment_b = moment_b,
+	}))
+}
+
+upon_sending_commit_burst :: proc(s: ^Suite_Ctx, count: int) {
+	for i := 0; i < count; i += 1 {
+		actor.send(&s.sched, s.ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Commit_Notification{
+			moment_idx = i64(i),
+			slot_ptr   = i64(i * 64),
+			tx_id      = i64(i + 1),
+			tag_name   = "burst",
+		}))
+	}
+}
+
+upon_sending_ui_msg :: proc(s: ^Suite_Ctx, msg: bifrost.UI_Msg) {
+	actor.send(&s.sched, s.ui_pid, msg)
+}
+
+upon_ticking_ui_frame :: proc(s: ^Suite_Ctx, tick_ns: i64 = 1) {
+	actor.scheduler_wait_idle(&s.sched)
+	actor.send(&s.sched, s.ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Frame_Tick{tick_ns = tick_ns}))
+	actor.scheduler_wait_idle(&s.sched)
+}
+
+then_ui_coordinator_metrics_are :: proc(
+	s: ^Suite_Ctx,
+	expected_coalesced_commits: int,
+	expected_total_frames: int,
+	loc := #caller_location,
+) {
+	testing.expect_value(s.t, s.ui_actor.state.coalesced_commits, expected_coalesced_commits, loc = loc)
+	testing.expect_value(s.t, s.ui_actor.state.total_frames, expected_total_frames, loc = loc)
+}
+
+then_ui_active_moment_is :: proc(
+	s: ^Suite_Ctx,
+	expected_active: i64,
+	expected_latest: i64,
+	expected_pinned: bool,
+	loc := #caller_location,
+) {
+	testing.expect_value(s.t, s.ui_actor.state.active_moment_idx, expected_active, loc = loc)
+	testing.expect_value(s.t, s.ui_actor.state.latest_moment_idx, expected_latest, loc = loc)
+	testing.expect_value(s.t, s.ui_actor.state.pinned_moment, expected_pinned, loc = loc)
+}
+
+then_ui_screen_contains_text :: proc(s: ^Suite_Ctx, needle: string, loc := #caller_location) {
+	found := false
+	for r := 0; r < s.ui_actor.state.rows; r += 1 {
+		line := driver_actor_row_text(s, r)
+		if strings.contains(line, needle) {
+			found = true
+			break
+		}
+	}
+	testing.expect(s.t, found, "Expected UI coordinator screen to contain substring", loc = loc)
+}
+
+then_worker_ping_count_is :: proc(s: ^Suite_Ctx, expected_moments: i64, loc := #caller_location) {
+	cnt := actor.call(&s.sched, s.worker_pid, bifrost.Xitdb_Worker_Msg(bifrost.Worker_Msg_Ping_Count{}), i64)
+	testing.expect_value(s.t, cnt, expected_moments, loc = loc)
+}
+
+
+
+
 

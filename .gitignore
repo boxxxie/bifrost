@@ -5,5 +5,5 @@
 *.o
 *.a
 *.so
-bifrost_demo
-xitdb_inspector
+/bifrost_demo
+/xitdb_inspector

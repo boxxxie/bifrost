@@ -7,6 +7,8 @@ import "core:strings"
 import "core:testing"
 import "core:unicode/utf8"
 import "../bifrost"
+import actor "../deps/sleipnir/actor"
+import xitdb "../deps/xitdb/xitdb"
 
 // =============================================================================
 // Layer 3: Protocol Driver (Headless Frame Harness & Structural Invariants)
@@ -41,6 +43,17 @@ Suite_Ctx :: struct {
 	last_parse_stat: bifrost.Parse_Status,
 	last_consumed:   int,
 
+	// Track 5: Sleipnir Actor Runtime + xitdb Shared Database + UI Coordinator Actor
+	actor_active:    bool,
+	db_core:         xitdb.Core,
+	db:              xitdb.Database,
+	shared_db:       bifrost.Xitdb_Shared_Handle,
+	sched:           actor.Scheduler,
+	ui_actor:        ^actor.Actor(bifrost.UI_Coordinator_State, bifrost.UI_Msg),
+	worker_actor:    ^actor.Actor(bifrost.Xitdb_Worker_State, bifrost.Xitdb_Worker_Msg),
+	ui_pid:          actor.PID(bifrost.UI_Msg),
+	worker_pid:      actor.PID(bifrost.Xitdb_Worker_Msg),
+	last_slice:      bifrost.Xitdb_Viewport_Slice,
 }
 
 driver_init :: proc(s: ^Suite_Ctx, t: ^testing.T, w: i32 = 80, h: i32 = 24) {
@@ -69,6 +82,15 @@ driver_init :: proc(s: ^Suite_Ctx, t: ^testing.T, w: i32 = 80, h: i32 = 24) {
 
 driver_destroy :: proc(s: ^Suite_Ctx) {
 	free_all(context.temp_allocator)
+	if s.actor_active {
+		actor.scheduler_wait_idle(&s.sched)
+		if s.ui_actor != nil {
+			bifrost.ui_coordinator_destroy(&s.ui_actor.state)
+		}
+		actor.scheduler_stop_and_destroy(&s.sched)
+		_ = xitdb.core_destroy(&s.db_core)
+		s.actor_active = false
+	}
 	delete(s.parsed_events)
 	delete(s.dispatch_steps)
 	bifrost.state_store_destroy(&s.state_store)
@@ -88,6 +110,63 @@ driver_destroy :: proc(s: ^Suite_Ctx) {
 	}
 }
 
+driver_actor_xitdb_init :: proc(
+	s: ^Suite_Ctx,
+	t: ^testing.T,
+	w: i32 = 80,
+	h: i32 = 24,
+	num_workers: int = 2,
+	active_collection: string = "",
+) {
+	driver_init(s, t, w, h)
+	s.db_core = xitdb.core_memory_init(s.alloc)
+	db_inst, db_err := xitdb.database_init(&s.db_core)
+	testing.expect_value(t, db_err, nil)
+	s.db = db_inst
+	s.shared_db = bifrost.Xitdb_Shared_Handle{db = &s.db}
+
+	sched_err := actor.scheduler_init(&s.sched, actor.Scheduler_Config{
+		num_workers    = num_workers,
+		num_shards     = num_workers,
+		batch_quota    = 2048,
+		enable_parking = true,
+	}, s.alloc)
+	testing.expect_value(t, sched_err, nil)
+
+	ui_act, ok := bifrost.spawn_ui_coordinator(&s.sched, int(w), int(h), &s.shared_db, nil, s.alloc)
+	testing.expect(t, ok, "Expected spawn_ui_coordinator to succeed")
+	ui_act.state.active_collection = active_collection
+	s.ui_actor = ui_act
+	s.ui_pid   = actor.pid(ui_act)
+
+	worker_state := bifrost.Xitdb_Worker_State{
+		shared = &s.shared_db,
+		ui_pid = s.ui_pid,
+	}
+	w_act, w_err := actor.spawn(&s.sched, worker_state, bifrost.xitdb_worker_receive, 2, s.alloc)
+	testing.expect_value(t, w_err, nil)
+	s.worker_actor = w_act
+	s.worker_pid   = actor.pid(w_act)
+
+	actor.scheduler_start(&s.sched)
+	s.actor_active = true
+}
+
+driver_actor_row_text :: proc(s: ^Suite_Ctx, row: int) -> string {
+	if s.ui_actor == nil || row < 0 || row >= s.ui_actor.state.rows {
+		return ""
+	}
+	cols := s.ui_actor.state.cols
+	b := strings.builder_make(0, cols, context.temp_allocator)
+	for x := 0; x < cols; x += 1 {
+		ch := s.ui_actor.state.front_buf[row * cols + x].ch
+		if ch == 0 {
+			continue
+		}
+		strings.write_rune(&b, ch)
+	}
+	return strings.to_string(b)
+}
 
 driver_begin_frame :: proc(s: ^Suite_Ctx, default_bg: bifrost.Color = {}) {
 	free_all(context.temp_allocator)
