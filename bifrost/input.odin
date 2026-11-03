@@ -6,91 +6,227 @@ import "core:mem"
 // Input Events, Phases & Zero-Allocation Input State
 // =============================================================================
 
-Key_Code :: enum u8 {
-	None = 0,
-	Tab,
-	Enter,
-	Space,
-	Escape,
-	Backspace,
-	Delete,
-	Up,
-	Down,
-	Left,
-	Right,
-	Home,
-	End,
-	Page_Up,
-	Page_Down,
-	F1,
-	F2,
-	F3,
-	F4,
-	F5,
-	F6, // Cycles between sibling focus_scope containers when not modal-locked
-	F7,
-	F8,
-	F9,
-	F10,
-	F11,
-	F12,
-	Rune,
+// Key_Code reuses ASCII/Unicode values for standard keys and Kitty's Private
+// Use Area (57348..=57454) for functional keys, plus .Rune for general scalar runes.
+Key_Code :: enum rune {
+	None              = 0,
+	Tab               = 0x09,
+	Enter             = 0x0D,
+	Escape            = 0x1B,
+	Space             = 0x20,
+	Backspace         = 0x7F,
+
+	Insert            = 57348,
+	Delete            = 57349,
+	Left              = 57350,
+	Right             = 57351,
+	Up                = 57352,
+	Down              = 57353,
+	Page_Up           = 57354,
+	Page_Down         = 57355,
+	Home              = 57356,
+	End               = 57357,
+	Caps_Lock         = 57358,
+	Scroll_Lock       = 57359,
+	Num_Lock          = 57360,
+	Print_Screen      = 57361,
+	Pause             = 57362,
+	Menu              = 57363,
+	F1                = 57364,
+	F2                = 57365,
+	F3                = 57366,
+	F4                = 57367,
+	F5                = 57368,
+	F6                = 57369, // Cycles between sibling focus_scope containers when not modal-locked
+	F7                = 57370,
+	F8                = 57371,
+	F9                = 57372,
+	F10               = 57373,
+	F11               = 57374,
+	F12               = 57375,
+	F13               = 57376,
+	F14               = 57377,
+	F15               = 57378,
+	F16               = 57379,
+	F17               = 57380,
+	F18               = 57381,
+	F19               = 57382,
+	F20               = 57383,
+	F21               = 57384,
+	F22               = 57385,
+	F23               = 57386,
+	F24               = 57387,
+	F25               = 57388,
+	F26               = 57389,
+	F27               = 57390,
+	F28               = 57391,
+	F29               = 57392,
+	F30               = 57393,
+	F31               = 57394,
+	F32               = 57395,
+	F33               = 57396,
+	F34               = 57397,
+	F35               = 57398,
+	KP_0              = 57399,
+	KP_1              = 57400,
+	KP_2              = 57401,
+	KP_3              = 57402,
+	KP_4              = 57403,
+	KP_5              = 57404,
+	KP_6              = 57405,
+	KP_7              = 57406,
+	KP_8              = 57407,
+	KP_9              = 57408,
+	KP_Decimal        = 57409,
+	KP_Divide         = 57410,
+	KP_Multiply       = 57411,
+	KP_Subtract       = 57412,
+	KP_Add            = 57413,
+	KP_Enter          = 57414,
+	KP_Equal          = 57415,
+	KP_Separator      = 57416,
+	KP_Left           = 57417,
+	KP_Right          = 57418,
+	KP_Up             = 57419,
+	KP_Down           = 57420,
+	KP_Page_Up        = 57421,
+	KP_Page_Down      = 57422,
+	KP_Home           = 57423,
+	KP_End            = 57424,
+	KP_Insert         = 57425,
+	KP_Delete         = 57426,
+	KP_Begin          = 57427,
+	Media_Play        = 57428,
+	Media_Pause       = 57429,
+	Media_Play_Pause  = 57430,
+	Media_Reverse     = 57431,
+	Media_Stop        = 57432,
+	Media_Fast_Fwd    = 57433,
+	Media_Rewind      = 57434,
+	Media_Track_Next  = 57435,
+	Media_Track_Prev  = 57436,
+	Media_Record      = 57437,
+	Lower_Volume      = 57438,
+	Raise_Volume      = 57439,
+	Mute_Volume       = 57440,
+	Left_Shift        = 57441,
+	Left_Control      = 57442,
+	Left_Alt          = 57443,
+	Left_Super        = 57444,
+	Left_Hyper        = 57445,
+	Left_Meta         = 57446,
+	Right_Shift       = 57447,
+	Right_Control     = 57448,
+	Right_Alt         = 57449,
+	Right_Super       = 57450,
+	Right_Hyper       = 57451,
+	Right_Meta        = 57452,
+	ISO_Level_3_Shift = 57453,
+	ISO_Level_5_Shift = 57454,
+	Multicodepoint    = 0x110001,
+	Rune              = 0x110002,
 }
 
 Mod_Flag :: enum u8 {
-	Shift,
-	Ctrl,
-	Alt,
-	Super,
+	Shift     = 0,
+	Alt       = 1,
+	Ctrl      = 2,
+	Super     = 3,
+	Hyper     = 4,
+	Meta      = 5,
+	Caps_Lock = 6,
+	Num_Lock  = 7,
 }
 
-Mod_Flags :: bit_set[Mod_Flag; u8]
+Mod_Flags     :: bit_set[Mod_Flag; u8]
+Modifier_Flag :: Mod_Flag
+Modifiers     :: Mod_Flags
+
+Key_Action :: enum u8 {
+	Press   = 0,
+	Repeat  = 1,
+	Release = 2,
+}
 
 Key_Event :: struct {
-	code: Key_Code,
-	ch:   rune,
-	mods: Mod_Flags,
+	code:                  Key_Code,
+	ch:                    rune,
+	codepoint:             rune,
+	shifted_codepoint:     rune,
+	base_layout_codepoint: rune,
+	mods:                  Mod_Flags,
+	action:                Key_Action,
+	text_buf:              [64]u8,
+	text_len:              u8,
 }
 
 Mouse_Action :: enum u8 {
-	Move,
-	Press,
-	Drag,
-	Release,
-	Scroll_Up,
-	Scroll_Down,
+	Move        = 0,
+	Press       = 1,
+	Drag        = 2,
+	Release     = 3,
+	Scroll_Up   = 4,
+	Scroll_Down = 5,
+	Motion      = 6,
+	Leave       = 7,
 }
 
 Mouse_Button :: enum u8 {
-	None = 0,
-	Left,
-	Middle,
-	Right,
+	Left        = 0,
+	Middle      = 1,
+	Right       = 2,
+	None        = 3,
+	Wheel_Up    = 64,
+	Wheel_Down  = 65,
+	Wheel_Right = 66,
+	Wheel_Left  = 67,
+	Button_8    = 128,
+	Button_9    = 129,
+	Button_10   = 130,
+	Button_11   = 131,
 }
 
 Mouse_Event :: struct {
-	x:      i32,
-	y:      i32,
-	action: Mouse_Action,
-	button: Mouse_Button,
-	mods:   Mod_Flags,
+	x:        i32,
+	y:        i32,
+	col:      i16,
+	row:      i16,
+	x_offset: u16,
+	y_offset: u16,
+	action:   Mouse_Action,
+	button:   Mouse_Button,
+	mods:     Mod_Flags,
 }
 
 Focus_Loss_Event :: struct {}
 
+Focus_Event :: struct {
+	focused: bool,
+}
+
+Paste_Kind :: enum u8 {
+	Complete = 0,
+	Start    = 1,
+	End      = 2,
+}
+
 Paste_Event :: struct {
 	text: string,
+	kind: Paste_Kind,
 }
 
 Resize_Event :: struct {
-	width:  i32,
-	height: i32,
+	width:   i32,
+	height:  i32,
+	x_pixel: u16,
+	y_pixel: u16,
 }
 
 Input_Event :: union {
 	Key_Event,
 	Mouse_Event,
 	Focus_Loss_Event,
+	Focus_Event,
 	Paste_Event,
 	Resize_Event,
 }
@@ -126,12 +262,13 @@ Focus_Scope_Entry :: struct {
 }
 
 Scroll_Slot :: struct {
-	id_hash:       u64,
-	offset:        i32, // Top visible row index (or cell offset)
-	max_offset:    i32, // Clamped maximum scroll offset
-	viewport_rows: i32, // Solved inner_rect.h from previous/current layout pass
-	total_rows:    i32, // Total rows in xitdb collection or physical content_span
-	selected_row:  i32, // Highlighted cursor row index inside virtual lists
+	id_hash:        u64,
+	offset:         i32, // Top visible row index (or cell offset)
+	max_offset:     i32, // Clamped maximum scroll offset
+	viewport_rows:  i32, // Solved inner_rect.h from previous/current layout pass
+	total_rows:     i32, // Total rows in xitdb collection or physical content_span
+	selected_row:   i32, // Highlighted cursor row index inside virtual lists
+	scroll_padding: i32, // Lookahead padding rows maintained above/below selected_row
 }
 
 // Persistent across frames (owned by the UI Actor; zero heap allocations)
@@ -175,6 +312,20 @@ Input_State :: struct {
 
 	// Fixed-capacity scroll slots for zero-allocation immediate-mode scrolling
 	scroll_slots:        [MAX_SCROLL_SLOTS]Scroll_Slot,
+
+	// Fixed-capacity single-line UTF-8 text input slots
+	text_changed_id:     u64,
+	text_slots:          [MAX_TEXT_SLOTS]Text_Input_Slot,
+
+	// Fixed-capacity interactive pane splitter slots
+	active_splitter_id:  u64,
+	splitter_slots:      [MAX_SPLITTER_SLOTS]Splitter_Slot,
+
+	// 3-tier scoped/global keybinding table & per-frame action dispatch
+	keybindings:           [MAX_KEYBINDINGS]Keybinding,
+	keybinding_count:      int,
+	triggered_action_id:   u64,
+	triggered_action_name: string,
 }
 
 Button_Spec :: struct {
@@ -433,14 +584,17 @@ resolve_input :: proc(inp: ^Input_State, ctx: ^Layout_Context, events: ..Input_E
 	inp.prev_hover_path     = inp.hover_path
 	inp.prev_hover_path_len = inp.hover_path_len
 
-	inp.activated_id        = 0
-	inp.clicked_id          = 0
-	inp.scrolled_id         = 0
-	inp.backdrop_clicked_id = 0
-	inp.escape_modal_id     = 0
-	inp.active_capture_id   = 0
-	inp.active_shield_z     = 0
-	inp.drag_delta          = {0, 0}
+	inp.activated_id          = 0
+	inp.clicked_id            = 0
+	inp.scrolled_id           = 0
+	inp.backdrop_clicked_id   = 0
+	inp.escape_modal_id       = 0
+	inp.active_capture_id     = 0
+	inp.active_shield_z       = 0
+	inp.text_changed_id       = 0
+	inp.triggered_action_id   = 0
+	inp.triggered_action_name = ""
+	inp.drag_delta            = {0, 0}
 
 	if len(ctx.nodes) == 0 {
 		inp.focused_id        = 0
@@ -453,8 +607,9 @@ resolve_input :: proc(inp: ^Input_State, ctx: ^Layout_Context, events: ..Input_E
 		return
 	}
 
-	// 0. Synchronize solved scroll container dimensions with persistent scroll_slots
+	// 0. Synchronize solved scroll container dimensions and splitter geometries
 	sync_scroll_viewports(inp, ctx)
+	sync_splitters(inp, ctx)
 
 	// 1. Identify topmost active capture_input container (highest effective_z modal)
 	capture_idx := find_topmost_capture_node(ctx)
@@ -474,12 +629,35 @@ resolve_input :: proc(inp: ^Input_State, ctx: ^Layout_Context, events: ..Input_E
 		case Mouse_Event:
 			handle_mouse_event(inp, ctx, capture_idx, e)
 		case Focus_Loss_Event:
-			inp.hovered_id      = 0
-			inp.hover_path_len  = 0
-			inp.active_id       = 0
-			inp.active_press_id = 0
-			inp.mouse_down      = false
-		case Paste_Event, Resize_Event:
+			inp.hovered_id         = 0
+			inp.hover_path_len     = 0
+			inp.active_id          = 0
+			inp.active_press_id    = 0
+			inp.active_splitter_id = 0
+			inp.mouse_down         = false
+		case Focus_Event:
+			if !e.focused {
+				inp.hovered_id         = 0
+				inp.hover_path_len     = 0
+				inp.active_id          = 0
+				inp.active_press_id    = 0
+				inp.active_splitter_id = 0
+				inp.mouse_down         = false
+			}
+		case Paste_Event:
+			if inp.focused_id != 0 {
+				if f_idx, exists := ctx.id_map[inp.focused_id]; exists && is_node_allowed(ctx, f_idx, capture_idx) {
+					if ctx.nodes[f_idx].config.text_input {
+						slot := get_text_slot(inp, inp.focused_id)
+						for r in e.text {
+							if r >= 32 {
+								text_input_insert_rune(inp, slot, r)
+							}
+						}
+					}
+				}
+			}
+		case Resize_Event:
 		}
 	}
 
@@ -494,6 +672,14 @@ resolve_input :: proc(inp: ^Input_State, ctx: ^Layout_Context, events: ..Input_E
 apply_input_highlights :: proc(s: ^Screen, ctx: ^Layout_Context, inp: ^Input_State) {
 	for i := 0; i < len(ctx.nodes); i += 1 {
 		node := ctx.nodes[i]
+		if node.config.text_input {
+			sync_text_input_paint(s, inp, node)
+			continue
+		}
+		if node.config.splitter {
+			sync_splitter_paint(s, inp, node)
+			continue
+		}
 		if !node.config.focusable {
 			continue
 		}
@@ -717,7 +903,29 @@ handle_key_event :: proc(inp: ^Input_State, ctx: ^Layout_Context, capture_idx: i
 		}
 	}
 
-	// 2. Default focus navigation, activation, modal escape, and keyboard scrolling
+	// 2. Scoped & Global Keybinding Table (3-tier priority resolution)
+	if dispatch_keybindings(inp, ctx, capture_idx, ev) {
+		return
+	}
+
+	// 3. Focused Text Input or Splitter Widget Handling
+	if inp.focused_id != 0 {
+		if f_idx, exists := ctx.id_map[inp.focused_id]; exists && is_node_allowed(ctx, f_idx, capture_idx) {
+			f_node := ctx.nodes[f_idx]
+			if f_node.config.text_input {
+				if handle_text_input_key(inp, ctx, f_idx, capture_idx, ev) {
+					return
+				}
+			}
+			if f_node.config.splitter {
+				if handle_splitter_key(inp, ctx, f_idx, ev) {
+					return
+				}
+			}
+		}
+	}
+
+	// 4. Default focus navigation, activation, modal escape, and keyboard scrolling
 	#partial switch ev.code {
 	case .Tab:
 		if .Ctrl in ev.mods {
@@ -883,7 +1091,10 @@ handle_mouse_event :: proc(inp: ^Input_State, ctx: ^Layout_Context, capture_idx:
 	hit_idx, backdrop_modal := update_hover_at_point(inp, ctx, capture_idx, ev.x, ev.y)
 
 	switch ev.action {
-	case .Move:
+	case .Move, .Motion:
+		if inp.active_splitter_id != 0 {
+			handle_splitter_drag(inp, ctx, ev.x, ev.y)
+		}
 		if inp.mouse_down && inp.active_press_id != 0 {
 			inp.drag_delta = {ev.x - prev_pos[0], ev.y - prev_pos[1]}
 			if p_idx, ok := ctx.id_map[inp.active_press_id]; ok {
@@ -895,7 +1106,14 @@ handle_mouse_event :: proc(inp: ^Input_State, ctx: ^Layout_Context, capture_idx:
 			dispatch_three_phase(ctx, inp.hover_path[:inp.hover_path_len], ev, inp.event_handler, inp.event_userdata)
 		}
 
+	case .Leave:
+		inp.hovered_id     = 0
+		inp.hover_path_len = 0
+
 	case .Drag:
+		if inp.active_splitter_id != 0 {
+			handle_splitter_drag(inp, ctx, ev.x, ev.y)
+		}
 		if inp.active_press_id != 0 {
 			inp.drag_delta = {ev.x - prev_pos[0], ev.y - prev_pos[1]}
 			if p_idx, ok := ctx.id_map[inp.active_press_id]; ok {
@@ -906,7 +1124,17 @@ handle_mouse_event :: proc(inp: ^Input_State, ctx: ^Layout_Context, capture_idx:
 		}
 
 	case .Press:
-		if ev.button == .Left {
+		if ev.button == .Wheel_Up {
+			if inp.hover_path_len > 0 {
+				dispatch_three_phase(ctx, inp.hover_path[:inp.hover_path_len], ev, inp.event_handler, inp.event_userdata)
+			}
+			handle_mouse_scroll(inp, ctx, capture_idx, ev.x, ev.y, -1)
+		} else if ev.button == .Wheel_Down {
+			if inp.hover_path_len > 0 {
+				dispatch_three_phase(ctx, inp.hover_path[:inp.hover_path_len], ev, inp.event_handler, inp.event_userdata)
+			}
+			handle_mouse_scroll(inp, ctx, capture_idx, ev.x, ev.y, +1)
+		} else if ev.button == .Left {
 			inp.mouse_down = true
 			if hit_idx >= 0 {
 				node := ctx.nodes[hit_idx]
@@ -919,6 +1147,12 @@ handle_mouse_event :: proc(inp: ^Input_State, ctx: ^Layout_Context, capture_idx:
 					inp.active_scope_id = node.scope_id
 					inp.focus_path_len  = build_ancestor_path(ctx, hit_idx, &inp.focus_path)
 				}
+				if node.config.splitter {
+					begin_splitter_drag(inp, ctx, hit_idx, ev.x, ev.y)
+				}
+				if node.config.text_input {
+					handle_text_input_click(inp, ctx, hit_idx, ev.x)
+				}
 				dispatch_three_phase(ctx, inp.hover_path[:inp.hover_path_len], ev, inp.event_handler, inp.event_userdata)
 			} else {
 				inp.active_press_id = 0
@@ -927,11 +1161,16 @@ handle_mouse_event :: proc(inp: ^Input_State, ctx: ^Layout_Context, capture_idx:
 					inp.backdrop_clicked_id = backdrop_modal
 				}
 			}
+		} else if ev.button == .Middle && hit_idx >= 0 {
+			if ctx.nodes[hit_idx].config.splitter {
+				reset_splitter_to_default(inp, ctx, hit_idx)
+			}
 		}
 
 	case .Release:
 		if ev.button == .Left {
 			inp.mouse_down = false
+			inp.active_splitter_id = 0
 			pressed_id := inp.active_press_id
 			inp.active_press_id = 0
 			inp.active_id       = 0
@@ -1038,7 +1277,7 @@ get_scroll_slot :: proc "contextless" (inp: ^Input_State, id_hash: u64) -> ^Scro
 	idx := empty_idx if empty_idx >= 0 else 0
 	inp.scroll_slots[idx] = Scroll_Slot{
 		id_hash       = id_hash,
-		viewport_rows = 10,
+		viewport_rows = 0,
 	}
 	return &inp.scroll_slots[idx]
 }
@@ -1236,10 +1475,12 @@ move_virtual_selection :: proc "contextless" (slot: ^Scroll_Slot, delta: i32) {
 		return
 	}
 	slot.selected_row = clamp(slot.selected_row + delta, 0, slot.total_rows - 1)
-	if slot.selected_row < slot.offset {
-		slot.offset = slot.selected_row
-	} else if slot.selected_row >= slot.offset + slot.viewport_rows {
-		slot.offset = slot.selected_row - slot.viewport_rows + 1
+	v_rows := max(1, slot.viewport_rows)
+	pad := clamp(slot.scroll_padding, 0, max(0, (v_rows - 1) / 2))
+	if slot.selected_row < slot.offset + pad {
+		slot.offset = slot.selected_row - pad
+	} else if slot.selected_row >= slot.offset + v_rows - pad {
+		slot.offset = slot.selected_row - v_rows + 1 + pad
 	}
 	slot.offset = clamp(slot.offset, 0, slot.max_offset)
 }

@@ -222,3 +222,46 @@ then_state_store_contains :: proc(s: ^Suite_Ctx, id: string, expected: bool, loc
 	testing.expect_value(s.t, ok, expected, loc = loc)
 }
 
+// =============================================================================
+// Layer 2: Domain-Specific Language (Track 3: Virtual Lists, Text Input, Splitters & Palette)
+// =============================================================================
+
+upon_typing_text :: proc(s: ^Suite_Ctx, text: string) {
+	events := make([dynamic]bifrost.Input_Event, 0, len(text), context.temp_allocator)
+	for ch in text {
+		if ch == ' ' {
+			append(&events, bifrost.Key_Event{code = .Space, ch = ' '})
+		} else {
+			append(&events, bifrost.Key_Event{code = .Rune, ch = ch})
+		}
+	}
+	upon_input_events(s, ..events[:])
+}
+
+then_layout_node_count_is :: proc(s: ^Suite_Ctx, expected: int, loc := #caller_location) {
+	testing.expect_value(s.t, len(s.layout_ctx.nodes), expected, loc = loc)
+}
+
+then_virtual_scroll_is :: proc(
+	s: ^Suite_Ctx,
+	id: string,
+	expected_offset: i32,
+	expected_selected: i32,
+	loc := #caller_location,
+) {
+	testing.expect_value(s.t, bifrost.get_scroll_offset(&s.input, id), expected_offset, loc = loc)
+	testing.expect_value(s.t, bifrost.get_selected_row(&s.input, id), expected_selected, loc = loc)
+}
+
+then_text_input_value_is :: proc(s: ^Suite_Ctx, id: string, expected: string, loc := #caller_location) {
+	testing.expect_value(s.t, bifrost.get_text(&s.input, id), expected, loc = loc)
+}
+
+then_split_size_is :: proc(s: ^Suite_Ctx, id: string, expected: i32, loc := #caller_location) {
+	testing.expect_value(s.t, bifrost.get_split_size(&s.input, id), expected, loc = loc)
+}
+
+then_action_triggered_is :: proc(s: ^Suite_Ctx, action: string, expected: bool, loc := #caller_location) {
+	testing.expect_value(s.t, bifrost.was_action_triggered(&s.input, action), expected, loc = loc)
+}
+

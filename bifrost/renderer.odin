@@ -169,7 +169,7 @@ rune_display_width :: proc "contextless" (r: rune) -> u8 {
 	}
 	// Wide / Fullwidth East Asian, CJK, and Emoji blocks
 	if (r >= 0x1100 && r <= 0x115f) ||
-	   r == 0x2329 || r == 0x232a ||
+	   r == 0x2328 || r == 0x2329 || r == 0x232a ||
 	   (r >= 0x2e80 && r <= 0x303e) ||
 	   (r >= 0x3040 && r <= 0xa4cf && r != 0x303f) ||
 	   (r >= 0xac00 && r <= 0xd7a3) ||
@@ -188,8 +188,11 @@ rune_display_width :: proc "contextless" (r: rune) -> u8 {
 
 string_display_width :: proc "contextless" (str: string) -> i32 {
 	total: i32 = 0
-	for r in str {
-		total += i32(rune_display_width(r))
+	idx := 0
+	for idx < len(str) {
+		next_idx, w, _ := next_grapheme_cluster(str, idx)
+		total += w
+		idx = next_idx
 	}
 	return total
 }
@@ -396,17 +399,20 @@ put_text_clipped :: proc(
 	clip: Rect,
 ) -> i32 {
 	cur_x := x
-	for r in text {
-		w := rune_display_width(r)
-		if w == 0 {
+	idx := 0
+	for idx < len(text) {
+		next_idx, cluster_w, lead_r := next_grapheme_cluster(text, idx)
+		idx = next_idx
+		if cluster_w <= 0 {
 			continue
 		}
+		w := u8(clamp(cluster_w, 1, 2))
 		eff_bg := bg
 		if eff_bg.kind == .Default && cur_x >= 0 && cur_x < s.width && y >= 0 && y < s.height {
 			eff_bg = s.back[int(y * s.width + cur_x)].bg
 		}
 		put_cell_clipped(s, cur_x, y, Cell{
-			ch    = r,
+			ch    = lead_r,
 			fg    = fg,
 			bg    = eff_bg,
 			style = style,
@@ -547,40 +553,16 @@ draw_vertical_scrollbar :: proc(
 	fg, bg: Color,
 ) {
 	track_h := inner.h
-	if track_h <= 0 || total_content <= track_h {
+	metrics := compute_scrollbar_metrics(track_h, total_content, offset)
+	if !metrics.visible {
 		return
 	}
 
 	sb_x := (outer.x + outer.w - 1) if outer.w > inner.w else (inner.x + inner.w - 1)
 	track_y := inner.y
 
-	max_scroll := max(1, total_content - track_h)
-	clamped_off := clamp(offset, 0, max_scroll)
-
-	// 64-bit scrollbar math with interior-detent clamping
-	thumb_num := i64(track_h) * i64(track_h) + i64(total_content) / 2
-	raw_thumb_h := i32(thumb_num / i64(total_content))
-	max_thumb_h := max(1, track_h - 1)
-	thumb_h := clamp(raw_thumb_h, 1, max_thumb_h)
-	track_avail := track_h - thumb_h
-
-	thumb_offset: i32 = 0
-	if track_avail > 0 {
-		if clamped_off <= 0 {
-			thumb_offset = 0
-		} else if clamped_off >= max_scroll {
-			thumb_offset = track_avail
-		} else if track_avail == 1 {
-			thumb_offset = 1 if i64(clamped_off) * 2 >= i64(max_scroll) else 0
-		} else {
-			pos_num := i64(clamped_off) * i64(track_avail) + i64(max_scroll) / 2
-			raw_off := i32(pos_num / i64(max_scroll))
-			thumb_offset = clamp(raw_off, 1, track_avail - 1)
-		}
-	}
-
 	for row: i32 = 0; row < track_h; row += 1 {
-		is_thumb := row >= thumb_offset && row < (thumb_offset + thumb_h)
+		is_thumb := row >= metrics.thumb_offset && row < (metrics.thumb_offset + metrics.thumb_height)
 		y := track_y + row
 		eff_bg := bg
 		if eff_bg.kind == .Default && sb_x >= 0 && sb_x < s.width && y >= 0 && y < s.height {
