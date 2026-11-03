@@ -1,0 +1,12 @@
+{
+  "track_id": "xitdb_widgets_and_palette_20261103",
+  "title": "Track 3: Virtualized xitdb Lists, UTF-8 Text Filter, Splitters & Command Palette",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2026-11-03T22:38:00+08:00",
+  "patches": [
+    ".tmp/patches/track3_libvaxis_widgets_scroll_input.patch",
+    ".tmp/patches/track3_ratatui_buffer_and_virtual_widgets.patch",
+    ".tmp/patches/track3_lipgloss_box_style.patch"
+  ]
+}

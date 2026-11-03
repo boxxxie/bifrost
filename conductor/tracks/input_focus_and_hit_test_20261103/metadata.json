@@ -1,0 +1,11 @@
+{
+  "track_id": "input_focus_and_hit_test_20261103",
+  "title": "Track 2: Z-Aware Input Routing, Scoped Focus Domains & Hit-Testing",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2026-11-03T22:38:00+08:00",
+  "patches": [
+    ".tmp/patches/track2_libvaxis_vxfw_focus_routing.patch",
+    ".tmp/patches/track2_ftxui_component_modal_focus.patch"
+  ]
+}

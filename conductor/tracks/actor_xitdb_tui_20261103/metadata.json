@@ -1,0 +1,13 @@
+{
+  "track_id": "actor_xitdb_tui_20261103",
+  "title": "Core Actor-Driven Odin TUI Engine (bifrost + sleipnir + xitdb)",
+  "status": "pending",
+  "created_at": "2026-11-03T21:00:00+08:00",
+  "reference_docs": [
+    "conductor/tracks/actor_xitdb_tui_20261103/building_an_actor_driven_odin_tui.md"
+  ],
+  "dependencies": [
+    "deps/sleipnir",
+    "deps/xitdb"
+  ]
+}

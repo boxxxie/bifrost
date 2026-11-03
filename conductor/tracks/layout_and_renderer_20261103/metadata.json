@@ -1,0 +1,12 @@
+{
+  "track_id": "layout_and_renderer_20261103",
+  "title": "Track 1: Core Layout Solver, Z-Layers & Tear-Free Cell Diff Renderer",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2026-11-03T22:38:00+08:00",
+  "patches": [
+    ".tmp/patches/track1_clay_layout.patch",
+    ".tmp/patches/track1_libvaxis_screen_cells.patch",
+    ".tmp/patches/track1_notcurses_planes_blend.patch"
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "track_id": "terminal_and_input_parser_20261103",
+  "title": "Track 4: POSIX Raw Terminal Backend & ANSI / Kitty / Mouse SGR Parser",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2026-11-03T22:38:00+08:00",
+  "patches": [
+    ".tmp/patches/track4_libvaxis_parser_and_tty.patch"
+  ]
+}
