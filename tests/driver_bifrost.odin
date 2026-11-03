@@ -34,6 +34,13 @@ Suite_Ctx :: struct {
 	vt_cells:        []bifrost.Cell,
 	vt_w:            i32,
 	vt_h:            i32,
+
+	// Track 4: Headless ANSI/Kitty/Mouse SGR stream reader & decoded event queue
+	stream_reader:   bifrost.Input_Stream_Reader,
+	parsed_events:   [dynamic]bifrost.Input_Event,
+	last_parse_stat: bifrost.Parse_Status,
+	last_consumed:   int,
+
 }
 
 driver_init :: proc(s: ^Suite_Ctx, t: ^testing.T, w: i32 = 80, h: i32 = 24) {
@@ -49,6 +56,7 @@ driver_init :: proc(s: ^Suite_Ctx, t: ^testing.T, w: i32 = 80, h: i32 = 24) {
 	testing.expect_value(t, store_err, nil)
 
 	s.dispatch_steps = make([dynamic]bifrost.Dispatch_Step, 0, 16, s.alloc)
+	s.parsed_events = make([dynamic]bifrost.Input_Event, 0, 16, s.alloc)
 	s.ansi_buf = strings.builder_make(s.alloc)
 	total := int(max(0, w * h))
 	s.vt_cells = make([]bifrost.Cell, total, s.alloc)
@@ -61,6 +69,7 @@ driver_init :: proc(s: ^Suite_Ctx, t: ^testing.T, w: i32 = 80, h: i32 = 24) {
 
 driver_destroy :: proc(s: ^Suite_Ctx) {
 	free_all(context.temp_allocator)
+	delete(s.parsed_events)
 	delete(s.dispatch_steps)
 	bifrost.state_store_destroy(&s.state_store)
 	delete(s.vt_cells, s.alloc)
@@ -78,6 +87,7 @@ driver_destroy :: proc(s: ^Suite_Ctx) {
 		s.tracking_active = false
 	}
 }
+
 
 driver_begin_frame :: proc(s: ^Suite_Ctx, default_bg: bifrost.Color = {}) {
 	free_all(context.temp_allocator)
