@@ -1,0 +1,27 @@
+[submodule "deps/sleipnir"]
+	path = deps/sleipnir
+	url = https://github.com/boxxxie/sleipnir.git
+[submodule "deps/xitdb"]
+	path = deps/xitdb
+	url = https://github.com/boxxxie/odin-xitdb.git
+[submodule "reference/libvaxis"]
+	path = reference/libvaxis
+	url = https://github.com/rockorager/libvaxis.git
+[submodule "reference/clay"]
+	path = reference/clay
+	url = https://github.com/nicbarker/clay.git
+[submodule "reference/ftxui"]
+	path = reference/ftxui
+	url = https://github.com/ArthurSonzogni/FTXUI.git
+[submodule "reference/notcurses"]
+	path = reference/notcurses
+	url = https://github.com/dankamongmen/notcurses.git
+[submodule "reference/ratatui"]
+	path = reference/ratatui
+	url = https://github.com/ratatui/ratatui.git
+[submodule "reference/bubbletea"]
+	path = reference/bubbletea
+	url = https://github.com/charmbracelet/bubbletea.git
+[submodule "reference/lipgloss"]
+	path = reference/lipgloss
+	url = https://github.com/charmbracelet/lipgloss.git

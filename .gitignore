@@ -1,0 +1,9 @@
+# Build artifacts & temporary files
+.tmp/
+*.bin
+*.out
+*.o
+*.a
+*.so
+bifrost_demo
+xitdb_inspector
