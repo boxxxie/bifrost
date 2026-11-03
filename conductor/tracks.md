@@ -4,7 +4,7 @@ This file tracks all major tracks for the `bifrost` project. Each track has its 
 
 ---
 
-- [ ] **Track 1: Core Layout Solver, Z-Layers & Tear-Free Cell Diff Renderer (`bifrost/layout.odin`, `bifrost/renderer.odin`)**
+- [x] **Track 1: Core Layout Solver, Z-Layers & Tear-Free Cell Diff Renderer (`bifrost/layout.odin`, `bifrost/renderer.odin`)**
   *Link: [./tracks/layout_and_renderer_20261103/](./tracks/layout_and_renderer_20261103/)*
 
 ---
