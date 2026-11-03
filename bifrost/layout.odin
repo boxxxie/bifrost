@@ -117,6 +117,9 @@ Box_Config :: struct {
 
 	// Focus, input routing & widget role flags
 	focusable:          bool,
+	clickable:          bool,
+	hoverable:          bool,
+	draggable:          bool,
 	focus_scope:        bool,
 	capture_input:      bool,
 	scrollable:         bool,
@@ -301,6 +304,14 @@ get_inner_rect :: proc(ctx: ^Layout_Context, id: string) -> (rect: Rect, ok: boo
 		return {}, false
 	}
 	return ctx.nodes[idx].inner_rect, true
+}
+
+get_node_clip :: proc(ctx: ^Layout_Context, id: string) -> (rect: Rect, ok: bool) {
+	idx, found := ctx.id_map[hash_id(id)]
+	if !found {
+		return {}, false
+	}
+	return ctx.nodes[idx].node_clip, true
 }
 
 // =============================================================================
@@ -1079,6 +1090,7 @@ position_nodes_topological :: proc(ctx: ^Layout_Context) {
 		if parent.config.scrollable && parent.config.virtual_total_rows == 0 && main_axis == 1 {
 			max_scroll := max(0, total_main_span - inner_size[1])
 			scroll_shift = clamp(parent.config.scroll_offset, 0, max_scroll)
+			parent.config.scroll_offset = scroll_shift
 		}
 
 		main_cursor := align_offset(inner_size[main_axis], total_main_span, parent.config.main_align) - scroll_shift

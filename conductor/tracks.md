@@ -9,7 +9,7 @@ This file tracks all major tracks for the `bifrost` project. Each track has its 
 
 ---
 
-- [ ] **Track 2: Z-Aware Input Routing, Scoped Focus Domains & Hit-Testing (`bifrost/input.odin`)**
+- [x] **Track 2: Z-Aware Input Routing, Scoped Focus Domains & Hit-Testing (`bifrost/input.odin`)**
   *Link: [./tracks/input_focus_and_hit_test_20261103/](./tracks/input_focus_and_hit_test_20261103/)*
 
 ---

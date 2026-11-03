@@ -20,6 +20,12 @@ Suite_Ctx :: struct {
 
 	screen:          bifrost.Screen,
 	layout_ctx:      bifrost.Layout_Context,
+	input:           bifrost.Input_State,
+	state_store:     bifrost.Widget_State_Store,
+	dispatch_steps:  [dynamic]bifrost.Dispatch_Step,
+	consume_id:      u64,
+	consume_phase:   bifrost.Event_Phase,
+	has_consumer:    bool,
 	ansi_buf:        strings.Builder,
 	last_diff_bytes: int,
 	last_ansi_str:   string,
@@ -39,6 +45,10 @@ driver_init :: proc(s: ^Suite_Ctx, t: ^testing.T, w: i32 = 80, h: i32 = 24) {
 	err := bifrost.screen_init(&s.screen, w, h, s.alloc)
 	testing.expect_value(t, err, nil)
 
+	store_err := bifrost.state_store_init(&s.state_store, s.alloc)
+	testing.expect_value(t, store_err, nil)
+
+	s.dispatch_steps = make([dynamic]bifrost.Dispatch_Step, 0, 16, s.alloc)
 	s.ansi_buf = strings.builder_make(s.alloc)
 	total := int(max(0, w * h))
 	s.vt_cells = make([]bifrost.Cell, total, s.alloc)
@@ -51,6 +61,8 @@ driver_init :: proc(s: ^Suite_Ctx, t: ^testing.T, w: i32 = 80, h: i32 = 24) {
 
 driver_destroy :: proc(s: ^Suite_Ctx) {
 	free_all(context.temp_allocator)
+	delete(s.dispatch_steps)
+	bifrost.state_store_destroy(&s.state_store)
 	delete(s.vt_cells, s.alloc)
 	strings.builder_destroy(&s.ansi_buf)
 	bifrost.screen_destroy(&s.screen)
@@ -69,12 +81,42 @@ driver_destroy :: proc(s: ^Suite_Ctx) {
 
 driver_begin_frame :: proc(s: ^Suite_Ctx, default_bg: bifrost.Color = {}) {
 	free_all(context.temp_allocator)
+	bifrost.state_store_begin_frame(&s.state_store)
 	bifrost.begin_layout(&s.layout_ctx, s.screen.width, s.screen.height, context.temp_allocator)
 	bifrost.begin_frame(&s.screen, default_bg, context.temp_allocator)
 }
 
-driver_end_frame :: proc(s: ^Suite_Ctx) {
+driver_event_recorder :: proc(
+	node_id: u64,
+	phase: bifrost.Event_Phase,
+	event: bifrost.Input_Event,
+	userdata: rawptr,
+) -> bool {
+	_ = event
+	s := (^Suite_Ctx)(userdata)
+	id_str := ""
+	if idx, ok := s.layout_ctx.id_map[node_id]; ok {
+		id_str = s.layout_ctx.nodes[idx].id
+	}
+	append(&s.dispatch_steps, bifrost.Dispatch_Step{
+		node_id = node_id,
+		id      = id_str,
+		phase   = phase,
+	})
+	if s.has_consumer && s.consume_id == node_id && s.consume_phase == phase {
+		return true
+	}
+	return false
+}
+
+driver_end_frame :: proc(s: ^Suite_Ctx, events: ..bifrost.Input_Event) {
 	bifrost.end_layout(&s.layout_ctx)
+	clear(&s.dispatch_steps)
+	s.input.event_handler = driver_event_recorder
+	s.input.event_userdata = s
+	bifrost.resolve_input(&s.input, &s.layout_ctx, ..events)
+	bifrost.state_store_sync_from_layout(&s.state_store, &s.layout_ctx, &s.input)
+	bifrost.apply_input_highlights(&s.screen, &s.layout_ctx, &s.input)
 	bifrost.render_layout(&s.screen, &s.layout_ctx, context.temp_allocator)
 	strings.builder_reset(&s.ansi_buf)
 	s.last_diff_bytes = bifrost.screen_diff_ansi(&s.screen, &s.ansi_buf)
