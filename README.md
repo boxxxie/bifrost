@@ -18,6 +18,30 @@ An immediate-mode, actor-driven Terminal User Interface (TUI) framework for [Odi
 
 ---
 
+## Example TUIs (`examples/`)
+
+Each example runs a deterministic, zero-leak headless verification walkthrough by default (printing the rendered Unicode frame buffer) and supports `--live-tty` for interactive raw-terminal execution:
+
+```bash
+# 1. Widget & Layout Gallery (Flexbox sizing, splitters, UTF-8 input, virtual table, nested modals, Ctrl+P palette)
+odin run examples/widget_gallery
+odin run examples/widget_gallery -- --live-tty
+
+# 2. Kanban & Task Tracker (4-column focus scopes, F6 cycling, word-wrapped cards, xitdb time-travel undo/redo)
+odin run examples/kanban_board
+odin run examples/kanban_board -- --live-tty
+
+# 3. Actor-Driven Log & Metrics Monitor (Sleipnir producer actors streaming into xitdb, Datalog & moment diffs)
+odin run examples/log_monitor
+odin run examples/log_monitor -- --live-tty
+
+# 4. Sleipnir + xitdb Inspector (Time-travel database inspector with 1,000-message burst coalescing)
+odin run examples/xitdb_inspector
+odin run examples/xitdb_inspector -- --live-tty
+```
+
+---
+
 ## Conductor Tracks & Documentation
 
 - **Active Track:** [`conductor/tracks/actor_xitdb_tui_20261103/`](conductor/tracks/actor_xitdb_tui_20261103/)
