@@ -579,8 +579,19 @@ match_and_fire_binding :: proc "contextless" (
 	ev: Key_Event,
 	text_input_focused: bool,
 ) -> bool {
-	if kb.key.code != ev.code || kb.key.mods != ev.mods {
+	if kb.key.code != ev.code {
 		return false
+	}
+	kb_mods := kb.key.mods - {.Caps_Lock, .Num_Lock}
+	ev_mods := ev.mods - {.Caps_Lock, .Num_Lock}
+	if kb_mods != ev_mods {
+		// Allow shifted punctuation runes (e.g. '!', '?', ':') bound without explicit .Shift
+		// to match Kitty CSI u events that report mods = {.Shift} alongside the shifted rune.
+		is_shifted_punct := kb.key.code == .Rune && kb_mods == {} && ev_mods == {.Shift} &&
+			!(kb.key.ch >= 'a' && kb.key.ch <= 'z') && !(kb.key.ch >= 'A' && kb.key.ch <= 'Z')
+		if !is_shifted_punct {
+			return false
+		}
 	}
 	if kb.key.code == .Rune {
 		kc := kb.key.ch
@@ -598,7 +609,7 @@ match_and_fire_binding :: proc "contextless" (
 
 	// Suppress plain printable / Backspace / Left / Right shortcuts when typing inside a text_input
 	if text_input_focused && (.Allow_In_Text_Input not_in kb.flags) {
-		is_plain_typing := (.Ctrl not_in ev.mods) && (ev.code == .Rune || ev.code == .Space || ev.code == .Backspace || ev.code == .Delete || ev.code == .Left || ev.code == .Right || ev.code == .Home || ev.code == .End)
+		is_plain_typing := (.Ctrl not_in ev_mods) && (ev.code == .Rune || ev.code == .Space || ev.code == .Backspace || ev.code == .Delete || ev.code == .Left || ev.code == .Right || ev.code == .Home || ev.code == .End)
 		if is_plain_typing {
 			return false
 		}

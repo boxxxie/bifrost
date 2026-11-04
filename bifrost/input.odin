@@ -886,6 +886,9 @@ reconcile_focus :: proc(inp: ^Input_State, ctx: ^Layout_Context, capture_idx: i3
 }
 
 handle_key_event :: proc(inp: ^Input_State, ctx: ^Layout_Context, capture_idx: i32, ev: Key_Event) {
+	if ev.action == .Release {
+		return
+	}
 	if inp.focused_id != 0 {
 		if f_idx, ok := ctx.id_map[inp.focused_id]; ok {
 			inp.focus_path_len = build_ancestor_path(ctx, f_idx, &inp.focus_path)
@@ -944,6 +947,21 @@ handle_key_event :: proc(inp: ^Input_State, ctx: ^Layout_Context, capture_idx: i
 	case .Escape:
 		if capture_idx >= 0 {
 			inp.escape_modal_id = ctx.nodes[capture_idx].id_hash
+		} else if inp.focused_id != 0 {
+			// When no modal is open, pressing Escape inside a text_input transfers focus
+			// to its linked virtual list (if any) or the next focusable widget.
+			if f_idx, ok := ctx.id_map[inp.focused_id]; ok && ctx.nodes[f_idx].config.text_input {
+				slot := get_text_slot(inp, inp.focused_id)
+				if slot.linked_list_id != 0 {
+					if l_idx, l_ok := ctx.id_map[slot.linked_list_id]; l_ok && is_node_allowed(ctx, l_idx, capture_idx) {
+						inp.focused_id      = slot.linked_list_id
+						inp.active_scope_id = ctx.nodes[l_idx].scope_id
+						inp.focus_path_len  = build_ancestor_path(ctx, l_idx, &inp.focus_path)
+						return
+					}
+				}
+				cycle_focus_within_scope(inp, ctx, capture_idx, 1)
+			}
 		}
 	case .Up, .Down, .Page_Up, .Page_Down, .Home, .End:
 		handle_key_scroll(inp, ctx, capture_idx, ev.code)

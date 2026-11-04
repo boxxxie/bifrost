@@ -759,26 +759,26 @@ parse_kitty_csi_u :: proc(seq: []byte) -> (event: Input_Event, bytes_consumed: i
 		}
 	}
 
-	// Synthesize text when disambiguated printable ASCII is pressed with only Shift
-	// (or no modifiers) and no explicit text field was reported.
-	if !has_text_field && key.codepoint >= 0x20 && key.codepoint <= 0x7E {
-		non_lock_mods := key.mods - {.Caps_Lock, .Num_Lock}
-		if non_lock_mods == {.Shift} {
-			upper := key.shifted_codepoint
-			if upper == 0 {
-				upper = ascii_to_upper(key.codepoint)
-				key.shifted_codepoint = upper
-			}
-			if key.code == .Rune {
-				key.ch = upper
-			}
+	// Promote shifted codepoint for printable runes when Shift is the only active modifier,
+	// and synthesize text_buf when no explicit text field was reported.
+	non_lock_mods := key.mods - {.Caps_Lock, .Num_Lock}
+	if non_lock_mods == {.Shift} && ((key.codepoint >= 0x20 && key.codepoint <= 0x7E) || key.shifted_codepoint != 0) {
+		upper := key.shifted_codepoint
+		if upper == 0 {
+			upper = ascii_to_upper(key.codepoint)
+			key.shifted_codepoint = upper
+		}
+		if key.code == .Rune && upper != 0 {
+			key.ch = upper
+		}
+		if !has_text_field && upper != 0 {
 			encoded, w := utf8.encode_rune(upper)
 			copy(key.text_buf[:w], encoded[:w])
 			key.text_len = u8(w)
-		} else if non_lock_mods == {} {
-			key.text_buf[0] = byte(key.codepoint)
-			key.text_len = 1
 		}
+	} else if !has_text_field && non_lock_mods == {} && key.codepoint >= 0x20 && key.codepoint <= 0x7E {
+		key.text_buf[0] = byte(key.codepoint)
+		key.text_len = 1
 	}
 
 	return key, len(seq), .Ok

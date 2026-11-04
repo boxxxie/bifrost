@@ -941,6 +941,7 @@ ui_coordinator_init :: proc(
 	}
 	coord.filter.hide_tx     = true
 	coord.render_pass        = render_pass
+	coord.input.wants_focus_id = hash_id("records_pane")
 	return true
 }
 
@@ -1086,7 +1087,8 @@ ui_reduce_single_msg :: proc(state: ^UI_Coordinator_State, msg: UI_Msg) -> (is_t
 		} else if m.ch == 'f' {
 			state.pinned_moment = false
 			state.active_moment_idx = state.latest_moment_idx
-		} else if m.ch == 'q' && !state.palette_open {
+		} else if (m.ctrl && (m.ch == 'q' || m.ch == 'Q' || m.ch == 'c' || m.ch == 'C')) ||
+		          ((m.ch == 'q' || m.ch == 'Q') && !state.palette_open && !is_focused(&state.input, "search_box")) {
 			state.quit_requested = true
 		}
 

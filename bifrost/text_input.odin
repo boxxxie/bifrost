@@ -396,9 +396,10 @@ handle_text_input_key :: proc "contextless" (
 	slot := get_text_slot(inp, node.id_hash)
 	full_text := string(slot.buf[:slot.len])
 	slot.cursor_byte = clamp(slot.cursor_byte, 0, slot.len)
+	eff_mods := ev.mods - {.Caps_Lock, .Num_Lock}
 
 	// 1. Telescope-style linked virtual list navigation (Up / Down / Page_Up / Page_Down)
-	if slot.linked_list_id != 0 && ev.mods == {} {
+	if slot.linked_list_id != 0 && eff_mods == {} {
 		if list_idx, ok := ctx.id_map[slot.linked_list_id]; ok && is_node_allowed(ctx, list_idx, capture_idx) {
 			list_node := &ctx.nodes[list_idx]
 			list_slot := get_scroll_slot(inp, slot.linked_list_id)
@@ -536,12 +537,12 @@ handle_text_input_key :: proc "contextless" (
 		return true
 
 	case .Space:
-		if ev.mods - {.Shift} == {} {
+		if eff_mods - {.Shift} == {} {
 			return text_input_insert_rune(inp, slot, ' ')
 		}
 
 	case .Rune:
-		if (.Ctrl not_in ev.mods) && (.Alt not_in ev.mods) && ev.ch >= 32 {
+		if (.Ctrl not_in eff_mods) && (.Alt not_in eff_mods) && ev.ch >= 32 {
 			return text_input_insert_rune(inp, slot, ev.ch)
 		}
 	}
