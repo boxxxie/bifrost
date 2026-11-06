@@ -98,6 +98,29 @@ MODULE_STATUSES := [4]string{
 
 TOTAL_GALLERY_ROWS :: 500
 
+Gallery_Action :: enum u8 {
+	None = 0,
+	Theme_Cycle,
+	Style_Cycle,
+	Modal_Open,
+	Jump_Top,
+	Jump_Bottom,
+	Filter_Focus,
+	Filter_Clear,
+	Quit,
+}
+
+Gallery_Actions :: struct {
+	Theme_Cycle:  Gallery_Action `bifrost:"key=<C-t>, id=theme.cycle, allow_in_edit=true, desc=Theme, label=Cycle Color Theme (Nord / Tokyo / Gruvbox), category=Appearance"`,
+	Style_Cycle:  Gallery_Action `bifrost:"key=<F2>, id=style.cycle, policy=global, allow_in_edit=true, desc='Bindings (F2)', label='Cycle Keymap Style (Vim / Helix / Emacs) [F2]', category=Keymap"`,
+	Modal_Open:   Gallery_Action `bifrost:"vim=m, helix=<Space> m, emacs=<C-x> m, id=modal.open, desc=Inspect, label=Open Package Inspector Modal (z=20), category=View"`,
+	Jump_Top:     Gallery_Action `bifrost:"vim=g g, helix=g g, emacs=<C-x> [, id=pkg.jump_top, scope=pkg_*, desc=Top Row, label=Jump to First Package Row, category=Navigation"`,
+	Jump_Bottom:  Gallery_Action `bifrost:"vim=G|g e, helix=g e, emacs=<C-x> ], id=pkg.jump_bottom, scope=pkg_*, desc='Bottom, Last', label='Jump to Bottom, Last Package Row', category=Navigation"`,
+	Filter_Focus: Gallery_Action `bifrost:"vim=/, helix=<Space> /, emacs=<C-s>, id=filter.focus, desc=Filter, label=Focus Search Input (/), category=Filter"`,
+	Filter_Clear: Gallery_Action `bifrost:"key=<C-l>, id=filter.clear, allow_in_edit=true, desc=Clear, label=Clear Package Search Filter, category=Filter"`,
+	Quit:         Gallery_Action `bifrost:"vim=q|<C-q>|<C-c>, helix=q|<C-q>|<C-c>, emacs=<C-x> c|<C-q>, id=app.quit, policy=global, desc=Quit, label=Quit Widget Gallery, category=System"`,
+}
+
 Gallery_App :: struct {
 	screen:             bifrost.Screen,
 	layout_ctx:         bifrost.Layout_Context,
@@ -148,27 +171,15 @@ gallery_init :: proc(app: ^Gallery_App, cols, rows: i32, allocator := context.al
 		{header = "Status",   kind = .Fill,         value = 1,  min_width = 8,  align = .Right},
 	}
 
-	// Register global & scoped keybindings + Command Palette
+	// Register declarative struct-tag key-chord bindings + Command Palette
 	bifrost.clear_keybindings(&app.input)
 	bifrost.command_palette_init(&app.palette, &app.input)
+	_ = bifrost.register_actions_struct(&app.input, &app.palette, Gallery_Actions{})
 
-	bifrost.bind_key(&app.input, bifrost.Key_Event{code = .Rune, ch = 't', mods = {.Ctrl}}, "theme.cycle", .Root_And_Scopes, "", {.Allow_In_Text_Input})
-	bifrost.bind_key(&app.input, bifrost.Key_Event{code = .Rune, ch = 'm'}, "modal.open", .Root_And_Scopes)
-	bifrost.bind_key(&app.input, bifrost.Key_Event{code = .Rune, ch = '/'}, "filter.focus", .Root_And_Scopes)
-	bifrost.bind_key(&app.input, bifrost.Key_Event{code = .Rune, ch = 'l', mods = {.Ctrl}}, "filter.clear", .Root_And_Scopes, "", {.Allow_In_Text_Input})
-	bifrost.bind_key(&app.input, bifrost.Key_Event{code = .Rune, ch = 'q'}, "app.quit", .Root_And_Scopes)
-	bifrost.bind_key(&app.input, bifrost.Key_Event{code = .Rune, ch = 'q', mods = {.Ctrl}}, "app.quit", .Global_Always, "", {.Allow_In_Text_Input})
-	bifrost.bind_key(&app.input, bifrost.Key_Event{code = .Rune, ch = 'c', mods = {.Ctrl}}, "app.quit", .Global_Always, "", {.Allow_In_Text_Input})
 	bifrost.bind_splitter_key(&app.input, bifrost.Key_Event{code = .Rune, ch = 'b', mods = {.Ctrl}}, "gallery_split", -4, "split.narrow")
 	bifrost.bind_splitter_key(&app.input, bifrost.Key_Event{code = .Rune, ch = 'f', mods = {.Ctrl}}, "gallery_split", +4, "split.widen")
-
-	bifrost.register_command(&app.palette, "theme.cycle",  "Cycle Color Theme (Nord / Tokyo / Gruvbox)", "Appearance")
-	bifrost.register_command(&app.palette, "modal.open",   "Open Package Inspector Modal (z=20)",        "View")
-	bifrost.register_command(&app.palette, "filter.focus", "Focus Search Input (/)",                     "Filter")
-	bifrost.register_command(&app.palette, "filter.clear", "Clear Package Search Filter",                "Filter")
-	bifrost.register_command(&app.palette, "split.widen",  "Widen Sidebar Splitter (+4 cols)",           "Layout")
-	bifrost.register_command(&app.palette, "split.narrow", "Narrow Sidebar Splitter (-4 cols)",          "Layout")
-	bifrost.register_command(&app.palette, "app.quit",     "Quit Widget Gallery",                        "System")
+	bifrost.register_command(&app.palette, "split.widen",  "Widen Sidebar Splitter (+4 cols)",  "Layout")
+	bifrost.register_command(&app.palette, "split.narrow", "Narrow Sidebar Splitter (-4 cols)", "Layout")
 
 	return true
 }
@@ -199,7 +210,7 @@ build_gallery_ui :: proc(app: ^Gallery_App, out_slice: ^bifrost.Virtual_Slice) {
 		format_package_row,
 	)
 
-	if bifrost.container(&app.layout_ctx, "root", bifrost.Box_Config{
+	if bifrost.ui_scope(&app.layout_ctx, &app.screen, "gallery_root", bifrost.Scope_Config{
 		dir    = .Column,
 		width  = bifrost.fixed(w),
 		height = bifrost.fixed(h),
@@ -230,12 +241,12 @@ build_gallery_ui :: proc(app: ^Gallery_App, out_slice: ^bifrost.Virtual_Slice) {
 		})
 
 		// 2. Main Body Row (Sidebar + Interactive Splitter + Content Area)
-		if bifrost.container(&app.layout_ctx, "main_body", bifrost.Box_Config{
+		if bifrost.ui_scope(&app.layout_ctx, &app.screen, "main_body", bifrost.Scope_Config{
 			dir    = .Row,
 			width  = bifrost.grow(1),
 			height = bifrost.grow(1),
 		}) {
-			// 2a. Left Sidebar Scope
+			// 2a. Left Sidebar Scope (`.Loop_Spatial` + `scrollable` same-frame scroll-into-view)
 			bifrost.set_paint(&app.screen, "sidebar", bifrost.Paint_Spec{
 				title       = "Controls & Filter",
 				fg          = pal.text_fg,
@@ -252,11 +263,12 @@ build_gallery_ui :: proc(app: ^Gallery_App, out_slice: ^bifrost.Virtual_Slice) {
 				padding     = bifrost.pad_xy(1, 0),
 				gap         = 1,
 				border      = .Rounded,
-				focus_scope = true,
+				focus_flags = {.Focus_Scope, .Loop_Spatial},
+				scrollable  = true,
 			}) {
-				bifrost.ui_label(&app.layout_ctx, &app.screen, "lbl_search", "Search (linked to table):", pal.muted_fg)
+				// Immediate `.Auto_Edit` search input linked to `pkg_list`
 				bifrost.ui_text_input(&app.layout_ctx, &app.screen, &app.input, "filter_input", bifrost.Text_Input_Config{
-					placeholder    = "Filter modules (↑/↓ navigates)...",
+					placeholder    = "Auto-edit (↑/↓ rows)...",
 					linked_list_id = "pkg_list",
 					width          = bifrost.grow(1),
 					height         = bifrost.fixed(3),
@@ -265,7 +277,21 @@ build_gallery_ui :: proc(app: ^Gallery_App, out_slice: ^bifrost.Virtual_Slice) {
 					bg             = pal.bg,
 					placeholder_fg = pal.muted_fg,
 					border_fg      = pal.border_fg,
-					title          = "UTF-8 Input",
+					title          = "Auto-Edit Search (/)",
+				})
+
+				// Two-stage text input (`Enter` enters edit mode, `Escape` returns to 2D nav)
+				bifrost.ui_text_input(&app.layout_ctx, &app.screen, &app.input, "notes_input", bifrost.Text_Input_Config{
+					placeholder    = "Enter edits, Esc navs...",
+					width          = bifrost.grow(1),
+					height         = bifrost.fixed(3),
+					border         = .Plain,
+					fg             = pal.text_fg,
+					bg             = pal.bg,
+					placeholder_fg = pal.muted_fg,
+					border_fg      = pal.border_fg,
+					title          = "Two-Stage Note (Enter)",
+					two_stage      = true,
 				})
 
 				bifrost.ui_button(&app.layout_ctx, &app.screen, "btn_theme", bifrost.Button_Spec{
@@ -273,6 +299,13 @@ build_gallery_ui :: proc(app: ^Gallery_App, out_slice: ^bifrost.Virtual_Slice) {
 					width  = bifrost.grow(1),
 					height = bifrost.fixed(1),
 					fg     = pal.text_fg,
+					bg     = pal.header_bg,
+				})
+				bifrost.ui_button(&app.layout_ctx, &app.screen, "btn_style", bifrost.Button_Spec{
+					label  = fmt.tprintf("Bindings: %s (F2)", bifrost.keymap_style_name(app.input.keymap_style)),
+					width  = bifrost.grow(1),
+					height = bifrost.fixed(1),
+					fg     = pal.accent_fg,
 					bg     = pal.header_bg,
 				})
 				bifrost.ui_button(&app.layout_ctx, &app.screen, "btn_modal", bifrost.Button_Spec{
@@ -303,6 +336,15 @@ build_gallery_ui :: proc(app: ^Gallery_App, out_slice: ^bifrost.Virtual_Slice) {
 					height = bifrost.fixed(5),
 					border = .Plain,
 				})
+
+				// Below-fold action button exercising same-frame `scroll_node_into_view` + `.Loop_Spatial` wrap
+				bifrost.ui_button(&app.layout_ctx, &app.screen, "btn_clear_filter", bifrost.Button_Spec{
+					label  = "Clear Filter (^L)",
+					width  = bifrost.grow(1),
+					height = bifrost.fixed(1),
+					fg     = pal.accent_fg,
+					bg     = pal.header_bg,
+				})
 			}
 
 			// 2b. Interactive 1-Cell Vertical Splitter
@@ -317,96 +359,135 @@ build_gallery_ui :: proc(app: ^Gallery_App, out_slice: ^bifrost.Virtual_Slice) {
 				active_fg    = pal.accent_fg,
 			})
 
-			// 2c. Right Workspace Scope (Flexbox Sizing Demo + Virtualized Table)
+			// 2c. Right Workspace Column (2D `.Wrap_Spatial` Flexbox Grid + 2D Virtualized Table)
 			if bifrost.container(&app.layout_ctx, "workspace", bifrost.Box_Config{
-				dir         = .Column,
-				width       = bifrost.grow(1),
-				height      = bifrost.grow(1),
-				focus_scope = true,
+				dir    = .Column,
+				width  = bifrost.grow(1),
+				height = bifrost.grow(1),
 			}) {
-				// Top Flexbox Sizing Cards (Fixed vs Grow(1) vs Grow(2) vs Percent(0.25))
-				if bifrost.container(&app.layout_ctx, "flex_demo_row", bifrost.Box_Config{
-					dir    = .Row,
-					width  = bifrost.grow(1),
-					height = bifrost.fixed(3),
-					gap    = 1,
+				// Top 2x2 Flexbox Sizing Grid (`{.Focus_Scope, .Focusable, .Wrap_Spatial}` with `Enter`/`Escape` drill)
+				is_grid_focused := bifrost.is_focused(&app.input, "flex_grid")
+				bifrost.set_paint(&app.screen, "flex_grid", bifrost.Paint_Spec{
+					title       = "2D Flexbox Grid (.Wrap_Spatial — Enter/Esc)",
+					fg          = pal.text_fg,
+					bg          = pal.panel_bg,
+					border_fg   = pal.sel_fg if is_grid_focused else pal.border_fg,
+					title_fg    = pal.accent_fg,
+					title_style = {.Bold},
+					fill_bg     = true,
+				})
+				if bifrost.container(&app.layout_ctx, "flex_grid", bifrost.Box_Config{
+					dir         = .Column,
+					width       = bifrost.grow(1),
+					height      = bifrost.fixed(5),
+					padding     = bifrost.pad_xy(1, 0),
+					gap         = 1,
+					border      = .Rounded,
+					focus_flags = {.Focus_Scope, .Focusable, .Wrap_Spatial},
 				}) {
-					bifrost.set_paint(&app.screen, "card_fixed", bifrost.Paint_Spec{
-						title = "Fixed", fg = pal.text_fg, bg = pal.panel_bg, border_fg = pal.border_fg, fill_bg = true,
-					})
-					bifrost.leaf(&app.layout_ctx, "card_fixed", 0, 3, bifrost.Box_Config{
-						width = bifrost.fixed(14), height = bifrost.fixed(3), border = .Plain, main_align = .Center,
-					})
+					if bifrost.container(&app.layout_ctx, "flex_row_top", bifrost.Box_Config{
+						dir    = .Row,
+						width  = bifrost.grow(1),
+						height = bifrost.fixed(1),
+						gap    = 1,
+					}) {
+						bifrost.set_paint(&app.screen, "card_fixed", bifrost.Paint_Spec{
+							fg = pal.text_fg, bg = pal.header_bg, fill_bg = true,
+						})
+						bifrost.leaf(&app.layout_ctx, "card_fixed", 0, 1, bifrost.Box_Config{
+							width = bifrost.fixed(16), height = bifrost.fixed(1), main_align = .Center,
+							focusable = true, clickable = true, hoverable = true,
+						})
 
-					bifrost.set_paint(&app.screen, "card_grow1", bifrost.Paint_Spec{
-						title = "Grow(1)", fg = pal.accent_fg, bg = pal.panel_bg, border_fg = pal.border_fg, fill_bg = true,
-					})
-					bifrost.leaf(&app.layout_ctx, "card_grow1", 0, 3, bifrost.Box_Config{
-						width = bifrost.grow(1, min = 13), height = bifrost.fixed(3), border = .Plain, main_align = .Center,
-					})
+						bifrost.set_paint(&app.screen, "card_grow1", bifrost.Paint_Spec{
+							fg = pal.accent_fg, bg = pal.header_bg, fill_bg = true,
+						})
+						bifrost.leaf(&app.layout_ctx, "card_grow1", 0, 1, bifrost.Box_Config{
+							width = bifrost.grow(1, min = 13), height = bifrost.fixed(1), main_align = .Center,
+							focusable = true, clickable = true, hoverable = true,
+						})
+					}
 
-					bifrost.set_paint(&app.screen, "card_grow2", bifrost.Paint_Spec{
-						title = "Grow(2)", fg = pal.sel_fg, bg = pal.panel_bg, border_fg = pal.border_fg, fill_bg = true,
-					})
-					bifrost.leaf(&app.layout_ctx, "card_grow2", 0, 3, bifrost.Box_Config{
-						width = bifrost.grow(2), height = bifrost.fixed(3), border = .Plain, main_align = .Center,
-					})
+					if bifrost.container(&app.layout_ctx, "flex_row_bot", bifrost.Box_Config{
+						dir    = .Row,
+						width  = bifrost.grow(1),
+						height = bifrost.fixed(1),
+						gap    = 1,
+					}) {
+						bifrost.set_paint(&app.screen, "card_grow2", bifrost.Paint_Spec{
+							fg = pal.sel_fg, bg = pal.header_bg, fill_bg = true,
+						})
+						bifrost.leaf(&app.layout_ctx, "card_grow2", 0, 1, bifrost.Box_Config{
+							width = bifrost.grow(2, min = 15), height = bifrost.fixed(1), main_align = .Center,
+							focusable = true, clickable = true, hoverable = true,
+						})
 
-					bifrost.set_paint(&app.screen, "card_pct", bifrost.Paint_Spec{
-						title = "Percent", fg = pal.muted_fg, bg = pal.panel_bg, border_fg = pal.border_fg, fill_bg = true,
-					})
-					bifrost.leaf(&app.layout_ctx, "card_pct", 0, 3, bifrost.Box_Config{
-						width = bifrost.percent(0.25, min = 12), height = bifrost.fixed(3), border = .Plain, main_align = .Center,
-					})
+						bifrost.set_paint(&app.screen, "card_pct", bifrost.Paint_Spec{
+							fg = pal.muted_fg, bg = pal.header_bg, fill_bg = true,
+						})
+						bifrost.leaf(&app.layout_ctx, "card_pct", 0, 1, bifrost.Box_Config{
+							width = bifrost.percent(0.35, min = 12), height = bifrost.fixed(1), main_align = .Center,
+							focusable = true, clickable = true, hoverable = true,
+						})
+					}
 				}
 
-				// Virtualized Module Table (`ui_virtual_list`)
-				if bifrost.ui_virtual_list(
-					&app.layout_ctx,
-					&app.screen,
-					&app.input,
-					"pkg_list",
-					filtered_total,
-					bifrost.Virtual_List_Config{
-						title          = fmt.tprintf("Virtualized Modules (%d rows, O(1) visible slice)", filtered_total),
-						width          = bifrost.grow(1),
-						height         = bifrost.grow(1),
-						border         = .Rounded,
-						fg             = pal.text_fg,
-						bg             = pal.panel_bg,
-						border_fg      = pal.border_fg,
-						title_fg       = pal.accent_fg,
-						scroll_step    = 3,
-						scroll_padding = 1,
-						fallback_rows  = max(4, h - 8),
-					},
-					out_slice,
-				) {
-					for vis_r := out_slice.start_row; vis_r < out_slice.end_row; vis_r += 1 {
-						row_id := fmt.tprintf("pkg_row_%d", vis_r)
-						bifrost.leaf(&app.layout_ctx, row_id, 20, 1, bifrost.Box_Config{
-							width     = bifrost.grow(1),
-							height    = bifrost.fixed(1),
-							clickable = true,
-							hoverable = true,
-						})
+				// Virtualized 2D Module Table (`ui_virtual_list` inside `pkg_scope`)
+				pkg_slot := bifrost.get_scroll_slot(&app.input, bifrost.hash_id("pkg_list"))
+				active_col := clamp(pkg_slot.selected_col, 0, i32(len(app.col_specs) - 1))
+				if bifrost.ui_scope(&app.layout_ctx, &app.screen, "pkg_scope", bifrost.Scope_Config{
+					dir    = .Column,
+					width  = bifrost.grow(1),
+					height = bifrost.grow(1),
+				}) {
+					if bifrost.ui_virtual_list(
+						&app.layout_ctx,
+						&app.screen,
+						&app.input,
+						"pkg_list",
+						filtered_total,
+						bifrost.Virtual_List_Config{
+							title          = fmt.tprintf("Virtualized Modules (%d rows | Col: %s)", filtered_total, app.col_specs[active_col].header),
+							width          = bifrost.grow(1),
+							height         = bifrost.grow(1),
+							border         = .Rounded,
+							fg             = pal.text_fg,
+							bg             = pal.panel_bg,
+							border_fg      = pal.border_fg,
+							title_fg       = pal.accent_fg,
+							scroll_step    = 3,
+							scroll_padding = 1,
+							fallback_rows  = max(4, h - 10),
+							total_cols     = len(app.col_specs),
+						},
+						out_slice,
+					) {
+						for vis_r := out_slice.start_row; vis_r < out_slice.end_row; vis_r += 1 {
+							row_id := fmt.tprintf("pkg_row_%d", vis_r)
+							bifrost.leaf(&app.layout_ctx, row_id, 20, 1, bifrost.Box_Config{
+								width     = bifrost.grow(1),
+								height    = bifrost.fixed(1),
+								clickable = true,
+								hoverable = true,
+							})
+						}
 					}
 				}
 			}
 		}
 
-		// 3. Footer Bar
-		footer_text := " /: search | Tab/F6: focus | ↑/↓/PgUp/PgDn: scroll | ^B/^F: split | m: modal | ^P: palette | q/^Q: quit"
-		bifrost.set_paint(&app.screen, "footer_bar", bifrost.Paint_Spec{
-			text    = footer_text,
-			fg      = pal.muted_fg,
-			bg      = pal.header_bg,
-			fill_bg = true,
+		// 3. Live Focus Breadcrumb Bar + Contextual Key-Hint Bar
+		bifrost.ui_focus_breadcrumb_bar(&app.layout_ctx, &app.screen, &app.input, "gallery_breadcrumb", bifrost.Breadcrumb_Bar_Config{
+			fg        = pal.muted_fg,
+			bg        = pal.header_bg,
+			active_fg = pal.sel_fg,
+			sep_fg    = pal.border_fg,
 		})
-		bifrost.leaf(&app.layout_ctx, "footer_bar", w, 1, bifrost.Box_Config{
-			width  = bifrost.grow(1),
-			height = bifrost.fixed(1),
-			text   = footer_text,
+		bifrost.ui_key_hint_bar(&app.layout_ctx, &app.screen, &app.input, "gallery_hint_bar", bifrost.Key_Hint_Bar_Config{
+			key_fg  = pal.accent_fg,
+			desc_fg = pal.text_fg,
+			sep_fg  = pal.border_fg,
+			bg      = pal.bg,
 		})
 	}
 
@@ -488,8 +569,9 @@ build_gallery_ui :: proc(app: ^Gallery_App, out_slice: ^bifrost.Virtual_Slice) {
 		}
 	}
 
-	// 6. Command Palette (`z_layer = 30`)
+	// 6. Command Palette (`z_layer = 30`) & Pending Chord Which-Key Overlay (`z_layer = 28`)
 	bifrost.ui_command_palette(&app.layout_ctx, &app.screen, &app.input, &app.palette, 56, 6)
+	bifrost.ui_which_key_overlay(&app.layout_ctx, &app.screen, &app.input, "gallery_which_key")
 
 	bifrost.end_layout(&app.layout_ctx)
 
@@ -511,7 +593,7 @@ build_gallery_ui :: proc(app: ^Gallery_App, out_slice: ^bifrost.Virtual_Slice) {
 	}
 	if r, ok := bifrost.get_rect(&app.layout_ctx, "card_pct"); ok {
 		p := app.screen.paints[bifrost.hash_id("card_pct")]
-		p.text = fmt.tprintf("Pct(25%%)=%dc", r.w)
+		p.text = fmt.tprintf("Pct(35%%)=%dc", r.w)
 		app.screen.paints[bifrost.hash_id("card_pct")] = p
 	}
 }
@@ -556,6 +638,25 @@ paint_custom_overlays :: proc(app: ^Gallery_App, slice: bifrost.Virtual_Slice) {
 
 		spans: [4]bifrost.Table_Column_Span
 		bifrost.resolve_table_columns(app.col_specs[:], spans[:], usable_rect, 2, 2)
+		bifrost.register_virtual_table_col_spans(&app.input, "pkg_list", spans[:])
+
+		wk_rect, has_wk := bifrost.get_rect(&app.layout_ctx, "gallery_which_key")
+		wk_saved: []bifrost.Cell
+		if has_wk && wk_rect.w > 0 && wk_rect.h > 0 {
+			wk_saved = make([]bifrost.Cell, int(wk_rect.w * wk_rect.h), context.temp_allocator)
+			for ry: i32 = 0; ry < wk_rect.h; ry += 1 {
+				sy := wk_rect.y + ry
+				if sy < 0 || sy >= app.screen.height {
+					continue
+				}
+				for rx: i32 = 0; rx < wk_rect.w; rx += 1 {
+					sx := wk_rect.x + rx
+					if sx >= 0 && sx < app.screen.width {
+						wk_saved[int(ry * wk_rect.w + rx)] = app.screen.back[int(sy * app.screen.width + sx)]
+					}
+				}
+			}
+		}
 
 		for vis_r := slice.start_row; vis_r < slice.end_row; vis_r += 1 {
 			row_id := fmt.tprintf("pkg_row_%d", vis_r)
@@ -574,6 +675,7 @@ paint_custom_overlays :: proc(app: ^Gallery_App, slice: bifrost.Virtual_Slice) {
 			}
 
 			is_sel := vis_r == slice.selected_row
+			sel_col := clamp(slice.selected_col, 0, 3)
 			row_bg := pal.sel_bg if is_sel else pal.panel_bg
 			row_fg := pal.sel_fg if is_sel else pal.text_fg
 			row_st := bifrost.Style_Flags{.Bold} if is_sel else bifrost.Style_Flags{}
@@ -588,10 +690,32 @@ paint_custom_overlays :: proc(app: ^Gallery_App, slice: bifrost.Virtual_Slice) {
 			cat_str := MODULE_CATEGORIES[int(max(0, db_row)) % len(MODULE_CATEGORIES)]
 			st_str  := MODULE_STATUSES[int(max(0, db_row)) % len(MODULE_STATUSES)]
 
-			bifrost.draw_table_cell(&app.screen, spans[0], row_rect.y, row_clip, id_str,  pal.muted_fg if !is_sel else row_fg, row_bg, row_st)
-			bifrost.draw_table_cell(&app.screen, spans[1], row_rect.y, row_clip, mod_str, row_fg, row_bg, row_st)
-			bifrost.draw_table_cell(&app.screen, spans[2], row_rect.y, row_clip, cat_str, pal.accent_fg if !is_sel else row_fg, row_bg, row_st)
-			bifrost.draw_table_cell(&app.screen, spans[3], row_rect.y, row_clip, st_str,  pal.muted_fg if !is_sel else row_fg, row_bg, row_st)
+			cell_texts := [4]string{id_str, mod_str, cat_str, st_str}
+			cell_fgs   := [4]bifrost.Color{pal.muted_fg, pal.text_fg, pal.accent_fg, pal.muted_fg}
+			for col_i := 0; col_i < 4; col_i += 1 {
+				c_fg := row_fg if is_sel else cell_fgs[col_i]
+				c_st := row_st
+				if is_sel && i32(col_i) == sel_col {
+					c_fg = pal.accent_fg
+					c_st = {.Bold, .Reverse}
+				}
+				bifrost.draw_table_cell(&app.screen, spans[col_i], row_rect.y, row_clip, cell_texts[col_i], c_fg, row_bg, c_st)
+			}
+		}
+
+		if len(wk_saved) > 0 {
+			for ry: i32 = 0; ry < wk_rect.h; ry += 1 {
+				sy := wk_rect.y + ry
+				if sy < 0 || sy >= app.screen.height {
+					continue
+				}
+				for rx: i32 = 0; rx < wk_rect.w; rx += 1 {
+					sx := wk_rect.x + rx
+					if sx >= 0 && sx < app.screen.width {
+						app.screen.back[int(sy * app.screen.width + sx)] = wk_saved[int(ry * wk_rect.w + rx)]
+					}
+				}
+			}
 		}
 	}
 }
@@ -623,16 +747,40 @@ handle_gallery_interactions :: proc(app: ^Gallery_App, slice: bifrost.Virtual_Sl
 		return true
 	}
 
-	// Sidebar button activations
-	if bifrost.was_activated(&app.input, "btn_theme") || bifrost.was_action_triggered(&app.input, "theme.cycle") {
+	// Typed Gallery_Action dispatch + sidebar button activations
+	act, has_act := bifrost.triggered_action(&app.input, Gallery_Action)
+	if bifrost.was_activated(&app.input, "btn_theme") || (has_act && act == .Theme_Cycle) || bifrost.was_action_triggered(&app.input, "theme.cycle") {
 		app.theme = Theme_Preset((int(app.theme) + 1) % len(Theme_Preset))
 		app.last_action = fmt.tprintf("theme:%s", THEMES[app.theme].name)
 		app.action_count += 1
 		changed = true
 	}
-	if bifrost.was_activated(&app.input, "btn_modal") || bifrost.was_action_triggered(&app.input, "modal.open") {
+	if bifrost.was_activated(&app.input, "btn_style") || (has_act && act == .Style_Cycle) || bifrost.was_action_triggered(&app.input, "style.cycle") {
+		next_st := bifrost.cycle_keymap_style(&app.input)
+		app.last_action = fmt.tprintf("style:%s", bifrost.keymap_style_name(next_st))
+		app.action_count += 1
+		changed = true
+	}
+	if bifrost.was_activated(&app.input, "btn_modal") || (has_act && act == .Modal_Open) || bifrost.was_action_triggered(&app.input, "modal.open") {
 		app.detail_modal_open = true
 		app.last_action = "modal.detail.opened"
+		app.action_count += 1
+		changed = true
+	}
+	if has_act && act == .Jump_Top {
+		slot := bifrost.get_scroll_slot(&app.input, bifrost.hash_id("pkg_list"))
+		slot.selected_row = 0
+		slot.offset       = 0
+		app.last_action   = "pkg.jump_top"
+		app.action_count += 1
+		changed = true
+	}
+	if has_act && act == .Jump_Bottom {
+		slot := bifrost.get_scroll_slot(&app.input, bifrost.hash_id("pkg_list"))
+		last_r := max(i32(0), slot.total_rows - 1)
+		slot.selected_row = last_r
+		slot.offset       = max(i32(0), last_r - max(i32(1), slot.viewport_rows) + 1)
+		app.last_action   = "pkg.jump_bottom"
 		app.action_count += 1
 		changed = true
 	}
@@ -646,37 +794,46 @@ handle_gallery_interactions :: proc(app: ^Gallery_App, slice: bifrost.Virtual_Sl
 		app.action_count += 1
 		changed = true
 	}
-	if bifrost.was_action_triggered(&app.input, "filter.focus") {
+	if (has_act && act == .Filter_Focus) || bifrost.was_action_triggered(&app.input, "filter.focus") {
 		app.input.wants_focus_id = bifrost.hash_id("filter_input")
 		app.last_action = "filter.focused"
 		app.action_count += 1
 		changed = true
 	}
-	if bifrost.was_action_triggered(&app.input, "filter.clear") {
+	if bifrost.was_activated(&app.input, "btn_clear_filter") || (has_act && act == .Filter_Clear) || bifrost.was_action_triggered(&app.input, "filter.clear") {
 		bifrost.set_text(&app.input, "filter_input", "")
 		app.last_action = "filter.cleared"
 		app.action_count += 1
 		changed = true
+	}
+
+	grid_cards := [4]string{"card_fixed", "card_grow1", "card_grow2", "card_pct"}
+	for card_id in grid_cards {
+		if bifrost.was_activated(&app.input, card_id) {
+			app.last_action = fmt.tprintf("grid:%s", card_id)
+			app.action_count += 1
+			changed = true
+		}
 	}
 	if bifrost.was_action_triggered(&app.input, "split.widen") || bifrost.was_action_triggered(&app.input, "split.narrow") {
 		app.last_action = app.input.triggered_action_name
 		app.action_count += 1
 		changed = true
 	}
-	if bifrost.was_action_triggered(&app.input, "app.quit") {
+	if (has_act && act == .Quit) || bifrost.was_action_triggered(&app.input, "app.quit") {
 		app.quit_requested = true
 		app.last_action = "app.quit"
 		changed = true
 	}
 
-	// Clicking a row in the virtual table selects it
+	// Clicking a row in the virtual table selects both its row and the clicked column
 	if app.input.clicked_id != 0 {
 		for vis_r := slice.start_row; vis_r < slice.end_row; vis_r += 1 {
 			row_id := fmt.tprintf("pkg_row_%d", vis_r)
 			if app.input.clicked_id == bifrost.hash_id(row_id) {
 				slot := bifrost.get_scroll_slot(&app.input, bifrost.hash_id("pkg_list"))
 				slot.selected_row = vis_r
-				app.last_action = fmt.tprintf("row.select:%d", vis_r)
+				app.last_action = fmt.tprintf("row.select:%d:col%d", vis_r, slot.selected_col)
 				changed = true
 				break
 			}
@@ -786,19 +943,59 @@ run_gallery :: proc(live_tty: bool) -> bool {
 		step_gallery_frame(&app, bifrost.Key_Event{code = .Rune, ch = 'f', mods = {.Ctrl}})
 		step_gallery_frame(&app, bifrost.Key_Event{code = .Rune, ch = 't', mods = {.Ctrl}})
 
-		// 4. Clear filter, press Escape to return focus from filter_input -> pkg_list, open Detail Modal (z=20) -> Nested Confirm Modal (z=25) -> Dismiss both
-		bifrost.set_text(&app.input, "filter_input", "")
+		// 4. Clear filter via Ctrl+L, press Escape to return focus from filter_input -> pkg_list,
+		//    step down and fire 2-step chord "g g" (.Jump_Top), step 2D columns ('l'/'h'),
+		//    bubble left to splitter, exercise [RESIZE] submode (Enter -> 'l' -> Esc), and enter sidebar
+		step_gallery_frame(&app, bifrost.Key_Event{code = .Rune, ch = 'l', mods = {.Ctrl}})
 		step_gallery_frame(&app, bifrost.Key_Event{code = .Escape})
+		step_gallery_frame(&app, bifrost.Key_Event{code = .Rune, ch = 'j'})
+		step_gallery_frame(&app, bifrost.Key_Event{code = .Rune, ch = 'g'})
+		step_gallery_frame(&app, bifrost.Key_Event{code = .Rune, ch = 'g'}) // 2-step chord -> pkg.jump_top
+		step_gallery_frame(&app, bifrost.Key_Event{code = .Rune, ch = 'l'})
+		step_gallery_frame(&app, bifrost.Key_Event{code = .Rune, ch = 'l'})
+		step_gallery_frame(&app, bifrost.Key_Event{code = .Rune, ch = 'h'})
+		step_gallery_frame(&app, bifrost.Key_Event{code = .Rune, ch = 'h'}) // back at col 0
+		step_gallery_frame(&app, bifrost.Key_Event{code = .Rune, ch = 'h'}) // bubble out to splitter
+		step_gallery_frame(&app, bifrost.Key_Event{code = .Enter})          // enter splitter [RESIZE] submode
+		step_gallery_frame(&app, bifrost.Key_Event{code = .Rune, ch = 'l'}) // widen splitter by +2 cols
+		step_gallery_frame(&app, bifrost.Key_Event{code = .Escape})         // exit splitter [RESIZE] submode
+		step_gallery_frame(&app, bifrost.Key_Event{code = .Rune, ch = 'h'}) // enter sidebar via H* (`filter_input`)
+
+		// 5. Tab from `.Auto_Edit` `filter_input` -> two-stage `notes_input` (sticky edit carry), Escape to nav, Enter to edit "ok", Escape, then scroll sidebar
+		step_gallery_frame(&app, bifrost.Key_Event{code = .Tab})
+		step_gallery_frame(&app, bifrost.Key_Event{code = .Escape}) // exit carried edit mode -> navigation mode on `notes_input`
+		step_gallery_frame(&app, bifrost.Key_Event{code = .Enter})  // two-stage Enter -> edit mode on `notes_input`
+		step_gallery_frame(&app, bifrost.Key_Event{code = .Rune, ch = 'o'})
+		step_gallery_frame(&app, bifrost.Key_Event{code = .Rune, ch = 'k'})
+		step_gallery_frame(&app, bifrost.Key_Event{code = .Escape}) // exit edit mode -> resume 2D nav in `sidebar`
+		for _ in 0 ..< 4 {
+			step_gallery_frame(&app, bifrost.Key_Event{code = .Rune, ch = 'j'}) // scrolls `btn_clear_filter` into view on same frame
+		}
+		for _ in 0 ..< 4 {
+			step_gallery_frame(&app, bifrost.Key_Event{code = .Rune, ch = 'k'}) // scrolls back up to `notes_input`
+		}
+
+		// 6. Press F6 into `flex_grid`, wrap 2D reading order ('l' x2 -> Row 1 `card_grow2`), Escape drill-up to `flex_grid`, and 'j' down to `pkg_list`
+		step_gallery_frame(&app, bifrost.Key_Event{code = .F6})
+		step_gallery_frame(&app, bifrost.Key_Event{code = .Rune, ch = 'l'})
+		step_gallery_frame(&app, bifrost.Key_Event{code = .Rune, ch = 'l'})
+		step_gallery_frame(&app, bifrost.Key_Event{code = .Escape})
+		step_gallery_frame(&app, bifrost.Key_Event{code = .Rune, ch = 'j'})
+		step_gallery_frame(&app, bifrost.Key_Event{code = .Rune, ch = 'l'}) // select Col 1 ("Module")
+
+		// 7. Open Detail Modal (z=20) -> Nested Confirm Modal (z=25) -> Dismiss both via LIFO Escape
 		step_gallery_frame(&app, bifrost.Key_Event{code = .Rune, ch = 'm'})
 		step_gallery_frame(&app, bifrost.Key_Event{code = .Enter}) // Activate btn_nested_modal
 		step_gallery_frame(&app, bifrost.Key_Event{code = .Escape}) // Pop confirm_modal (z=25 -> z=20)
 		step_gallery_frame(&app, bifrost.Key_Event{code = .Escape}) // Pop detail_modal (z=20 -> z=0)
 
+		pkg_slot := bifrost.get_scroll_slot(&app.input, bifrost.hash_id("pkg_list"))
 		fmt.printf(
-			"[Bifrost Widget Gallery] theme=%s split=%d selected_row=%d frames=%d actions=%d\n",
+			"[Bifrost Widget Gallery] theme=%s split=%d selected_row=%d selected_col=%d frames=%d actions=%d\n",
 			THEMES[app.theme].name,
 			bifrost.get_split_size(&app.input, "gallery_split"),
 			bifrost.get_selected_row(&app.input, "pkg_list"),
+			pkg_slot.selected_col,
 			app.frames_rendered,
 			app.action_count,
 		)

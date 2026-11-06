@@ -73,6 +73,33 @@ Kanban_Snapshot :: struct {
 	moment_idx: i64,
 }
 
+Kanban_Action :: enum u8 {
+	None = 0,
+	Move_Prev,
+	Move_Next,
+	Cycle_Priority,
+	Jump_First,
+	New_Task,
+	Filter_Focus,
+	History_Undo,
+	History_Redo,
+	History_Follow,
+	Quit,
+}
+
+Kanban_Actions :: struct {
+	Move_Prev:      Kanban_Action `bifrost:"key=H, id=task.move_prev, scope=col_*, group=stage, group_desc=Move Stage, desc=Move Left, label=Move Focused Task Left, category=Board"`,
+	Move_Next:      Kanban_Action `bifrost:"key=L, id=task.move_next, scope=col_*, group=stage, group_desc=Move Stage, desc=Move Right, label=Move Focused Task Right, category=Board"`,
+	Cycle_Priority: Kanban_Action `bifrost:"key=!, id=task.cycle_priority, scope=col_*, desc=Priority, label=Cycle Task Priority (MED/HIGH/CRIT), category=Board"`,
+	Jump_First:     Kanban_Action `bifrost:"key=g g, id=nav.first_card, scope=col_*, desc=Top Card, label=Jump to Top Card in Column, category=Board"`,
+	New_Task:       Kanban_Action `bifrost:"key=n, id=task.new, desc=New, label=Create New Kanban Task, category=Board"`,
+	Filter_Focus:   Kanban_Action `bifrost:"key=/, id=filter.focus, desc=Filter, label=Focus Live Search Bar, category=Filter"`,
+	History_Undo:   Kanban_Action `bifrost:"key=[, id=history.undo, group=time, group_desc=xitdb, desc=Undo, label=Step Backward One xitdb Moment, category=Time Travel"`,
+	History_Redo:   Kanban_Action `bifrost:"key=], id=history.redo, group=time, group_desc=xitdb, desc=Redo, label=Step Forward One xitdb Moment, category=Time Travel"`,
+	History_Follow: Kanban_Action `bifrost:"key=f, id=history.follow, desc=Follow, label=Unpin & Follow Latest Moment, category=Time Travel"`,
+	Quit:           Kanban_Action `bifrost:"key=q|<C-q>|<C-c>, id=app.quit, policy=global, desc=Quit, label=Quit Kanban Board, category=System"`,
+}
+
 Kanban_App :: struct {
 	core:               xitdb.Core,
 	db:                 xitdb.Database,
@@ -243,31 +270,21 @@ kanban_init :: proc(app: ^Kanban_App, cols, rows: i32, allocator := context.allo
 	_ = commit_task_mutation(app, 6, .Done,        .High,     "Integrate Sleipnir actor scheduler",   "seed task 6")
 	app.next_task_id = 7
 
-	// Keybindings & Command Palette
+	// Declarative Single-Source Keymap, Command Palette & Contextual Hint Specs
 	bifrost.clear_keybindings(&app.input)
 	bifrost.command_palette_init(&app.palette, &app.input)
-
-	bifrost.bind_key(&app.input, bifrost.Key_Event{code = .Rune, ch = 'n'}, "task.new",            .Root_And_Scopes)
-	bifrost.bind_key(&app.input, bifrost.Key_Event{code = .Rune, ch = 'l'}, "task.move_next",      .Root_And_Scopes)
-	bifrost.bind_key(&app.input, bifrost.Key_Event{code = .Rune, ch = 'h'}, "task.move_prev",      .Root_And_Scopes)
-	bifrost.bind_key(&app.input, bifrost.Key_Event{code = .Rune, ch = '!'}, "task.cycle_priority", .Root_And_Scopes)
-	bifrost.bind_key(&app.input, bifrost.Key_Event{code = .Rune, ch = '['}, "history.undo",        .Root_And_Scopes)
-	bifrost.bind_key(&app.input, bifrost.Key_Event{code = .Rune, ch = ']'}, "history.redo",        .Root_And_Scopes)
-	bifrost.bind_key(&app.input, bifrost.Key_Event{code = .Rune, ch = 'f'}, "history.follow",      .Root_And_Scopes)
-	bifrost.bind_key(&app.input, bifrost.Key_Event{code = .Rune, ch = '/'}, "filter.focus",        .Root_And_Scopes)
-	bifrost.bind_key(&app.input, bifrost.Key_Event{code = .Rune, ch = 'q'}, "app.quit",            .Root_And_Scopes)
-	bifrost.bind_key(&app.input, bifrost.Key_Event{code = .Rune, ch = 'q', mods = {.Ctrl}}, "app.quit", .Global_Always, "", {.Allow_In_Text_Input})
-	bifrost.bind_key(&app.input, bifrost.Key_Event{code = .Rune, ch = 'c', mods = {.Ctrl}}, "app.quit", .Global_Always, "", {.Allow_In_Text_Input})
-
-	bifrost.register_command(&app.palette, "task.new",            "Create New Kanban Task",                "Board")
-	bifrost.register_command(&app.palette, "task.move_next",      "Move Focused Task Right (Next Stage)",  "Board")
-	bifrost.register_command(&app.palette, "task.move_prev",      "Move Focused Task Left (Prev Stage)",   "Board")
-	bifrost.register_command(&app.palette, "task.cycle_priority", "Cycle Task Priority (MED/HIGH/CRIT)",   "Board")
-	bifrost.register_command(&app.palette, "history.undo",        "Step Backward One xitdb Moment ([)",    "Time Travel")
-	bifrost.register_command(&app.palette, "history.redo",        "Step Forward One xitdb Moment (])",     "Time Travel")
-	bifrost.register_command(&app.palette, "history.follow",      "Unpin & Follow Latest Moment (f)",      "Time Travel")
-	bifrost.register_command(&app.palette, "filter.focus",        "Focus Live Search Bar (/)",             "Filter")
-	bifrost.register_command(&app.palette, "app.quit",            "Quit Kanban Board",                     "System")
+	if !bifrost.register_actions_struct(&app.input, &app.palette, Kanban_Actions{}) {
+		return false
+	}
+	_ = bifrost.register_action_spec(&app.input, nil, bifrost.Action_Spec{
+		action_name     = "palette.toggle",
+		chord_spec      = "<C-p>",
+		policy          = .Global_Always,
+		flags           = {.Allow_In_Text_Input},
+		desc            = "Palette",
+		show_in_bar     = true,
+		hide_in_palette = true,
+	})
 
 	return true
 }
@@ -306,7 +323,7 @@ build_kanban_ui :: proc(app: ^Kanban_App, snap: Kanban_Snapshot) {
 
 	query := bifrost.get_text(&app.input, "task_filter")
 
-	if bifrost.container(&app.layout_ctx, "kanban_root", bifrost.Box_Config{
+	if bifrost.ui_scope(&app.layout_ctx, &app.screen, "kanban_root", bifrost.Scope_Config{
 		dir    = .Column,
 		width  = bifrost.fixed(w),
 		height = bifrost.fixed(h),
@@ -334,22 +351,23 @@ build_kanban_ui :: proc(app: ^Kanban_App, snap: Kanban_Snapshot) {
 			text   = header_str,
 		})
 
-		// 2. Toolbar Row (Search Input + Action Buttons)
+		// 2. Toolbar Row (Two-Stage Search Input + Action Buttons)
 		if bifrost.container(&app.layout_ctx, "toolbar", bifrost.Box_Config{
 			dir         = .Row,
 			width       = bifrost.grow(1),
 			height      = bifrost.fixed(1),
 			gap         = 1,
-			focus_scope = true,
+			focus_flags = {.Focus_Scope, .Loop_Spatial},
 		}) {
 			bifrost.ui_label(&app.layout_ctx, &app.screen, "lbl_filter", " Filter (/):", muted_fg)
 			bifrost.ui_text_input(&app.layout_ctx, &app.screen, &app.input, "task_filter", bifrost.Text_Input_Config{
-				placeholder    = "Search tasks or priority (CRIT/HIGH/MED)...",
+				placeholder    = "Enter or / to filter (CRIT/HIGH/MED)...",
 				width          = bifrost.grow(1),
 				height         = bifrost.fixed(1),
 				fg             = text_fg,
 				bg             = panel_bg,
 				placeholder_fg = muted_fg,
+				two_stage      = true,
 			})
 			bifrost.ui_button(&app.layout_ctx, &app.screen, "btn_new_task", bifrost.Button_Spec{
 				label  = "+ New Task (n)",
@@ -374,12 +392,13 @@ build_kanban_ui :: proc(app: ^Kanban_App, snap: Kanban_Snapshot) {
 			})
 		}
 
-		// 3. 4-Column Board (`Backlog`, `In Progress`, `In Review`, `Done`), each a `focus_scope`
+		// 3. 4-Column Board (`Backlog`, `In Progress`, `In Review`, `Done`) with 2D Spatial Nav & H* History
 		if bifrost.container(&app.layout_ctx, "board_columns", bifrost.Box_Config{
-			dir    = .Row,
-			width  = bifrost.grow(1),
-			height = bifrost.grow(1),
-			gap    = 1,
+			dir         = .Row,
+			width       = bifrost.grow(1),
+			height      = bifrost.grow(1),
+			gap         = 1,
+			focus_flags = {.Focus_Scope, .Wrap_Spatial},
 		}) {
 			for col in Kanban_Column {
 				col_count := 0
@@ -392,13 +411,14 @@ build_kanban_ui :: proc(app: ^Kanban_App, snap: Kanban_Snapshot) {
 
 				col_id := fmt.tprintf("col_%s", COLUMN_SLUGS[col])
 				col_title := fmt.tprintf("%s (%d)", COLUMN_TITLES[col], col_count)
-				is_active_scope := app.input.active_scope_id == bifrost.hash_id(col_id)
+				is_col_focused  := bifrost.is_focused(&app.input, col_id)
+				is_active_scope := is_col_focused || app.input.active_scope_id == bifrost.hash_id(col_id)
 
 				bifrost.set_paint(&app.screen, col_id, bifrost.Paint_Spec{
 					title       = col_title,
 					fg          = text_fg,
 					bg          = panel_bg,
-					border_fg   = COLUMN_ACCENTS[col] if is_active_scope else bifrost.rgb(70, 82, 108),
+					border_fg   = bifrost.rgb(255, 220, 100) if is_col_focused else (COLUMN_ACCENTS[col] if is_active_scope else bifrost.rgb(70, 82, 108)),
 					title_fg    = COLUMN_ACCENTS[col],
 					title_style = {.Bold},
 					fill_bg     = true,
@@ -410,9 +430,13 @@ build_kanban_ui :: proc(app: ^Kanban_App, snap: Kanban_Snapshot) {
 					padding     = bifrost.pad_xy(1, 0),
 					gap         = 1,
 					border      = .Rounded,
-					focus_scope = true,
+					focus_flags = {.Focus_Scope, .Focusable, .Wrap_Spatial},
 					scrollable  = true,
 				}) {
+					if col_count == 0 {
+						empty_id := fmt.tprintf("empty_hint_%s", COLUMN_SLUGS[col])
+						bifrost.ui_label(&app.layout_ctx, &app.screen, empty_id, "(empty - n: new)", muted_fg, {.Dim})
+					}
 					for i := 0; i < snap.task_count; i += 1 {
 						t := snap.tasks[i]
 						if t.col != col || !matches_filter(t, query) {
@@ -420,16 +444,24 @@ build_kanban_ui :: proc(app: ^Kanban_App, snap: Kanban_Snapshot) {
 						}
 						card_id := fmt.tprintf("task_card_%d", t.id)
 						card_title := fmt.tprintf("#%02d [%s]", t.id, PRIORITY_LABELS[t.priority])
-						is_card_focused := bifrost.is_focused(&app.input, card_id)
+						is_card_focused  := bifrost.is_focused(&app.input, card_id)
+						is_card_selected := bifrost.is_scope_selected(&app.input, card_id)
 						if is_card_focused {
 							app.focused_task_id = t.id
+						}
+
+						card_bg := bifrost.rgb(32, 38, 52)
+						if is_card_focused {
+							card_bg = bifrost.rgb(42, 52, 74)
+						} else if is_card_selected {
+							card_bg = bifrost.rgb(36, 44, 62)
 						}
 
 						bifrost.set_paint(&app.screen, card_id, bifrost.Paint_Spec{
 							title       = card_title,
 							text        = t.title,
 							fg          = text_fg,
-							bg          = bifrost.rgb(42, 52, 74) if is_card_focused else bifrost.rgb(32, 38, 52),
+							bg          = card_bg,
 							border_fg   = PRIORITY_COLORS[t.priority],
 							title_fg    = PRIORITY_COLORS[t.priority],
 							title_style = {.Bold},
@@ -452,18 +484,12 @@ build_kanban_ui :: proc(app: ^Kanban_App, snap: Kanban_Snapshot) {
 			}
 		}
 
-		// 4. Footer Bar
-		footer_str := " F6: next column | Tab: next card | h/l: move card stage | !: priority | n: new task | [/]: xitdb time-travel | ^P: palette"
-		bifrost.set_paint(&app.screen, "footer_bar", bifrost.Paint_Spec{
-			text    = footer_str,
-			fg      = muted_fg,
-			bg      = bar_bg,
-			fill_bg = true,
+		// 4. Live Contextual Breadcrumb & Key-Hint Bars
+		bifrost.ui_focus_breadcrumb_bar(&app.layout_ctx, &app.screen, &app.input, "breadcrumb_bar", bifrost.Breadcrumb_Bar_Config{
+			bg = bg_dark,
 		})
-		bifrost.leaf(&app.layout_ctx, "footer_bar", w, 1, bifrost.Box_Config{
-			width  = bifrost.grow(1),
-			height = bifrost.fixed(1),
-			text   = footer_str,
+		bifrost.ui_key_hint_bar(&app.layout_ctx, &app.screen, &app.input, "footer_bar", bifrost.Key_Hint_Bar_Config{
+			bg = bar_bg,
 		})
 	}
 
@@ -581,6 +607,7 @@ handle_kanban_interactions :: proc(app: ^Kanban_App, snap: Kanban_Snapshot) -> b
 				app.next_task_id += 1
 				_ = commit_task_mutation(app, tid, .Backlog, app.new_task_priority, cloned, "create task")
 				app.focused_task_id = tid
+				app.input.wants_focus_id = bifrost.hash_id(fmt.tprintf("task_card_%d", tid))
 				app.last_status = fmt.tprintf("committed task #%02d (@%d)", tid, app.latest_moment)
 			}
 			app.new_modal_open = false
@@ -589,8 +616,10 @@ handle_kanban_interactions :: proc(app: ^Kanban_App, snap: Kanban_Snapshot) -> b
 		return changed || (app.input.text_changed_id != 0)
 	}
 
-	// Board-level actions & toolbar buttons
-	if bifrost.was_activated(&app.input, "btn_new_task") || bifrost.was_action_triggered(&app.input, "task.new") {
+	// Board-level typed enum actions & toolbar buttons
+	act, _ := bifrost.triggered_action(&app.input, Kanban_Action)
+
+	if bifrost.was_activated(&app.input, "btn_new_task") || act == .New_Task {
 		app.new_modal_open = true
 		bifrost.set_text(&app.input, "new_task_title", "")
 		app.input.wants_focus_id = bifrost.hash_id("new_task_title")
@@ -598,13 +627,30 @@ handle_kanban_interactions :: proc(app: ^Kanban_App, snap: Kanban_Snapshot) -> b
 		return true
 	}
 
-	if bifrost.was_action_triggered(&app.input, "filter.focus") {
-		app.input.wants_focus_id = bifrost.hash_id("task_filter")
+	if act == .Filter_Focus {
+		app.input.wants_focus_id  = bifrost.hash_id("task_filter")
+		app.input.carry_edit_mode = true
 		app.last_status = "focused search bar"
 		return true
 	}
 
-	if bifrost.was_action_triggered(&app.input, "task.move_next") {
+	if act == .Jump_First {
+		if rec, ok := find_task_in_snapshot(snap, app.focused_task_id); ok {
+			query := bifrost.get_text(&app.input, "task_filter")
+			for i := 0; i < snap.task_count; i += 1 {
+				t := snap.tasks[i]
+				if t.col == rec.col && matches_filter(t, query) {
+					app.focused_task_id = t.id
+					app.input.wants_focus_id = bifrost.hash_id(fmt.tprintf("task_card_%d", t.id))
+					app.last_status = fmt.tprintf("jumped to top card #%02d", t.id)
+					changed = true
+					break
+				}
+			}
+		}
+	}
+
+	if act == .Move_Next {
 		if rec, ok := find_task_in_snapshot(snap, app.focused_task_id); ok {
 			next_col := Kanban_Column(min(int(Kanban_Column.Done), int(rec.col) + 1))
 			if next_col != rec.col {
@@ -618,7 +664,7 @@ handle_kanban_interactions :: proc(app: ^Kanban_App, snap: Kanban_Snapshot) -> b
 		}
 	}
 
-	if bifrost.was_action_triggered(&app.input, "task.move_prev") {
+	if act == .Move_Prev {
 		if rec, ok := find_task_in_snapshot(snap, app.focused_task_id); ok {
 			prev_col := Kanban_Column(max(0, int(rec.col) - 1))
 			if prev_col != rec.col {
@@ -632,7 +678,7 @@ handle_kanban_interactions :: proc(app: ^Kanban_App, snap: Kanban_Snapshot) -> b
 		}
 	}
 
-	if bifrost.was_action_triggered(&app.input, "task.cycle_priority") {
+	if act == .Cycle_Priority {
 		if rec, ok := find_task_in_snapshot(snap, app.focused_task_id); ok {
 			next_prio := Task_Priority((int(rec.priority) + 1) % len(Task_Priority))
 			cloned := strings.clone(rec.title, app.allocator)
@@ -643,14 +689,14 @@ handle_kanban_interactions :: proc(app: ^Kanban_App, snap: Kanban_Snapshot) -> b
 		}
 	}
 
-	if bifrost.was_activated(&app.input, "btn_undo") || bifrost.was_action_triggered(&app.input, "history.undo") {
+	if bifrost.was_activated(&app.input, "btn_undo") || act == .History_Undo {
 		app.pinned_history = true
 		app.active_moment  = max(0, app.active_moment - 1)
 		app.last_status    = fmt.tprintf("time-travel pinned @%d", app.active_moment)
 		changed = true
 	}
 
-	if bifrost.was_activated(&app.input, "btn_redo") || bifrost.was_action_triggered(&app.input, "history.redo") {
+	if bifrost.was_activated(&app.input, "btn_redo") || act == .History_Redo {
 		if app.active_moment + 1 >= app.latest_moment {
 			app.pinned_history = false
 			app.active_moment  = app.latest_moment
@@ -663,14 +709,14 @@ handle_kanban_interactions :: proc(app: ^Kanban_App, snap: Kanban_Snapshot) -> b
 		changed = true
 	}
 
-	if bifrost.was_action_triggered(&app.input, "history.follow") {
+	if act == .History_Follow {
 		app.pinned_history = false
 		app.active_moment  = app.latest_moment
 		app.last_status    = fmt.tprintf("following latest @%d", app.latest_moment)
 		changed = true
 	}
 
-	if bifrost.was_action_triggered(&app.input, "app.quit") {
+	if act == .Quit {
 		app.quit_requested = true
 		changed = true
 	}
@@ -774,11 +820,20 @@ run_kanban :: proc(live_tty: bool) -> bool {
 		}
 		step_kanban_frame(&app, bifrost.Key_Event{code = .Enter})
 
-		// 3. Move the newly created task #07 from Backlog -> In Progress ('l') and escalate priority ('!')
-		step_kanban_frame(&app, bifrost.Key_Event{code = .Rune, ch = 'l'})
+		// 3. Move the newly created task #07 from Backlog -> In Progress ('L' / Shift+L) and escalate priority ('!')
+		step_kanban_frame(&app, bifrost.Key_Event{code = .Rune, ch = 'L', mods = {.Shift}})
 		step_kanban_frame(&app, bifrost.Key_Event{code = .Rune, ch = '!'})
 
-		// 4. Time-travel backward 2 moments ('[') to inspect historical state, then unpin ('f') back to live
+		// 4. Exercise 2D spatial column jump ('h'), vertical wrap ('j'), 2-step chord ('g g'), Escape drill-up, 'l' step, & Enter H* drill-down
+		step_kanban_frame(&app, bifrost.Key_Event{code = .Rune, ch = 'h'})
+		step_kanban_frame(&app, bifrost.Key_Event{code = .Rune, ch = 'j'})
+		step_kanban_frame(&app, bifrost.Key_Event{code = .Rune, ch = 'g'})
+		step_kanban_frame(&app, bifrost.Key_Event{code = .Rune, ch = 'g'})
+		step_kanban_frame(&app, bifrost.Key_Event{code = .Escape})
+		step_kanban_frame(&app, bifrost.Key_Event{code = .Rune, ch = 'l'})
+		step_kanban_frame(&app, bifrost.Key_Event{code = .Enter})
+
+		// 5. Time-travel backward 2 moments ('[') to inspect historical state, then unpin ('f') back to live
 		step_kanban_frame(&app, bifrost.Key_Event{code = .Rune, ch = '['})
 		step_kanban_frame(&app, bifrost.Key_Event{code = .Rune, ch = '['})
 		step_kanban_frame(&app, bifrost.Key_Event{code = .Rune, ch = 'f'})

@@ -46,6 +46,25 @@ LOG_MESSAGES := [8]string{
 }
 
 // =============================================================================
+// Declarative Monitor Actions (Merged onto Built-In `UI_Inspector_Actions`)
+// =============================================================================
+
+Log_Monitor_Action :: enum u8 {
+	None = 0,
+	Filter_All,
+	Filter_Warn,
+	Filter_Error,
+	Stream_Burst,
+}
+
+Log_Monitor_Actions :: struct {
+	filter_all:   Log_Monitor_Action `bifrost:"action=filter.all,chord=1,policy=root,group=lvl_filter,group_desc=Level Filter,category=Filter,label=Show All Structured Logs,desc=All Logs"`,
+	filter_warn:  Log_Monitor_Action `bifrost:"action=filter.warn,chord=2,policy=root,group=lvl_filter,group_desc=Level Filter,category=Filter,label=Filter WARN Logs Only,desc=WARN Only"`,
+	filter_error: Log_Monitor_Action `bifrost:"action=filter.error,chord=3,policy=root,group=lvl_filter,group_desc=Level Filter,category=Filter,label=Filter ERROR Logs Only,desc=ERROR Only"`,
+	stream_burst: Log_Monitor_Action `bifrost:"action=stream.burst,chord=<C-b>,policy=root,allow_in_edit=true,category=Stream,label=Inject 20 Live Log Events,desc=Burst +20"`,
+}
+
+// =============================================================================
 // Background Sleipnir Log Producer Actor
 // =============================================================================
 
@@ -64,6 +83,10 @@ Log_Producer_State :: struct {
 	ui_pid:       actor.PID(bifrost.UI_Msg),
 	batches_sent: int,
 	logs_written: int,
+}
+
+Stream_Burst_Cursor :: struct {
+	next_seq: int,
 }
 
 log_producer_receive :: proc(
@@ -125,77 +148,61 @@ log_producer_receive :: proc(
 }
 
 // =============================================================================
-// Custom Immediate-Mode Render Pass for UI_Coordinator_State
+// Declarative Action Callbacks & Dynamic Actor Payload Builders
 // =============================================================================
 
-handle_monitor_shortcuts :: proc(coord: ^bifrost.UI_Coordinator_State) {
-	if bifrost.was_action_triggered(&coord.input, "app.quit") {
-		coord.quit_requested = true
-		return
-	}
-	if bifrost.was_action_triggered(&coord.input, "filter.focus") {
-		coord.input.wants_focus_id = bifrost.hash_id("search_box")
-		return
-	}
-	if bifrost.was_activated(&coord.input, "btn_lvl_all") || bifrost.was_action_triggered(&coord.input, "filter.all") {
+apply_monitor_level_filter :: proc(coord: ^bifrost.UI_Coordinator_State, action_name: string, _: rawptr) {
+	switch action_name {
+	case "filter.all":
 		coord.filter.kind   = .None
 		coord.filter.needle = ""
 		coord.filter.prefix = ""
+		coord.search_len    = 0
 		bifrost.set_text(&coord.input, "search_box", "")
-	} else if bifrost.was_activated(&coord.input, "btn_lvl_err") || bifrost.was_action_triggered(&coord.input, "filter.error") {
-		coord.filter.kind   = .Substring
-		coord.filter.needle = "ERROR"
-		coord.filter.prefix = ""
-		bifrost.set_text(&coord.input, "search_box", "ERROR")
-	} else if bifrost.was_activated(&coord.input, "btn_lvl_warn") || bifrost.was_action_triggered(&coord.input, "filter.warn") {
+	case "filter.warn":
 		coord.filter.kind   = .Substring
 		coord.filter.needle = "WARN"
 		coord.filter.prefix = ""
+		copy(coord.search_buf[:4], "WARN")
+		coord.search_len = 4
 		bifrost.set_text(&coord.input, "search_box", "WARN")
-	} else if bifrost.was_activated(&coord.input, "btn_pin_toggle") || bifrost.was_action_triggered(&coord.input, "moment.follow") {
-		coord.pinned_moment     = false
-		coord.active_moment_idx = coord.latest_moment_idx
-	} else if bifrost.was_action_triggered(&coord.input, "moment.prev") {
-		coord.pinned_moment     = true
-		coord.active_moment_idx = max(0, coord.active_moment_idx - 1)
-	} else if bifrost.was_action_triggered(&coord.input, "moment.next") {
-		if coord.active_moment_idx + 1 >= coord.latest_moment_idx {
-			coord.pinned_moment     = false
-			coord.active_moment_idx = coord.latest_moment_idx
-		} else {
-			coord.pinned_moment     = true
-			coord.active_moment_idx += 1
-		}
-	}
-
-	// Sync live text input edits in `search_box` to `coord.filter`
-	if bifrost.was_text_changed(&coord.input, "search_box") {
-		q := bifrost.get_text(&coord.input, "search_box")
-		n := min(len(q), len(coord.search_buf))
-		if n > 0 {
-			copy(coord.search_buf[:n], transmute([]u8)q[:n])
-		}
-		coord.search_len = n
-		q_slice := string(coord.search_buf[:n])
-		if strings.has_prefix(q_slice, "^") {
-			coord.filter.kind   = .Key_Prefix
-			coord.filter.prefix = q_slice[1:]
-			coord.filter.needle = ""
-		} else if len(q_slice) > 0 {
-			coord.filter.kind   = .Substring
-			coord.filter.needle = q_slice
-			coord.filter.prefix = ""
-		} else {
-			coord.filter.kind   = .None
-			coord.filter.prefix = ""
-			coord.filter.needle = ""
-		}
+	case "filter.error":
+		coord.filter.kind   = .Substring
+		coord.filter.needle = "ERROR"
+		coord.filter.prefix = ""
+		copy(coord.search_buf[:5], "ERROR")
+		coord.search_len = 5
+		bifrost.set_text(&coord.input, "search_box", "ERROR")
 	}
 }
 
+build_monitor_diff_msg :: proc(coord: ^bifrost.UI_Coordinator_State, _: rawptr) -> (bifrost.Xitdb_Worker_Msg, bool) {
+	return bifrost.Xitdb_Worker_Msg(bifrost.Worker_Msg_Diff_Moments{
+		moment_a = coord.active_moment_idx,
+		moment_b = coord.latest_moment_idx,
+	}), true
+}
+
+build_stream_burst_msg :: proc(_: ^bifrost.UI_Coordinator_State, ud: rawptr) -> (Log_Producer_Msg, bool) {
+	cursor := (^Stream_Burst_Cursor)(ud)
+	if cursor == nil {
+		return nil, false
+	}
+	start := cursor.next_seq
+	cursor.next_seq += 20
+	return Log_Producer_Msg(Log_Batch_Request{
+		start_seq = start,
+		count     = 20,
+		tag_name  = "manual-burst",
+	}), true
+}
+
+// =============================================================================
+// Custom Immediate-Mode Render Pass for UI_Coordinator_State
+// =============================================================================
+
 render_log_monitor_frame :: proc(coord: ^bifrost.UI_Coordinator_State) {
 	coord.use_widget_pipeline = true
-	handle_monitor_shortcuts(coord)
 
 	w := i32(coord.cols)
 	h := i32(coord.rows)
@@ -210,9 +217,11 @@ render_log_monitor_frame :: proc(coord: ^bifrost.UI_Coordinator_State) {
 	bifrost.begin_layout(&coord.layout_ctx, w, h)
 
 	if bifrost.container(&coord.layout_ctx, "monitor_root", bifrost.Box_Config{
-		dir    = .Column,
-		width  = bifrost.fixed(w),
-		height = bifrost.fixed(h),
+		dir         = .Column,
+		width       = bifrost.fixed(w),
+		height      = bifrost.fixed(h),
+		focus_flags = {.Focus_Scope},
+		focus_scope = true,
 	}) {
 		// 1. Top Header Bar
 		mode_str := "PINNED" if coord.pinned_moment else "LIVE STREAM"
@@ -269,31 +278,27 @@ render_log_monitor_frame :: proc(coord: ^bifrost.UI_Coordinator_State) {
 		}
 
 		// 3. Main Split Body (Filter Sidebar + Interactive Splitter + Virtualized Log Stream)
-		body_h := max(i32(6), h - 5)
-		if bifrost.container(&coord.layout_ctx, "monitor_body", bifrost.Box_Config{
+		body_h := max(i32(6), h - 6)
+		if bifrost.ui_scope(&coord.layout_ctx, &coord.screen, "monitor_body", bifrost.Scope_Config{
 			dir    = .Row,
 			width  = bifrost.grow(1),
 			height = bifrost.fixed(body_h),
 		}) {
 			sidebar_w := bifrost.get_split_size(&coord.input, "monitor_split", 28, 22, max(26, w - 36))
 
-			bifrost.set_paint(&coord.screen, "filter_sidebar", bifrost.Paint_Spec{
-				title       = "Stream Controls",
-				fg          = text_fg,
-				bg          = panel_bg,
-				border_fg   = bifrost.rgb(75, 95, 125),
-				title_fg    = accent,
-				title_style = {.Bold},
-				fill_bg     = true,
-			})
-			if bifrost.container(&coord.layout_ctx, "filter_sidebar", bifrost.Box_Config{
-				dir         = .Column,
-				width       = bifrost.fixed(sidebar_w),
-				height      = bifrost.grow(1),
-				padding     = bifrost.pad_xy(1, 0),
-				gap         = 1,
-				border      = .Plain,
-				focus_scope = true,
+			if bifrost.ui_scope(&coord.layout_ctx, &coord.screen, "filter_sidebar", bifrost.Scope_Config{
+				dir       = .Column,
+				width     = bifrost.fixed(sidebar_w),
+				height    = bifrost.grow(1),
+				padding   = bifrost.pad_xy(1, 0),
+				gap       = 1,
+				border    = .Plain,
+				title     = "Stream Controls",
+				fg        = text_fg,
+				bg        = panel_bg,
+				border_fg = bifrost.rgb(75, 95, 125),
+				title_fg  = accent,
+				fill_bg   = true,
 			}) {
 				bifrost.ui_label(&coord.layout_ctx, &coord.screen, "lbl_q", "Filter (^prefix or text):", muted_fg)
 				bifrost.ui_text_input(&coord.layout_ctx, &coord.screen, &coord.input, "search_box", bifrost.Text_Input_Config{
@@ -307,21 +312,21 @@ render_log_monitor_frame :: proc(coord: ^bifrost.UI_Coordinator_State) {
 				})
 
 				bifrost.ui_button(&coord.layout_ctx, &coord.screen, "btn_lvl_all", bifrost.Button_Spec{
-					label  = "Show ALL Logs",
+					label  = "Show ALL Logs (1)",
 					width  = bifrost.grow(1),
 					height = bifrost.fixed(1),
 					fg     = text_fg,
 					bg     = bar_bg,
 				})
 				bifrost.ui_button(&coord.layout_ctx, &coord.screen, "btn_lvl_warn", bifrost.Button_Spec{
-					label  = "Filter: WARN Only",
+					label  = "Filter: WARN Only (2)",
 					width  = bifrost.grow(1),
 					height = bifrost.fixed(1),
 					fg     = bifrost.rgb(250, 200, 95),
 					bg     = bar_bg,
 				})
 				bifrost.ui_button(&coord.layout_ctx, &coord.screen, "btn_lvl_err", bifrost.Button_Spec{
-					label  = "Filter: ERROR Only",
+					label  = "Filter: ERROR Only (3)",
 					width  = bifrost.grow(1),
 					height = bifrost.fixed(1),
 					fg     = bifrost.rgb(250, 115, 120),
@@ -348,32 +353,7 @@ render_log_monitor_frame :: proc(coord: ^bifrost.UI_Coordinator_State) {
 
 			// Zero-Copy xitdb Log Stream Slice
 			visible_rows := max(1, int(body_h) - 2)
-			coord.vlist.viewport_rows = visible_rows
-
-			slice: bifrost.Xitdb_Viewport_Slice
-			if coord.shared_db != nil && coord.shared_db.db != nil {
-				sync.rw_mutex_shared_lock(&coord.shared_db.rw_lock)
-				total_cnt, cnt_err := bifrost.xitdb_read_collection_count(
-					coord.shared_db.db,
-					coord.active_moment_idx,
-					coord.active_collection,
-				)
-				if cnt_err == nil {
-					coord.vlist.total_rows = int(total_cnt)
-					bifrost.ui_virtual_list_clamp(&coord.vlist)
-					slice, _ = bifrost.xitdb_slice_viewport(
-						coord.shared_db.db,
-						coord.active_moment_idx,
-						coord.active_collection,
-						i64(coord.vlist.scroll_offset),
-						i64(visible_rows),
-						coord.filter,
-						context.temp_allocator,
-					)
-				}
-				sync.rw_mutex_shared_unlock(&coord.shared_db.rw_lock)
-			}
-			coord.last_viewport_rows = len(slice.rows)
+			slice := bifrost.ui_coordinator_slice_viewport(coord, "log_stream_pane", visible_rows)
 
 			vslice: bifrost.Virtual_Slice
 			if bifrost.ui_virtual_list(
@@ -392,12 +372,13 @@ render_log_monitor_frame :: proc(coord: ^bifrost.UI_Coordinator_State) {
 					border_fg     = bifrost.rgb(75, 95, 125),
 					title_fg      = accent,
 					fallback_rows = i32(visible_rows),
+					focus_flags   = {.Focusable, .Default_Focus},
 				},
 				&vslice,
 			) {
 				for row_i in 0 ..< len(slice.rows) {
 					rv := slice.rows[row_i]
-					is_sel := int(rv.logical_index) == coord.vlist.selected_row
+					is_sel := int(rv.view_index) == coord.vlist.selected_row
 					row_id := fmt.tprintf("log_row_%d", row_i)
 					row_line := fmt.tprintf(
 						"%s %-10s | %s",
@@ -430,9 +411,9 @@ render_log_monitor_frame :: proc(coord: ^bifrost.UI_Coordinator_State) {
 			}
 		}
 
-		// 4. Footer Bar (Datalog Audit + Moment Diff + Shortcuts)
+		// 4. Worker Telemetry Row (Datalog Audit + Moment Diff) + Live Contextual Key-Hint Bar
 		footer_str := fmt.tprintf(
-			" Datalog: %s | Diff(@%d->@%d): +%d ~%d -%d | [/]: time-travel | f: follow | ^P: palette | q: quit",
+			" Datalog: %s | Diff(@%d->@%d): +%d ~%d -%d",
 			coord.last_datalog_summary if len(coord.last_datalog_summary) > 0 else "ready",
 			coord.last_diff_summary.from_moment,
 			coord.last_diff_summary.to_moment,
@@ -450,6 +431,10 @@ render_log_monitor_frame :: proc(coord: ^bifrost.UI_Coordinator_State) {
 			width  = bifrost.grow(1),
 			height = bifrost.fixed(1),
 			text   = footer_str,
+		})
+
+		bifrost.ui_key_hint_bar(&coord.layout_ctx, &coord.screen, &coord.input, "monitor_hint_bar", bifrost.Key_Hint_Bar_Config{
+			bg = bifrost.rgb(22, 28, 40),
 		})
 	}
 
@@ -533,16 +518,9 @@ run_log_monitor :: proc(live_tty: bool) -> bool {
 		return false
 	}
 	ui_actor.state.active_collection = "$logs"
+	ui_actor.state.primary_list_id   = "log_stream_pane"
 	ui_actor.state.input.wants_focus_id = bifrost.hash_id("log_stream_pane")
-	bifrost.bind_key(&ui_actor.state.input, bifrost.Key_Event{code = .Rune, ch = '/'}, "filter.focus", .Root_And_Scopes)
-	bifrost.bind_key(&ui_actor.state.input, bifrost.Key_Event{code = .Rune, ch = 'q'}, "app.quit", .Root_And_Scopes)
-	bifrost.bind_key(&ui_actor.state.input, bifrost.Key_Event{code = .Rune, ch = 'q', mods = {.Ctrl}}, "app.quit", .Global_Always, "", {.Allow_In_Text_Input})
-	bifrost.bind_key(&ui_actor.state.input, bifrost.Key_Event{code = .Rune, ch = 'c', mods = {.Ctrl}}, "app.quit", .Global_Always, "", {.Allow_In_Text_Input})
-	bifrost.register_command(&ui_actor.state.palette, "filter.all",   "Show All Structured Logs",  "Filter")
-	bifrost.register_command(&ui_actor.state.palette, "filter.error", "Filter ERROR Logs Only",    "Filter")
-	bifrost.register_command(&ui_actor.state.palette, "filter.warn",  "Filter WARN Logs Only",     "Filter")
-	bifrost.register_command(&ui_actor.state.palette, "filter.focus", "Focus Search Box (/)",      "Filter")
-	bifrost.register_command(&ui_actor.state.palette, "app.quit",     "Quit Log Monitor",          "System")
+	_ = bifrost.register_actions_struct(&ui_actor.state.input, &ui_actor.state.palette, Log_Monitor_Actions{})
 	ui_pid := actor.pid(ui_actor)
 
 	// Spawn xitdb analytics worker actor (Datalog & Moment Diffs)
@@ -575,6 +553,29 @@ run_log_monitor :: proc(live_tty: bool) -> bool {
 	}
 	producer_pid := actor.pid(producer_actor)
 
+	burst_cursor := Stream_Burst_Cursor{next_seq = 1001}
+
+	// Declaratively wire widget activations, local filter callbacks, and Sleipnir worker/producer sinks
+	_ = bifrost.bind_button_action(&ui_actor.state, "btn_lvl_all",    "filter.all")
+	_ = bifrost.bind_button_action(&ui_actor.state, "btn_lvl_warn",   "filter.warn")
+	_ = bifrost.bind_button_action(&ui_actor.state, "btn_lvl_err",    "filter.error")
+	_ = bifrost.bind_button_action(&ui_actor.state, "btn_pin_toggle", "moment.follow")
+
+	_ = bifrost.on_ui_action(&ui_actor.state, "filter.all",   apply_monitor_level_filter)
+	_ = bifrost.on_ui_action(&ui_actor.state, "filter.warn",  apply_monitor_level_filter)
+	_ = bifrost.on_ui_action(&ui_actor.state, "filter.error", apply_monitor_level_filter)
+
+	_ = bifrost.bind_actor_action(
+		&ui_actor.state,
+		"query.datalog",
+		worker_pid,
+		bifrost.Xitdb_Worker_Msg(bifrost.Worker_Msg_Run_Datalog{
+			query_source = "find ?k, ?v where $logs[?k] = ?v",
+		}),
+	)
+	_ = bifrost.bind_actor_action(&ui_actor.state, "query.diff", worker_pid, build_monitor_diff_msg)
+	_ = bifrost.bind_actor_action(&ui_actor.state, "stream.burst", producer_pid, build_stream_burst_msg, &burst_cursor)
+
 	actor.scheduler_start(&sched)
 
 	// Seed 3 streaming batches of structured logs via background producer actor
@@ -596,6 +597,7 @@ run_log_monitor :: proc(live_tty: bool) -> bool {
 	actor.scheduler_wait_idle(&sched)
 
 	if live_tty {
+		_ = bifrost.load_ui_workspace_from_xitdb(&shared, &ui_actor.state, "monitor_default")
 		actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Frame_Tick{tick_ns = 1}))
 		actor.scheduler_wait_idle(&sched)
 		if ui_actor.state.last_ansi_bytes > 0 {
@@ -608,15 +610,6 @@ run_log_monitor :: proc(live_tty: bool) -> bool {
 			ev, has_ev, _ := bifrost.poll_next_event(&term, 16)
 			if has_ev {
 				actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Input{event = ev}))
-				if ke, is_k := ev.(bifrost.Key_Event); is_k && ke.action != .Release {
-					eff_mods := ke.mods - {.Caps_Lock, .Num_Lock}
-					is_ctrl_quit := (.Ctrl in eff_mods) && (ke.ch == 'q' || ke.ch == 'Q' || ke.ch == 'c' || ke.ch == 'C')
-					is_plain_q   := (eff_mods == {}) && ke.code == .Rune && (ke.ch == 'q' || ke.ch == 'Q') &&
-						!ui_actor.state.palette_open && !bifrost.is_focused(&ui_actor.state.input, "search_box")
-					if is_ctrl_quit || is_plain_q {
-						actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Quit{}))
-					}
-				}
 			}
 
 			// Periodically stream new log batches in the background every ~60 ticks
@@ -639,20 +632,21 @@ run_log_monitor :: proc(live_tty: bool) -> bool {
 			}
 			free_all(context.temp_allocator)
 		}
+		_ = bifrost.save_ui_workspace_to_xitdb(&shared, &ui_actor.state, "monitor_default")
 	} else {
 		// Deterministic headless verification workflow:
 		// 1. Render initial seeded log stream (120 logs across 3 moments)
 		actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Frame_Tick{tick_ns = 1}))
 		actor.scheduler_wait_idle(&sched)
 
-		// 2. Run background Datalog query and Moment Diff (@0 -> @2) via Xitdb_Worker_State
-		actor.send(&sched, worker_pid, bifrost.Xitdb_Worker_Msg(bifrost.Worker_Msg_Diff_Moments{
-			moment_a = 0,
-			moment_b = 2,
-		}))
-		actor.send(&sched, worker_pid, bifrost.Xitdb_Worker_Msg(bifrost.Worker_Msg_Run_Datalog{
-			query_source = "find ?k, ?v where $logs[?k] = ?v",
-		}))
+		// 2. Step back to @0 (`[` twice) and trigger `<C-g>` (`query.diff`) + `<C-d>` (`query.datalog`) + `f` (`moment.follow`)
+		//    through declarative `bind_actor_action` routing onto `worker_pid`
+		actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Key{code = .Rune, ch = '['}))
+		actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Key{code = .Rune, ch = '['}))
+		actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Key{code = .Rune, ch = 'g', ctrl = true}))
+		actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Key{code = .Rune, ch = 'd', ctrl = true}))
+		actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Key{code = .Rune, ch = 'f'}))
+		actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Frame_Tick{tick_ns = 2}))
 		actor.scheduler_wait_idle(&sched)
 
 		// 3. Scroll down 4 rows and simulate a 500-message commit burst to verify mailbox coalescing
@@ -665,16 +659,24 @@ run_log_monitor :: proc(live_tty: bool) -> bool {
 				tag_name   = "burst",
 			}))
 		}
-		actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Frame_Tick{tick_ns = 2}))
+		actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Frame_Tick{tick_ns = 3}))
 		actor.scheduler_wait_idle(&sched)
 
+		saved_ws := bifrost.save_ui_workspace_to_xitdb(&shared, &ui_actor.state, "monitor_default")
+		if !saved_ws {
+			bifrost.ui_coordinator_destroy(&ui_actor.state)
+			actor.scheduler_stop_and_destroy(&sched)
+			return false
+		}
+
 		fmt.printf(
-			"[Bifrost Log Monitor] batches=%d logs_written=%d coalesced=%d frames=%d viewport_rows=%d\n",
+			"[Bifrost Log Monitor] batches=%d logs_written=%d coalesced=%d frames=%d viewport_rows=%d workspace_saved=%v\n",
 			producer_actor.state.batches_sent,
 			producer_actor.state.logs_written,
 			ui_actor.state.coalesced_commits,
 			ui_actor.state.total_frames,
 			ui_actor.state.last_viewport_rows,
+			saved_ws,
 		)
 		for r := 0; r < ui_actor.state.rows; r += 1 {
 			fmt.printf("  %s\n", extract_monitor_row(&ui_actor.state, r))

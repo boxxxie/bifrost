@@ -15,13 +15,20 @@ extract_row_text :: proc(coord: ^bifrost.UI_Coordinator_State, row: int, alloc :
 	}
 	b := strings.builder_make(0, coord.cols, alloc)
 	for x := 0; x < coord.cols; x += 1 {
-		ch := coord.front_buf[row * coord.cols + x].ch
-		if ch == 0 {
+		cell := coord.front_buf[row * coord.cols + x]
+		if cell.width == 0 || cell.ch == 0 {
 			continue
 		}
-		strings.write_rune(&b, ch)
+		strings.write_rune(&b, cell.ch)
 	}
 	return strings.trim_right_space(strings.to_string(b))
+}
+
+build_inspector_diff_msg :: proc(coord: ^bifrost.UI_Coordinator_State, _: rawptr) -> (bifrost.Xitdb_Worker_Msg, bool) {
+	return bifrost.Xitdb_Worker_Msg(bifrost.Worker_Msg_Diff_Moments{
+		moment_a = coord.active_moment_idx,
+		moment_b = coord.latest_moment_idx,
+	}), true
 }
 
 run_inspector :: proc(live_tty: bool) -> bool {
@@ -87,6 +94,17 @@ run_inspector :: proc(live_tty: bool) -> bool {
 	}
 	worker_pid := actor.pid(worker_actor)
 
+	// Declaratively bind built-in Inspector actions (`<C-d>` / `<C-g>` / Command Palette) to `worker_pid`
+	_ = bifrost.bind_actor_action(
+		&ui_actor.state,
+		"query.datalog",
+		worker_pid,
+		bifrost.Xitdb_Worker_Msg(bifrost.Worker_Msg_Run_Datalog{
+			query_source = "find ?k, ?v where $metrics[?k] = ?v",
+		}),
+	)
+	_ = bifrost.bind_actor_action(&ui_actor.state, "query.diff", worker_pid, build_inspector_diff_msg)
+
 	actor.scheduler_start(&sched)
 
 	// Seed initial moments via background worker actor
@@ -108,6 +126,7 @@ run_inspector :: proc(live_tty: bool) -> bool {
 	actor.scheduler_wait_idle(&sched)
 
 	if live_tty {
+		_ = bifrost.load_ui_workspace_from_xitdb(&shared, &ui_actor.state, "inspector_default")
 		actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Frame_Tick{tick_ns = 1}))
 		actor.scheduler_wait_idle(&sched)
 		if ui_actor.state.last_ansi_bytes > 0 {
@@ -117,35 +136,10 @@ run_inspector :: proc(live_tty: bool) -> bool {
 		for !ui_actor.state.quit_requested {
 			ev, has_ev, _ := bifrost.poll_next_event(&term, 16)
 			if has_ev {
-				#partial switch e in ev {
-				case bifrost.Key_Event:
-					actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Key{
-						code      = e.code,
-						ch        = e.ch,
-						ctrl      = .Ctrl in e.mods,
-						alt       = .Alt in e.mods,
-						shift     = .Shift in e.mods,
-						super_mod = .Super in e.mods,
-						is_repeat = e.action == .Repeat,
-					}))
-				case bifrost.Mouse_Event:
-					actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Mouse{
-						x      = e.x,
-						y      = e.y,
-						action = e.action,
-						ctrl   = .Ctrl in e.mods,
-						alt    = .Alt in e.mods,
-						shift  = .Shift in e.mods,
-					}))
-				case bifrost.Resize_Event:
-					actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Resize{
-						cols = u16(max(2, e.width)),
-						rows = u16(max(2, e.height)),
-					}))
-				}
+				actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Input{event = ev}))
 			}
 			actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Frame_Tick{
-				tick_ns = time. tick_now()._nsec,
+				tick_ns = time.tick_now()._nsec,
 			}))
 			actor.scheduler_wait_idle(&sched)
 			if ui_actor.state.last_ansi_bytes > 0 {
@@ -153,13 +147,15 @@ run_inspector :: proc(live_tty: bool) -> bool {
 			}
 			free_all(context.temp_allocator)
 		}
+		_ = bifrost.save_ui_workspace_to_xitdb(&shared, &ui_actor.state, "inspector_default")
 	} else {
 		// Headless verification workflow:
 		// 1. Render initial seeded state
 		actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Frame_Tick{tick_ns = 1}))
 		actor.scheduler_wait_idle(&sched)
 
-		// 2. Pin to historical moment @0 while worker commits moment @2 and runs diff + Datalog
+		// 2. Pin to historical moment @0 while worker commits moment @2, then trigger `<C-g>` + `<C-d>`
+		//    through declarative `bind_actor_action` routing onto `worker_pid`
 		actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Select_Moment{
 			moment_idx = 0,
 			pin        = true,
@@ -174,14 +170,8 @@ run_inspector :: proc(live_tty: bool) -> bool {
 		}))
 		actor.scheduler_wait_idle(&sched)
 
-		actor.send(&sched, worker_pid, bifrost.Xitdb_Worker_Msg(bifrost.Worker_Msg_Diff_Moments{
-			moment_a = 0,
-			moment_b = 2,
-		}))
-		actor.send(&sched, worker_pid, bifrost.Xitdb_Worker_Msg(bifrost.Worker_Msg_Run_Datalog{
-			query_source = "find ?k, ?v where $metrics[?k] = ?v",
-		}))
-		actor.scheduler_wait_idle(&sched)
+		actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Key{code = .Rune, ch = 'g', ctrl = true}))
+		actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Key{code = .Rune, ch = 'd', ctrl = true}))
 		actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Frame_Tick{tick_ns = 2}))
 		actor.scheduler_wait_idle(&sched)
 
@@ -206,17 +196,27 @@ run_inspector :: proc(live_tty: bool) -> bool {
 			i64,
 		)
 
+		saved_ws := bifrost.save_ui_workspace_to_xitdb(&shared, &ui_actor.state, "inspector_default")
+		if !saved_ws {
+			bifrost.ui_coordinator_destroy(&ui_actor.state)
+			actor.scheduler_stop_and_destroy(&sched)
+			return false
+		}
+
 		status_line := extract_row_text(&ui_actor.state, 0)
-		footer_line := extract_row_text(&ui_actor.state, rows - 1)
+		telem_line  := extract_row_text(&ui_actor.state, rows - 2)
+		hints_line  := extract_row_text(&ui_actor.state, rows - 1)
 		fmt.printf(
-			"[Bifrost xitdb Inspector] moments=%d coalesced=%d frames=%d viewport_rows=%d\n",
+			"[Bifrost xitdb Inspector] moments=%d coalesced=%d frames=%d viewport_rows=%d workspace_saved=%v\n",
 			total_moments,
 			ui_actor.state.coalesced_commits,
 			ui_actor.state.total_frames,
 			ui_actor.state.last_viewport_rows,
+			saved_ws,
 		)
-		fmt.printf("  Status: %s\n", status_line)
-		fmt.printf("  Footer: %s\n", footer_line)
+		fmt.printf("  Status:    %s\n", status_line)
+		fmt.printf("  Telemetry: %s\n", telem_line)
+		fmt.printf("  Hints:     %s\n", hints_line)
 	}
 
 	bifrost.ui_coordinator_destroy(&ui_actor.state)
