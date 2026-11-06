@@ -420,3 +420,48 @@ wire_coordinator :: proc(
 	})
 }
 ```
+
+---
+
+## 9. AST-Powered ATDD DSL & `@(scenario)` Purity Checker (`--atdd`)
+
+Bifrost's 4-layer Acceptance Test-Driven Development (ATDD) suite in `tests/` uses `core:odin/parser` (`odin run tools/bifrost_gen -- --atdd tests`) to inspect all `given_*`, `upon_*`, and `then_*` steps in `tests/dsl_*.odin`, validate Layer 1 `@(scenario)` purity across `tests/spec_*.odin`, and emit `tests/dsl_atdd_gen.odin`:
+
+1. **`@(deferred_out = scenario_scope_end)` RAII `scenario(t, ...)` & `actor_scenario(t, ...)`:** Automatically initializes a stack-managed `Suite_Ctx` on `@(thread_local) _scenario_stack`, calls `given_terminal` (or `given_actor_tui_system`), and runs `driver_destroy` when the test exits—eliminating manual `s: Suite_Ctx` + `defer driver_destroy(&s)` boilerplate with zero heap allocations.
+2. **Ambient Namespace DSL (`given.*`, `upon.*`, `then.*`):** Zero-state-threading step calls that automatically forward the active thread-local `Suite_Ctx` and caller `#caller_location` (`loc`).
+3. **`Scenario_Handle` Method Selector VTable (`s->given_*`, `s->upon_*`, `s->then_*`):** `using vtable: ^Suite_Ctx_VTable` on `Scenario_Handle` so specs can also use `->` method call syntax or access `s.ctx` when needed.
+4. **Compile-Time Layer 1 Purity Enforcement (`@(scenario)`):** Any test annotated with `@(scenario)` in `tests/spec_*.odin` is AST-checked by `bifrost_gen --atdd` to forbid raw `testing.expect*` calls, direct Layer 3 `driver_*` calls, and zero-argument `then.*()` ("Macro Theater") assertions.
+
+```odin
+package bifrost_tests
+
+import "core:testing"
+import "../bifrost"
+
+@(test)
+@(scenario)
+spec_three_phase_event_dispatch_and_capture_short_circuit :: proc(t: ^testing.T) {
+	_ = scenario(t, w = 80, h = 24)
+
+	given.focused_widget("save_btn")
+	upon.rendering_frame(proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen) {
+		if bifrost.container(ctx, "root_panel", {dir = .Column, width = bifrost.grow(1), height = bifrost.grow(1)}) {
+			if bifrost.container(ctx, "toolbar", {dir = .Row, width = bifrost.grow(1), height = bifrost.fixed(3)}) {
+				bifrost.ui_button(ctx, scr, "save_btn", {label = "Save"})
+			}
+		}
+	})
+	then.focused_widget_is("save_btn")
+
+	upon.pressing_key(.Enter)
+	then.activated_widget_is("save_btn")
+}
+```
+
+Run the generator and execute the ATDD suite with:
+
+```bash
+odin run tools/bifrost_gen -- --atdd tests
+odin test tests -custom-attribute:scenario
+```
+

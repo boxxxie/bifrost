@@ -8,40 +8,39 @@ import "../bifrost"
 // =============================================================================
 
 @(test)
+@(scenario)
 spec_three_phase_event_dispatch_and_capture_short_circuit :: proc(t: ^testing.T) {
-	s: Suite_Ctx
-	given_terminal(&s, t, w = 80, h = 24)
-	defer driver_destroy(&s)
+	_ = scenario(t, w = 80, h = 24)
 
-	given_focused_widget(&s, "save_btn")
-	upon_rendering_frame(&s, proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen) {
+	given.focused_widget("save_btn")
+	upon.rendering_frame(proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen) {
 		if bifrost.container(ctx, "root_panel", {dir = .Column, width = bifrost.grow(1), height = bifrost.grow(1)}) {
 			if bifrost.container(ctx, "toolbar", {dir = .Row, width = bifrost.grow(1), height = bifrost.fixed(3)}) {
 				bifrost.ui_button(ctx, scr, "save_btn", {label = "Save"})
 			}
 		}
 	})
-	then_focused_widget_is(&s, "save_btn")
+	then.focused_widget_is("save_btn")
 
 	// 1. Pressing Enter traverses Capturing (root_panel -> toolbar), At_Target (save_btn), and Bubbling (toolbar -> root_panel)
-	upon_pressing_key(&s, .Enter)
-	then_dispatch_steps_are(&s, []bifrost.Dispatch_Step{
+	upon.pressing_key(.Enter)
+	then.dispatch_steps_are([]bifrost.Dispatch_Step{
 		{id = "root_panel", phase = .Capturing},
 		{id = "toolbar",    phase = .Capturing},
 		{id = "save_btn",   phase = .At_Target},
 		{id = "toolbar",    phase = .Bubbling},
 		{id = "root_panel", phase = .Bubbling},
 	})
-	then_activated_widget_is(&s, "save_btn")
+	then.activated_widget_is("save_btn")
 
 	// 2. When toolbar consumes events during Capturing, propagation halts before reaching save_btn
-	given_widget_consumes_at(&s, "toolbar", .Capturing)
-	upon_pressing_key(&s, .Enter)
-	then_dispatch_steps_are(&s, []bifrost.Dispatch_Step{
+	given.widget_consumes_at("toolbar", .Capturing)
+	upon.pressing_key(.Enter)
+	then.dispatch_steps_are([]bifrost.Dispatch_Step{
 		{id = "root_panel", phase = .Capturing},
 		{id = "toolbar",    phase = .Capturing},
 	})
-	then_activated_widget_is(&s, "")
+	then.activated_widget_is("")
 }
 
 @(test)
@@ -229,12 +228,11 @@ spec_nested_modals_shield_and_lifo_focus_restoration :: proc(t: ^testing.T) {
 }
 
 @(test)
+@(scenario)
 spec_active_press_mouse_capture_off_axis_drag_and_press_cancel :: proc(t: ^testing.T) {
-	s: Suite_Ctx
-	given_terminal(&s, t, w = 80, h = 24)
-	defer driver_destroy(&s)
+	s := scenario(t, w = 80, h = 24)
 
-	upon_rendering_frame(&s, proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen) {
+	s->upon_rendering_frame(proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen) {
 		if bifrost.container(ctx, "root", {dir = .Row, width = bifrost.grow(1), height = bifrost.grow(1)}) {
 			bifrost.leaf(ctx, "left_pane", 20, 20, {width = bifrost.fixed(20), height = bifrost.fixed(20)})
 			// 1-column splitter bar at x = 20
@@ -263,34 +261,34 @@ spec_active_press_mouse_capture_off_axis_drag_and_press_cancel :: proc(t: ^testi
 	})
 
 	// 1. Press left mouse on 1-column splitter (x = 20, y = 3) and drag outside to x = 28 (over run_btn)
-	upon_mouse_press(&s, 20, 3)
-	upon_mouse_drag(&s, 28, 3)
+	s->upon_mouse_press(20, 3)
+	s->upon_mouse_drag(28, 3)
 
 	// Splitter retains active_press_id, receives +8 drag delta, and suppresses background hover on run_btn
-	then_active_press_is(&s, "splitter")
-	then_drag_delta_is(&s, 8, 0)
-	then_hovered_widget_is(&s, "")
+	s->then_active_press_is("splitter")
+	s->then_drag_delta_is(8, 0)
+	s->then_hovered_widget_is("")
 
 	// 2. Release mouse at x = 28 (over run_btn): clears active_press_id, does NOT activate run_btn,
 	// and transfers hover to run_btn
-	upon_mouse_release(&s, 28, 3)
-	then_active_press_is(&s, "")
-	then_activated_widget_is(&s, "")
-	then_hover_transition_is(&s, hovered_id = "run_btn", entered_id = "run_btn", left_id = "")
+	s->upon_mouse_release(28, 3)
+	s->then_active_press_is("")
+	s->then_activated_widget_is("")
+	s->then_hover_transition_is(hovered_id = "run_btn", entered_id = "run_btn", left_id = "")
 
 	// 3. Press run_btn, drag outside to x = 5, release outside -> press-cancel (no activation)
-	upon_mouse_press(&s, 28, 3)
-	upon_mouse_drag(&s, 5, 3)
-	upon_mouse_release(&s, 5, 3)
-	then_activated_widget_is(&s, "")
+	s->upon_mouse_press(28, 3)
+	s->upon_mouse_drag(5, 3)
+	s->upon_mouse_release(5, 3)
+	s->then_activated_widget_is("")
 
 	// 4. Press run_btn, drag outside to x = 5, drag back inside to x = 27, release inside -> activates run_btn!
-	upon_mouse_press(&s, 28, 3)
-	upon_mouse_drag(&s, 5, 3)
-	then_activated_widget_is(&s, "")
-	upon_mouse_drag(&s, 27, 3)
-	upon_mouse_release(&s, 27, 3)
-	then_activated_widget_is(&s, "run_btn")
+	s->upon_mouse_press(28, 3)
+	s->upon_mouse_drag(5, 3)
+	s->then_activated_widget_is("")
+	s->upon_mouse_drag(27, 3)
+	s->upon_mouse_release(27, 3)
+	s->then_activated_widget_is("run_btn")
 }
 
 @(test)

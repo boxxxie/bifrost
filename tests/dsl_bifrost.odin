@@ -126,6 +126,10 @@ upon_pressing_key :: proc(s: ^Suite_Ctx, code: bifrost.Key_Code, mods: bifrost.M
 	upon_input_events(s, bifrost.Key_Event{code = code, ch = ch, mods = mods})
 }
 
+upon_pressing_key_rune :: proc(s: ^Suite_Ctx, ch: rune, mods: bifrost.Mod_Flags = {}) {
+	upon_pressing_key(s, .Rune, mods, ch)
+}
+
 upon_mouse_move :: proc(s: ^Suite_Ctx, x, y: i32) {
 	upon_input_events(s, bifrost.Mouse_Event{x = x, y = y, action = .Move, button = .None})
 }
