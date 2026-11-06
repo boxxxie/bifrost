@@ -10,14 +10,12 @@ import xitdb "../deps/xitdb/xitdb"
 // =============================================================================
 
 @(test)
+@(scenario)
 spec_worker_actor_commits_and_ui_coordinator_renders :: proc(t: ^testing.T) {
-	s: Suite_Ctx
-	given_actor_xitdb_inspector(&s, t, 100, 24, 2, "$users")
-	defer driver_destroy(&s)
+	_ = actor_scenario(t, w = 100, h = 24, num_workers = 2, active_collection = "$users")
 
 	// Commit 2 moments via worker actor (1 DSL script + 1 sorted batch)
-	upon_worker_transacting_script(
-		&s,
+	upon.worker_transacting_script(
 		`
 		doc "initial seed"
 		put .users$user_000001 = "alice"
@@ -25,17 +23,17 @@ spec_worker_actor_commits_and_ui_coordinator_renders :: proc(t: ^testing.T) {
 		`,
 		"v0.1.0",
 	)
-	upon_worker_committing_batch(&s, "$users", "user", 3, 25, true, "v0.2.0")
+	upon.worker_committing_batch("$users", "user", 3, 25, true, "v0.2.0")
 
 	// Render 1 coalesced UI frame
-	upon_ticking_ui_frame(&s, 1)
+	upon.ticking_ui_frame(1)
 
-	then_worker_ping_count_is(&s, 2)
-	then_ui_coordinator_metrics_are(&s, 2, 1)
-	then_ui_active_moment_is(&s, 1, 1, false)
-	then_ui_screen_contains_text(&s, "LIVE @1 (latest @1")
-	then_ui_screen_contains_text(&s, "Records (27 total)")
-	then_ui_screen_contains_text(&s, "user:000003")
+	then.worker_ping_count_is(2)
+	then.ui_coordinator_metrics_are(2, 1)
+	then.ui_active_moment_is(1, 1, false)
+	then.ui_screen_contains_text("LIVE @1 (latest @1")
+	then.ui_screen_contains_text("Records (27 total)")
+	then.ui_screen_contains_text("user:000003")
 }
 
 @(test)

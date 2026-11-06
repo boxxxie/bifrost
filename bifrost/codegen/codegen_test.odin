@@ -282,14 +282,19 @@ test_atdd_codegen_emits_scoped_scenario_vtable_and_enforces_layer1_purity :: pro
 	dsl_src :: `package sample_tests
 
 import "core:testing"
+import "core:os"
 import "../bifrost"
 
-given_focused_widget :: proc(s: ^Suite_Ctx, id: string) {}
+@(private)
+given_internal_helper :: proc(s: ^Suite_Ctx) {}
+
+given_focused_widget :: proc(s: ^Suite_Ctx, id: string) -> bool { return true }
+given_poly_registered :: proc(s: ^Suite_Ctx, inst: $T, loc := #caller_location) {}
+upon_clicking_widget_ctx :: proc(s: ^Suite_Ctx, id: string) {}
 upon_pressing_key :: proc(s: ^Suite_Ctx, code: bifrost.Key_Code, mods: bifrost.Mod_Flags = {}, ch: rune = 0) {}
-upon_pressing_key_rune :: proc(s: ^Suite_Ctx, ch: rune, mods: bifrost.Mod_Flags = {}) {}
 upon_input_events :: proc(s: ^Suite_Ctx, events: ..bifrost.Input_Event, loc := #caller_location) {}
-upon_query_rect :: proc(s: ^Suite_Ctx, id: string) -> (bifrost.Rect, bool) { return {}, false }
-then_focused_widget_is_ctx :: proc(s: ^Suite_Ctx, id: string, loc := #caller_location) {}
+then_viewport_bounds_are :: proc(s: ^Suite_Ctx) -> (bifrost.Rect, bool) { return {}, true }
+then_focused_widget_is :: proc(s: ^Suite_Ctx, id: string, loc := #caller_location) {}
 `
 
 	clean_spec_src :: `package sample_tests
@@ -329,15 +334,18 @@ spec_clean_layer1_scenario :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(gen_code, "Upon_DSL :: struct"))
 	testing.expect(t, strings.contains(gen_code, "Then_DSL :: struct"))
 	testing.expect(t, strings.contains(gen_code, "events: ..bifrost.Input_Event"))
-	testing.expect(t, strings.contains(gen_code, "..events, loc = loc"))
-	testing.expect(t, strings.contains(gen_code, "-> (bifrost.Rect, bool)"))
-	testing.expect(t, strings.contains(gen_code, "then_focused_widget_is :: proc {"))
 	testing.expect(t, strings.contains(gen_code, "loc := #caller_location"))
+	testing.expect(t, strings.contains(gen_code, "..events, loc = loc"))
+	testing.expect(t, !strings.contains(gen_code, "core:os"))
+	testing.expect(t, !strings.contains(gen_code, "given_internal_helper"))
+	testing.expect(t, strings.contains(gen_code, "focused_widget: proc(id: string) -> bool"))
+	testing.expect(t, strings.contains(gen_code, "viewport_bounds_are: proc() -> (bifrost.Rect, bool)"))
+	testing.expect(t, strings.contains(gen_code, "given_poly_registered_ambient :: #force_inline proc"))
+	testing.expect(t, !strings.contains(gen_code, "poly_registered: proc"))
+	testing.expect(t, strings.contains(gen_code, "upon_clicking_widget :: proc {"))
 
-	// Now verify Layer 1 AST purity linter rejects:
-	// - raw `testing.expect*` (including inside `:=` Value_Decl and inside callback `proc(...) { ... }`)
-	// - direct `driver_*` (including inside `defer` and `s->driver_*`)
-	// - 0-arg `then.*()`, `s->then_*()`, and `then_*()`
+	// Verify Layer 1 AST purity linter catches violations across top-level calls,
+	// `s->step()` arrow calls, `:=` declarations, `defer`, control flow, and callbacks
 	impure_spec_src :: `package sample_tests
 
 import "core:testing"
@@ -345,14 +353,23 @@ import "core:testing"
 @(test)
 @(scenario)
 spec_impure_layer1_scenario :: proc(t: ^testing.T) {
-	s := driver_init(nil, t, 80, 24)
-	defer driver_destroy(&s)
-	ok := testing.expect_value(t, 1, 1)
-	then.everything_works()
-	s->then_all_good()
-	upon.rendering_frame(proc(ctx: ^bifrost.Layout_Context) {
-		testing.expect(t, ctx != nil)
+	s := scenario(t, w = 80, h = 24)
+	defer driver_destroy(s.ctx)
+
+	ok := testing.expect(t, true)
+	if ok {
+		testing.expect_value(t, 1, 1)
+	}
+	for _ in 0 ..< 1 {
+		driver_init(s.ctx, t, 80, 24)
+	}
+	upon.rendering_frame(proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen) {
+		testing.expect(t, true)
 	})
+	s->driver_reset()
+	s->then_all_good()
+	then.everything_works()
+	then_bare_zero_arg()
 }
 `
 	bad_diags := make([dynamic]Codegen_Diagnostic)
@@ -368,13 +385,32 @@ spec_impure_layer1_scenario :: proc(t: ^testing.T) {
 	defer delete(bad_code)
 
 	testing.expect(t, !bad_ok)
-	testing.expect_value(t, len(bad_diags), 6)
-	if len(bad_diags) == 6 {
-		testing.expect(t, strings.contains(bad_diags[0].message, "driver_init"))
-		testing.expect(t, strings.contains(bad_diags[1].message, "driver_destroy"))
+	testing.expect_value(t, len(bad_diags), 9)
+	if len(bad_diags) == 9 {
+		testing.expect(t, strings.contains(bad_diags[0].message, "driver_destroy"))
+		testing.expect(t, strings.contains(bad_diags[1].message, "testing.expect"))
 		testing.expect(t, strings.contains(bad_diags[2].message, "testing.expect_value"))
-		testing.expect(t, strings.contains(bad_diags[3].message, "then.everything_works()"))
-		testing.expect(t, strings.contains(bad_diags[4].message, "s->then_all_good()"))
-		testing.expect(t, strings.contains(bad_diags[5].message, "testing.expect"))
+		testing.expect(t, strings.contains(bad_diags[3].message, "driver_init"))
+		testing.expect(t, strings.contains(bad_diags[4].message, "testing.expect"))
+		testing.expect(t, strings.contains(bad_diags[5].message, "s->driver_reset"))
+		testing.expect(t, strings.contains(bad_diags[6].message, "s->then_all_good()"))
+		testing.expect(t, strings.contains(bad_diags[7].message, "then.everything_works()"))
+		testing.expect(t, strings.contains(bad_diags[8].message, "then_bare_zero_arg()"))
 	}
+
+	// Verify malformed AST syntax fails cleanly with diagnostics
+	syntax_diags := make([dynamic]Codegen_Diagnostic)
+	defer destroy_diagnostics(&syntax_diags)
+
+	broken_code, broken_ok := generate_atdd_from_sources(
+		{"package sample_tests\ngiven_broken :: proc( {"},
+		{"dsl_broken.odin"},
+		{"package sample_tests\nspec_broken :: proc( {"},
+		{"spec_broken.odin"},
+		&syntax_diags,
+	)
+	defer delete(broken_code)
+
+	testing.expect(t, !broken_ok)
+	testing.expect_value(t, len(syntax_diags), 2)
 }

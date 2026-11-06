@@ -603,16 +603,18 @@ parse_source_into_module :: proc(
 	arena_alloc := mem.dynamic_arena_allocator(&mod.ast_arena)
 	p := parser.default_parser()
 	file: ^ast.File
+	parse_ok := false
 	{
 		context.allocator = arena_alloc
 		file = ast.new(ast.File, tokenizer.Pos{}, tokenizer.Pos{})
 		file.src      = src
 		file.fullpath = filename
-		if !parser.parse_file(&p, file) || p.error_count > 0 {
-			msg := fmt.tprintf("failed to parse Odin file (%d syntax errors)", p.error_count)
-			append_diagnostic(diags, filename, 1, 1, msg)
-			return false
-		}
+		parse_ok = parser.parse_file(&p, file) && p.error_count == 0
+	}
+	if !parse_ok {
+		msg := fmt.tprintf("failed to parse Odin file (%d syntax errors)", p.error_count)
+		append_diagnostic(diags, filename, 1, 1, msg)
+		return false
 	}
 
 	if len(mod.package_name) == 0 && file.pkg_name != "" {

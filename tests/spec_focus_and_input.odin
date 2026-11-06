@@ -44,10 +44,9 @@ spec_three_phase_event_dispatch_and_capture_short_circuit :: proc(t: ^testing.T)
 }
 
 @(test)
+@(scenario)
 spec_scoped_tab_cycling_f6_pane_switching_and_modal_dismissal :: proc(t: ^testing.T) {
-	s: Suite_Ctx
-	given_terminal(&s, t, w = 60, h = 20)
-	defer driver_destroy(&s)
+	s := scenario(t, w = 60, h = 20)
 
 	build_scoped_ui :: proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen, show_modal: bool) {
 		if bifrost.container(ctx, "root", {dir = .Row, width = bifrost.grow(1), height = bifrost.grow(1)}) {
@@ -89,55 +88,54 @@ spec_scoped_tab_cycling_f6_pane_switching_and_modal_dismissal :: proc(t: ^testin
 	}
 
 	// Frame 1: Base UI without modal
-	upon_rendering_frame(&s, proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen) {
+	upon.rendering_frame(proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen) {
 		build_scoped_ui(ctx, scr, false)
 	})
-	then_focused_widget_is(&s, "nav_logs")
+	then.focused_widget_is("nav_logs")
 
 	// Tab cycles strictly within sidebar focus_scope
-	upon_pressing_key(&s, .Tab)
-	then_focused_widget_is(&s, "nav_metrics")
-	upon_pressing_key(&s, .Tab)
-	then_focused_widget_is(&s, "nav_logs")
-	upon_pressing_key(&s, .Tab, {.Shift})
-	then_focused_widget_is(&s, "nav_metrics")
+	upon.pressing_key(.Tab)
+	then.focused_widget_is("nav_metrics")
+	upon.pressing_key(.Tab)
+	then.focused_widget_is("nav_logs")
+	upon.pressing_key(.Tab, {.Shift})
+	then.focused_widget_is("nav_metrics")
 
 	// F6 switches between focus scopes (sidebar -> main_panel)
-	upon_pressing_key(&s, .F6)
-	then_focused_widget_is(&s, "main_compact_btn")
+	upon.pressing_key(.F6)
+	then.focused_widget_is("main_compact_btn")
 
 	// Frame 2: Modal opens at z_layer = 20
-	upon_rendering_frame(&s, proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen) {
+	upon.rendering_frame(proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen) {
 		build_scoped_ui(ctx, scr, true)
 	})
-	then_focused_widget_is(&s, "modal_yes")
+	then.focused_widget_is("modal_yes")
 
 	// Tab & Shift+Tab trap focus inside modal; F6 cannot escape modal
-	upon_pressing_key(&s, .Tab)
-	then_focused_widget_is(&s, "modal_no")
-	upon_pressing_key(&s, .Tab)
-	then_focused_widget_is(&s, "modal_yes")
-	upon_pressing_key(&s, .Tab, {.Shift})
-	then_focused_widget_is(&s, "modal_no")
-	upon_pressing_key(&s, .F6)
-	then_focused_widget_is(&s, "modal_no")
+	upon.pressing_key(.Tab)
+	then.focused_widget_is("modal_no")
+	upon.pressing_key(.Tab)
+	then.focused_widget_is("modal_yes")
+	upon.pressing_key(.Tab, {.Shift})
+	then.focused_widget_is("modal_no")
+	upon.pressing_key(.F6)
+	then.focused_widget_is("modal_no")
 
 	// Clicking background nav_logs is blocked and reports backdrop dismissal
 	nav_rect, _ := bifrost.get_rect(&s.layout_ctx, "nav_logs")
-	upon_mouse_click(&s, nav_rect.x + 1, nav_rect.y)
-	then_activated_widget_is(&s, "")
-	then_modal_dismissed_is(&s, "confirm_modal", true)
+	upon.mouse_click(nav_rect.x + 1, nav_rect.y)
+	then.activated_widget_is("")
+	then.modal_dismissed_is("confirm_modal", true)
 
 	// Pressing Escape also reports modal dismissal
-	upon_pressing_key(&s, .Escape)
-	then_modal_dismissed_is(&s, "confirm_modal", true)
+	upon.pressing_key(.Escape)
+	then.modal_dismissed_is("confirm_modal", true)
 }
 
 @(test)
+@(scenario)
 spec_nested_modals_shield_and_lifo_focus_restoration :: proc(t: ^testing.T) {
-	s: Suite_Ctx
-	given_terminal(&s, t, w = 80, h = 24)
-	defer driver_destroy(&s)
+	s := scenario(t, w = 80, h = 24)
 
 	build_nested_modals_ui :: proc(
 		ctx: ^bifrost.Layout_Context,
@@ -178,53 +176,53 @@ spec_nested_modals_shield_and_lifo_focus_restoration :: proc(t: ^testing.T) {
 	}
 
 	// 1. Base UI (z = 0) focused on editor_b
-	given_focused_widget(&s, "editor_b")
-	upon_rendering_frame(&s, proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen) {
+	given.focused_widget("editor_b")
+	upon.rendering_frame(proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen) {
 		build_nested_modals_ui(ctx, scr, false, false)
 	})
-	then_focused_widget_is(&s, "editor_b")
+	then.focused_widget_is("editor_b")
 
 	// 2. Open Confirmation Modal (z = 20) -> focus moves to confirm_cancel, then Tab to confirm_ok
-	upon_rendering_frame(&s, proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen) {
+	upon.rendering_frame(proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen) {
 		build_nested_modals_ui(ctx, scr, true, false)
 	})
-	then_focused_widget_is(&s, "confirm_cancel")
-	upon_pressing_key(&s, .Tab)
-	then_focused_widget_is(&s, "confirm_ok")
+	then.focused_widget_is("confirm_cancel")
+	upon.pressing_key(.Tab)
+	then.focused_widget_is("confirm_ok")
 
 	// Clicking editor_a at (2, 1) is blocked by z = 20 shield
-	upon_mouse_click(&s, 2, 1)
-	then_activated_widget_is(&s, "")
-	then_focused_widget_is(&s, "confirm_ok")
+	upon.mouse_click(2, 1)
+	then.activated_widget_is("")
+	then.focused_widget_is("confirm_ok")
 
 	// 3. Open Command Palette (z = 30) on top of Confirmation Modal (z = 20)
-	upon_rendering_frame(&s, proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen) {
+	upon.rendering_frame(proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen) {
 		build_nested_modals_ui(ctx, scr, true, true)
 	})
-	then_focused_widget_is(&s, "palette_input")
+	then.focused_widget_is("palette_input")
 
 	// Clicking confirm_ok inside z = 20 is blocked by z = 30 shield
 	ok_rect, _ := bifrost.get_rect(&s.layout_ctx, "confirm_ok")
-	upon_mouse_click(&s, ok_rect.x + 1, ok_rect.y)
-	then_activated_widget_is(&s, "")
-	then_focused_widget_is(&s, "palette_input")
+	upon.mouse_click(ok_rect.x + 1, ok_rect.y)
+	then.activated_widget_is("")
+	then.focused_widget_is("palette_input")
 
 	// 4. Close Command Palette (z = 30) while Confirmation Modal (z = 20) remains mounted
 	// Focus must restore in LIFO order to confirm_ok (not confirm_cancel and not editor_b!)
-	upon_rendering_frame(&s, proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen) {
+	upon.rendering_frame(proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen) {
 		build_nested_modals_ui(ctx, scr, true, false)
 	})
-	then_focused_widget_is(&s, "confirm_ok")
+	then.focused_widget_is("confirm_ok")
 
 	// And Base UI (z = 0) remains shielded by Confirmation Modal (z = 20)
-	upon_mouse_click(&s, 2, 1)
-	then_activated_widget_is(&s, "")
+	upon.mouse_click(2, 1)
+	then.activated_widget_is("")
 
 	// 5. Close Confirmation Modal (z = 20) -> focus restores to editor_b in Base UI (z = 0)
-	upon_rendering_frame(&s, proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen) {
+	upon.rendering_frame(proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen) {
 		build_nested_modals_ui(ctx, scr, false, false)
 	})
-	then_focused_widget_is(&s, "editor_b")
+	then.focused_widget_is("editor_b")
 }
 
 @(test)
@@ -292,10 +290,9 @@ spec_active_press_mouse_capture_off_axis_drag_and_press_cancel :: proc(t: ^testi
 }
 
 @(test)
+@(scenario)
 spec_clipped_hit_testing_and_stationary_scroll_hover_transitions :: proc(t: ^testing.T) {
-	s: Suite_Ctx
-	given_terminal(&s, t, w = 80, h = 24)
-	defer driver_destroy(&s)
+	s := scenario(t, w = 80, h = 24)
 
 	build_scroll_ui :: proc(
 		ctx: ^bifrost.Layout_Context,
@@ -338,93 +335,91 @@ spec_clipped_hit_testing_and_stationary_scroll_hover_transitions :: proc(t: ^tes
 	// row_2: y = 4..6 (visible)
 	// row_3: y = 8..10 (clipped out below viewport y = 0..6!)
 	// footer_btn: y = 6..8 (below scroll_list)
-	driver_begin_frame(&s)
-	build_scroll_ui(&s.layout_ctx, &s.screen, &s.state_store, []string{"row_1", "row_2", "row_3"})
-	driver_end_frame(&s)
+	upon.rendering_frame(proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen) {
+		build_scroll_ui(ctx, scr, &current_scenario().state_store, []string{"row_1", "row_2", "row_3"})
+	})
 
-	then_persisted_scroll_is(&s, "scroll_list", offset_y = 0, max_y = 4)
-	then_node_clip_is(&s, "row_1", {x = 0, y = 0, w = 40, h = 2})
-	then_node_clip_is(&s, "row_3", {x = 0, y = 8, w = 0, h = 0})
+	then.persisted_scroll_is("scroll_list", offset_y = 0, max_y = 4)
+	then.node_clip_is("row_1", {x = 0, y = 0, w = 40, h = 2})
+	then.node_clip_is("row_3", {x = 0, y = 8, w = 0, h = 0})
 
 	// Clicking at y = 8 (inside row_3.rect, but row_3.node_clip is empty!) must NOT ghost-click row_3
-	upon_mouse_click(&s, 5, 8)
-	then_activated_widget_is(&s, "")
+	upon.mouse_click(5, 8)
+	then.activated_widget_is("")
 
 	// Clicking at y = 7 hits footer_btn
-	upon_mouse_click(&s, 5, 7)
-	then_activated_widget_is(&s, "footer_btn")
+	upon.mouse_click(5, 7)
+	then.activated_widget_is("footer_btn")
 
 	// Move mouse to (5, 1) -> hovers row_1
-	upon_mouse_move(&s, 5, 1)
-	then_hover_transition_is(&s, hovered_id = "row_1", entered_id = "row_1", left_id = "footer_btn")
+	upon.mouse_move(5, 1)
+	then.hover_transition_is(hovered_id = "row_1", entered_id = "row_1", left_id = "footer_btn")
 
 	// Scroll wheel down at (5, 1) -> scrolls scroll_list by +4 (offset_y = 4)
-	upon_mouse_scroll(&s, 5, 1, .Scroll_Down)
-	then_persisted_scroll_is(&s, "scroll_list", offset_y = 4, max_y = 4)
+	upon.mouse_scroll(5, 1, .Scroll_Down)
+	then.persisted_scroll_is("scroll_list", offset_y = 4, max_y = 4)
 
 	// --- Frame 2: Rebuild with persisted scroll_offset = 4 under stationary cursor at (5, 1) ---
-	driver_begin_frame(&s)
-	build_scroll_ui(&s.layout_ctx, &s.screen, &s.state_store, []string{"row_1", "row_2", "row_3"})
-	driver_end_frame(&s)
+	upon.rendering_frame(proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen) {
+		build_scroll_ui(ctx, scr, &current_scenario().state_store, []string{"row_1", "row_2", "row_3"})
+	})
 
-	then_node_clip_is(&s, "row_1", {x = 0, y = 0, w = 0, h = 0}) // Clipped out above
-	then_node_clip_is(&s, "row_2", {x = 0, y = 0, w = 40, h = 2}) // Shifted to y = 0..2
-	then_node_clip_is(&s, "row_3", {x = 0, y = 4, w = 40, h = 2}) // Shifted to y = 4..6
+	then.node_clip_is("row_1", {x = 0, y = 0, w = 0, h = 0}) // Clipped out above
+	then.node_clip_is("row_2", {x = 0, y = 0, w = 40, h = 2}) // Shifted to y = 0..2
+	then.node_clip_is("row_3", {x = 0, y = 4, w = 40, h = 2}) // Shifted to y = 4..6
 
 	// Stationary cursor at (5, 1) automatically leaves row_1 and enters row_2
-	then_hover_transition_is(&s, hovered_id = "row_2", entered_id = "row_2", left_id = "row_1")
+	then.hover_transition_is(hovered_id = "row_2", entered_id = "row_2", left_id = "row_1")
 
 	// Clicking at (5, 5) now activates newly visible row_3
-	upon_mouse_click(&s, 5, 5)
-	then_activated_widget_is(&s, "row_3")
+	upon.mouse_click(5, 5)
+	then.activated_widget_is("row_3")
 
 	// --- Frame 3: Shrink content to 1 row ("row_1") -> clamps scroll_offset from 4 -> 0 ---
-	driver_begin_frame(&s)
-	build_scroll_ui(&s.layout_ctx, &s.screen, &s.state_store, []string{"row_1"})
-	driver_end_frame(&s)
+	upon.rendering_frame(proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen) {
+		build_scroll_ui(ctx, scr, &current_scenario().state_store, []string{"row_1"})
+	})
 
-	then_persisted_scroll_is(&s, "scroll_list", offset_y = 0, max_y = 0)
-	then_node_clip_is(&s, "row_1", {x = 0, y = 0, w = 40, h = 2})
+	then.persisted_scroll_is("scroll_list", offset_y = 0, max_y = 0)
+	then.node_clip_is("row_1", {x = 0, y = 0, w = 40, h = 2})
 
 	// --- Frame 4: Unmount scroll_list -> Widget_State_Store prunes "scroll_list" ---
-	driver_begin_frame(&s)
-	build_scroll_ui(&s.layout_ctx, &s.screen, &s.state_store, nil)
-	driver_end_frame(&s)
+	upon.rendering_frame(proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen) {
+		build_scroll_ui(ctx, scr, &current_scenario().state_store, nil)
+	})
 
-	then_state_store_contains(&s, "scroll_list", false)
+	s->then_state_store_contains("scroll_list", false)
 }
 
 
 @(test)
+@(scenario)
 spec_disabled_widget_and_subtree_auto_advance_and_floating_window_bring_to_front :: proc(t: ^testing.T) {
-	s: Suite_Ctx
-	given_terminal(&s, t, w = 80, h = 24)
-	defer driver_destroy(&s)
+	_ = scenario(t, w = 80, h = 24)
 
 	build_disabled_and_floating_ui :: proc(
-		s: ^Suite_Ctx,
+		ctx: ^bifrost.Layout_Context,
+		scr: ^bifrost.Screen,
 		disable_btn_2: bool,
 		disable_group: bool,
-		events: ..bifrost.Input_Event,
 	) {
-		driver_begin_frame(s, bifrost.rgb(18, 22, 30))
-		if bifrost.container(&s.layout_ctx, "root", {dir = .Column, width = bifrost.grow(1), height = bifrost.grow(1)}) {
-			bifrost.ui_button(&s.layout_ctx, &s.screen, "btn_1", {label = "One"})
+		if bifrost.container(ctx, "root", {dir = .Column, width = bifrost.grow(1), height = bifrost.grow(1)}) {
+			bifrost.ui_button(ctx, scr, "btn_1", {label = "One"})
 			b2_flags := bifrost.Focus_Flags{.Disabled} if disable_btn_2 else bifrost.Focus_Flags{}
-			bifrost.ui_button(&s.layout_ctx, &s.screen, "btn_2", {label = "Two", focus_flags = b2_flags})
+			bifrost.ui_button(ctx, scr, "btn_2", {label = "Two", focus_flags = b2_flags})
 
 			grp_flags := bifrost.Focus_Flags{.Disabled} if disable_group else bifrost.Focus_Flags{}
-			if bifrost.container(&s.layout_ctx, "sub_grp", {
+			if bifrost.container(ctx, "sub_grp", {
 				dir         = .Row,
 				width       = bifrost.fit(),
 				height      = bifrost.fit(),
 				focus_flags = grp_flags,
 			}) {
-				bifrost.ui_button(&s.layout_ctx, &s.screen, "btn_3", {label = "Three"})
+				bifrost.ui_button(ctx, scr, "btn_3", {label = "Three"})
 			}
 
 			// Two overlapping non-modal floating tool windows at z_layer = 10
-			if bifrost.container(&s.layout_ctx, "float_a", {
+			if bifrost.container(ctx, "float_a", {
 				dir         = .Column,
 				width       = bifrost.fixed(20),
 				height      = bifrost.fixed(4),
@@ -433,13 +428,13 @@ spec_disabled_widget_and_subtree_auto_advance_and_floating_window_bring_to_front
 				offset      = {10, 8},
 				focus_flags = {.Focus_Scope},
 			}) {
-				bifrost.ui_button(&s.layout_ctx, &s.screen, "float_a_btn", {
+				bifrost.ui_button(ctx, scr, "float_a_btn", {
 					label  = "Float A",
 					width  = bifrost.fixed(18),
 					height = bifrost.fixed(2),
 				})
 			}
-			if bifrost.container(&s.layout_ctx, "float_b", {
+			if bifrost.container(ctx, "float_b", {
 				dir         = .Column,
 				width       = bifrost.fixed(20),
 				height      = bifrost.fixed(4),
@@ -448,48 +443,66 @@ spec_disabled_widget_and_subtree_auto_advance_and_floating_window_bring_to_front
 				offset      = {10, 8},
 				focus_flags = {.Focus_Scope},
 			}) {
-				bifrost.ui_button(&s.layout_ctx, &s.screen, "float_b_btn", {
+				bifrost.ui_button(ctx, scr, "float_b_btn", {
 					label  = "Float B",
 					width  = bifrost.fixed(18),
 					height = bifrost.fixed(2),
 				})
 			}
 		}
-		driver_end_frame(s, ..events)
 	}
 
 	// 1. Focus btn_2 via Tab, then mark btn_2 .Disabled on next frame -> auto-advances off disabled btn_2
-	build_disabled_and_floating_ui(&s, false, false, bifrost.Key_Event{code = .Tab})
-	then_focused_widget_is(&s, "btn_2")
+	upon.rendering_frame(proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen) {
+		build_disabled_and_floating_ui(ctx, scr, false, false)
+	})
+	upon.pressing_key(.Tab)
+	then.focused_widget_is("btn_2")
 
-	build_disabled_and_floating_ui(&s, true, false)
-	then_focused_widget_is(&s, "btn_1")
+	upon.rendering_frame(proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen) {
+		build_disabled_and_floating_ui(ctx, scr, true, false)
+	})
+	then.focused_widget_is("btn_1")
 
 	// Clicking disabled btn_2 must not focus or activate it
-	upon_clicking_widget(&s, "btn_2")
-	then_activated_widget_is(&s, "")
-	then_focused_widget_is(&s, "btn_1")
+	upon.clicking_widget("btn_2")
+	then.activated_widget_is("")
+	then.focused_widget_is("btn_1")
 
 	// 2. Focus btn_3 inside sub_grp, then disable ancestor sub_grp -> inherited .Disabled evacuates focus
-	upon_requesting_focus(&s, "btn_3")
-	build_disabled_and_floating_ui(&s, true, false)
-	then_focused_widget_is(&s, "btn_3")
+	upon.requesting_focus("btn_3")
+	upon.rendering_frame(proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen) {
+		build_disabled_and_floating_ui(ctx, scr, true, false)
+	})
+	then.focused_widget_is("btn_3")
 
-	build_disabled_and_floating_ui(&s, true, true)
-	then_focused_widget_is(&s, "btn_1")
+	upon.rendering_frame(proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen) {
+		build_disabled_and_floating_ui(ctx, scr, true, true)
+	})
+	then.focused_widget_is("btn_1")
 
 	// 3. Promoting non-modal floating window float_a brings it in front of sibling float_b at z_layer=10
-	upon_requesting_focus(&s, "float_a_btn")
-	build_disabled_and_floating_ui(&s, false, false)
-	then_focused_widget_is(&s, "float_a_btn")
+	upon.requesting_focus("float_a_btn")
+	upon.rendering_frame(proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen) {
+		build_disabled_and_floating_ui(ctx, scr, false, false)
+	})
+	then.focused_widget_is("float_a_btn")
 
-	build_disabled_and_floating_ui(
-		&s,
-		false,
-		false,
-		bifrost.Mouse_Event{x = 12, y = 8, action = .Press, button = .Left},
-		bifrost.Mouse_Event{x = 12, y = 8, action = .Release, button = .Left},
-	)
-	then_activated_widget_is(&s, "float_a_btn")
+	upon.mouse_click(12, 8)
+	then.activated_widget_is("float_a_btn")
+
+	// 4. Verify nested `{ _ = scenario(t) }` scope restoration preserves outer scenario context
+	{
+		inner := scenario(t, w = 40, h = 10)
+		inner->given_focused_widget("inner_only_btn")
+		upon.rendering_frame(proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen) {
+			if bifrost.container(ctx, "inner_root", {dir = .Column, width = bifrost.grow(1), height = bifrost.grow(1)}) {
+				bifrost.ui_button(ctx, scr, "inner_only_btn", {label = "Inner"})
+			}
+		})
+		then.focused_widget_is("inner_only_btn")
+	}
+	// Outer scenario context is restored after inner scope exits
+	then.focused_widget_is("float_a_btn")
 }
 
