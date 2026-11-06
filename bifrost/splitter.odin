@@ -5,7 +5,11 @@ package bifrost
 // =============================================================================
 
 MAX_SPLITTER_SLOTS :: 16
-MAX_KEYBINDINGS    :: 64
+
+Splitter_Submode :: enum u8 {
+	Navigate = 0, // Default spatial-passthrough focus state (Enter enters Resize)
+	Resize   = 1, // Active keyboard resize sub-mode (h/j/k/l or Arrows resize, = resets, Enter/Esc exits)
+}
 
 Splitter_Slot :: struct {
 	id_hash:         u64,
@@ -154,10 +158,17 @@ sync_splitter_paint :: proc(s: ^Screen, inp: ^Input_State, node: Layout_Node) {
 		return
 	}
 	is_row := slot.dir == .Row
+	resizing := get_scope_submode_by_hash(inp, node.id_hash) == u8(Splitter_Submode.Resize)
 	active := (node.id_hash == inp.focused_id) || (node.id_hash == inp.active_splitter_id)
 	hovered := node.id_hash == inp.hovered_id
 
-	if active {
+	if resizing {
+		paint.fill_char = '║' if is_row else '═'
+		if paint.border_fg.kind != .Default {
+			paint.fg = paint.border_fg
+		}
+		paint.style += {.Bold, .Reverse}
+	} else if active {
 		paint.fill_char = '┃' if is_row else '━'
 		if paint.border_fg.kind != .Default {
 			paint.fg = paint.border_fg
@@ -241,32 +252,113 @@ handle_splitter_key :: proc "contextless" (
 	ev: Key_Event,
 ) -> bool {
 	node := ctx.nodes[node_idx]
+	eff_mods := ev.mods - {.Caps_Lock, .Num_Lock}
+	submode := Splitter_Submode(get_scope_submode_by_hash(inp, node.id_hash))
+
+	if submode == .Navigate {
+		if ev.code == .Enter && eff_mods == {} {
+			set_scope_submode_by_hash(inp, node.id_hash, u8(Splitter_Submode.Resize))
+			return true
+		}
+		return false
+	}
+
+	// Splitter_Submode.Resize: h/j/k/l, Arrows, or Emacs C-b/C-f/C-p/C-n resize; =/0/Home resets; Enter/Escape exits
+	if (ev.code == .Enter || ev.code == .Escape) && eff_mods == {} {
+		clear_repeat_count(inp)
+		set_scope_submode_by_hash(inp, node.id_hash, 0)
+		return true
+	}
+
 	slot := get_splitter_slot(inp, node.id_hash)
-	step := max(1, slot.step)
+	unit_step := max(1, slot.step)
 	max_first := compute_splitter_max_first(slot)
 
+	if eff_mods == {} && ev.code == .Rune && ev.ch >= '0' && ev.ch <= '9' {
+		digit := i32(ev.ch - '0')
+		if inp.keymap_style == .Helix && inp.has_last_motion && (digit > 0 || inp.suffix_count > 0) {
+			new_suffix := min(9999, inp.suffix_count * 10 + digit)
+			inp.suffix_count = new_suffix
+			delta := new_suffix - inp.last_motion_applied
+			if delta > 0 {
+				sign: i32 = 1 if (inp.last_motion_dir == .Right || inp.last_motion_dir == .Down) else -1
+				apply_splitter_size_immediate(ctx, node_idx, slot, clamp(slot.size + sign * delta * unit_step, slot.min_first, max_first))
+				inp.last_motion_applied = new_suffix
+			}
+			return true
+		}
+		if (ev.ch >= '1' && ev.ch <= '9') || (ev.ch == '0' && (inp.repeat_count > 0 || inp.emacs_universal_arg)) {
+			if inp.keymap_style == .Emacs && inp.emacs_universal_arg && !inp.emacs_arg_digits {
+				inp.emacs_arg_digits = true
+				inp.repeat_count     = digit
+			} else {
+				inp.repeat_count = min(9999, inp.repeat_count * 10 + digit)
+			}
+			return true
+		}
+	}
+
+	mult := consume_repeat_count(inp)
+	step := unit_step * mult
+
+	if ev.code == .Home || (eff_mods == {} && ev.code == .Rune && (ev.ch == '=' || ev.ch == '0')) {
+		clear_repeat_count(inp)
+		apply_splitter_size_immediate(ctx, node_idx, slot, clamp(slot.default_size, slot.min_first, max_first))
+		return true
+	}
+
 	if slot.dir == .Row {
-		#partial switch ev.code {
-		case .Left:
+		is_left := ev.code == .Left ||
+			(eff_mods == {} && inp.keymap_style != .Emacs && ev.code == .Rune && (ev.ch == 'h' || ev.ch == 'H')) ||
+			(eff_mods == {.Ctrl} && inp.keymap_style == .Emacs && ev.code == .Rune && (ev.ch == 'b' || ev.ch == 'B'))
+		is_right := ev.code == .Right ||
+			(eff_mods == {} && inp.keymap_style != .Emacs && ev.code == .Rune && (ev.ch == 'l' || ev.ch == 'L')) ||
+			(eff_mods == {.Ctrl} && inp.keymap_style == .Emacs && ev.code == .Rune && (ev.ch == 'f' || ev.ch == 'F'))
+		if is_left {
 			apply_splitter_size_immediate(ctx, node_idx, slot, clamp(slot.size - step, slot.min_first, max_first))
+			if inp.keymap_style == .Helix {
+				inp.has_last_motion     = true
+				inp.last_motion_dir     = .Left
+				inp.last_motion_applied = mult
+				inp.suffix_count        = 0
+			}
 			return true
-		case .Right:
+		}
+		if is_right {
 			apply_splitter_size_immediate(ctx, node_idx, slot, clamp(slot.size + step, slot.min_first, max_first))
-			return true
-		case .Home, .Enter:
-			apply_splitter_size_immediate(ctx, node_idx, slot, clamp(slot.default_size, slot.min_first, max_first))
+			if inp.keymap_style == .Helix {
+				inp.has_last_motion     = true
+				inp.last_motion_dir     = .Right
+				inp.last_motion_applied = mult
+				inp.suffix_count        = 0
+			}
 			return true
 		}
 	} else {
-		#partial switch ev.code {
-		case .Up:
+		is_up := ev.code == .Up ||
+			(eff_mods == {} && inp.keymap_style != .Emacs && ev.code == .Rune && (ev.ch == 'k' || ev.ch == 'K')) ||
+			(eff_mods == {.Ctrl} && inp.keymap_style == .Emacs && ev.code == .Rune && (ev.ch == 'p' || ev.ch == 'P'))
+		is_down := ev.code == .Down ||
+			(eff_mods == {} && inp.keymap_style != .Emacs && ev.code == .Rune && (ev.ch == 'j' || ev.ch == 'J')) ||
+			(eff_mods == {.Ctrl} && inp.keymap_style == .Emacs && ev.code == .Rune && (ev.ch == 'n' || ev.ch == 'N'))
+		if is_up {
 			apply_splitter_size_immediate(ctx, node_idx, slot, clamp(slot.size - step, slot.min_first, max_first))
+			if inp.keymap_style == .Helix {
+				inp.has_last_motion     = true
+				inp.last_motion_dir     = .Up
+				inp.last_motion_applied = mult
+				inp.suffix_count        = 0
+			}
 			return true
-		case .Down:
+		}
+		if is_down {
 			apply_splitter_size_immediate(ctx, node_idx, slot, clamp(slot.size + step, slot.min_first, max_first))
-			return true
-		case .Home, .Enter:
-			apply_splitter_size_immediate(ctx, node_idx, slot, clamp(slot.default_size, slot.min_first, max_first))
+			if inp.keymap_style == .Helix {
+				inp.has_last_motion     = true
+				inp.last_motion_dir     = .Down
+				inp.last_motion_applied = mult
+				inp.suffix_count        = 0
+			}
 			return true
 		}
 	}
@@ -410,215 +502,3 @@ recompute_subtree_clips :: proc "contextless" (ctx: ^Layout_Context, idx: i32, p
 	}
 }
 
-// =============================================================================
-// 3-Tier Scoped & Global Keybinding Table (OpenCode / Television Priority Model)
-// =============================================================================
-
-Key_Scope_Policy :: enum u8 {
-	Root_And_Scopes = 0, // Active on root layout and focus scopes, suppressed when an overlay modal captures input
-	Scope_Only,          // Active ONLY when `active_scope_id == scope_id` (and not blocked by higher modal)
-	Global_Always,       // Active globally even when a capturing modal is open (e.g. Ctrl+P palette toggle)
-}
-
-Keybinding_Flag :: enum u8 {
-	Allow_In_Text_Input, // Fires even when a text_input widget is focused (default for Ctrl+key & F-keys)
-}
-
-Keybinding_Flags :: bit_set[Keybinding_Flag; u8]
-
-Keybinding :: struct {
-	key:               Key_Event,
-	scope_id:          u64,
-	policy:            Key_Scope_Policy,
-	flags:             Keybinding_Flags,
-	action_id:         u64,
-	action_name:       string,
-	nudge_splitter_id: u64,
-	nudge_delta:       i32,
-}
-
-clear_keybindings :: proc "contextless" (inp: ^Input_State) {
-	inp.keybinding_count = 0
-}
-
-bind_key :: proc(
-	inp: ^Input_State,
-	key: Key_Event,
-	action_name: string,
-	policy: Key_Scope_Policy = .Root_And_Scopes,
-	scope_id: string = "",
-	flags: Keybinding_Flags = {},
-) {
-	if inp.keybinding_count >= MAX_KEYBINDINGS {
-		return
-	}
-	scope_h := hash_id(scope_id) if len(scope_id) > 0 else 0
-	eff_policy := policy
-	if scope_h != 0 && eff_policy == .Root_And_Scopes {
-		eff_policy = .Scope_Only
-	}
-	inp.keybindings[inp.keybinding_count] = Keybinding{
-		key         = key,
-		scope_id    = scope_h,
-		policy      = eff_policy,
-		flags       = flags,
-		action_id   = hash_id(action_name),
-		action_name = action_name,
-	}
-	inp.keybinding_count += 1
-}
-
-// Binds a keyboard shortcut that also nudges a splitter by `delta` cells in the same frame when triggered.
-bind_splitter_key :: proc(
-	inp: ^Input_State,
-	key: Key_Event,
-	splitter_id: string,
-	delta: i32,
-	action_name: string = "",
-	policy: Key_Scope_Policy = .Root_And_Scopes,
-	scope_id: string = "",
-	flags: Keybinding_Flags = {.Allow_In_Text_Input},
-) {
-	if inp.keybinding_count >= MAX_KEYBINDINGS {
-		return
-	}
-	scope_h := hash_id(scope_id) if len(scope_id) > 0 else 0
-	eff_policy := policy
-	if scope_h != 0 && eff_policy == .Root_And_Scopes {
-		eff_policy = .Scope_Only
-	}
-	act_name := action_name if len(action_name) > 0 else splitter_id
-	inp.keybindings[inp.keybinding_count] = Keybinding{
-		key               = key,
-		scope_id          = scope_h,
-		policy            = eff_policy,
-		flags             = flags,
-		action_id         = hash_id(act_name),
-		action_name       = act_name,
-		nudge_splitter_id = hash_id(splitter_id),
-		nudge_delta       = delta,
-	}
-	inp.keybinding_count += 1
-}
-
-was_action_triggered :: proc(inp: ^Input_State, action_name: string) -> bool {
-	return inp.triggered_action_id != 0 && inp.triggered_action_id == hash_id(action_name)
-}
-
-// Evaluates registered keybindings in 3 priority tiers:
-// Tier 1: `.Scope_Only` matching `inp.active_scope_id` (when allowed by active modal shield)
-// Tier 2: `.Root_And_Scopes` (when no capturing modal shield is active)
-// Tier 3: `.Global_Always` (active even when a capturing modal is open)
-// Single-character printable keys without `.Ctrl` are suppressed while a `text_input` is focused
-// unless `.Allow_In_Text_Input` is explicitly set.
-dispatch_keybindings :: proc "contextless" (
-	inp: ^Input_State,
-	ctx: ^Layout_Context,
-	capture_idx: i32,
-	ev: Key_Event,
-) -> bool {
-	if inp.keybinding_count == 0 {
-		return false
-	}
-
-	text_input_focused := false
-	if inp.focused_id != 0 {
-		if f_idx, ok := ctx.id_map[inp.focused_id]; ok {
-			text_input_focused = ctx.nodes[f_idx].config.text_input
-		}
-	}
-
-	// Tier 1: Scope_Only bindings matching active_scope_id
-	for i := 0; i < inp.keybinding_count; i += 1 {
-		kb := inp.keybindings[i]
-		if kb.policy != .Scope_Only || kb.scope_id != inp.active_scope_id {
-			continue
-		}
-		if capture_idx >= 0 {
-			if s_idx, ok := ctx.id_map[kb.scope_id]; !ok || !is_node_allowed(ctx, s_idx, capture_idx) {
-				continue
-			}
-		}
-		if match_and_fire_binding(inp, ctx, kb, ev, text_input_focused) {
-			return true
-		}
-	}
-
-	// Tier 2: Root_And_Scopes bindings (suppressed when a capturing modal is open)
-	if capture_idx < 0 {
-		for i := 0; i < inp.keybinding_count; i += 1 {
-			kb := inp.keybindings[i]
-			if kb.policy != .Root_And_Scopes {
-				continue
-			}
-			if match_and_fire_binding(inp, ctx, kb, ev, text_input_focused) {
-				return true
-			}
-		}
-	}
-
-	// Tier 3: Global_Always bindings
-	for i := 0; i < inp.keybinding_count; i += 1 {
-		kb := inp.keybindings[i]
-		if kb.policy != .Global_Always {
-			continue
-		}
-		if match_and_fire_binding(inp, ctx, kb, ev, text_input_focused) {
-			return true
-		}
-	}
-
-	return false
-}
-
-@(private)
-match_and_fire_binding :: proc "contextless" (
-	inp: ^Input_State,
-	ctx: ^Layout_Context,
-	kb: Keybinding,
-	ev: Key_Event,
-	text_input_focused: bool,
-) -> bool {
-	if kb.key.code != ev.code {
-		return false
-	}
-	kb_mods := kb.key.mods - {.Caps_Lock, .Num_Lock}
-	ev_mods := ev.mods - {.Caps_Lock, .Num_Lock}
-	if kb_mods != ev_mods {
-		// Allow shifted punctuation runes (e.g. '!', '?', ':') bound without explicit .Shift
-		// to match Kitty CSI u events that report mods = {.Shift} alongside the shifted rune.
-		is_shifted_punct := kb.key.code == .Rune && kb_mods == {} && ev_mods == {.Shift} &&
-			!(kb.key.ch >= 'a' && kb.key.ch <= 'z') && !(kb.key.ch >= 'A' && kb.key.ch <= 'Z')
-		if !is_shifted_punct {
-			return false
-		}
-	}
-	if kb.key.code == .Rune {
-		kc := kb.key.ch
-		ec := ev.ch
-		if kc >= 'A' && kc <= 'Z' {
-			kc += 32
-		}
-		if ec >= 'A' && ec <= 'Z' {
-			ec += 32
-		}
-		if kc != ec {
-			return false
-		}
-	}
-
-	// Suppress plain printable / Backspace / Left / Right shortcuts when typing inside a text_input
-	if text_input_focused && (.Allow_In_Text_Input not_in kb.flags) {
-		is_plain_typing := (.Ctrl not_in ev_mods) && (ev.code == .Rune || ev.code == .Space || ev.code == .Backspace || ev.code == .Delete || ev.code == .Left || ev.code == .Right || ev.code == .Home || ev.code == .End)
-		if is_plain_typing {
-			return false
-		}
-	}
-
-	inp.triggered_action_id   = kb.action_id
-	inp.triggered_action_name = kb.action_name
-	if kb.nudge_splitter_id != 0 && kb.nudge_delta != 0 {
-		nudge_splitter_by_hash(inp, ctx, kb.nudge_splitter_id, kb.nudge_delta)
-	}
-	return true
-}

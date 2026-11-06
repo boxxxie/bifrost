@@ -16,16 +16,20 @@ Virtual_List_Config :: struct {
 	scroll_step:    i32,
 	scroll_padding: i32,
 	fallback_rows:  i32, // Estimated visible rows on Frame 0 before first layout solve
+	total_cols:     i32, // Optional 2D virtual table column count (> 1 enables h/l column stepping)
 	focusable:      bool,
+	focus_flags:    Focus_Flags,
 }
 
 Virtual_Slice :: struct {
 	start_row:     i32, // Inclusive start index into xitdb ArrayList / Filtered View
 	end_row:       i32, // Exclusive end index into xitdb ArrayList / Filtered View
 	selected_row:  i32, // Currently highlighted row index
+	selected_col:  i32, // Currently highlighted column index (0 when total_cols <= 1)
 	scroll_offset: i32, // Clamped top visible row index
 	viewport_rows: i32, // Number of visible rows in the container
 	total_rows:    i32, // Total logical rows in dataset
+	total_cols:    i32, // Total logical columns in dataset (max(1, cfg.total_cols))
 }
 
 @(deferred_in = defer_end_virtual_list)
@@ -45,9 +49,11 @@ ui_virtual_list :: proc(
 		slot.viewport_rows = cfg.fallback_rows if cfg.fallback_rows > 0 else 10
 	}
 	slot.total_rows     = max(0, total_rows)
+	slot.total_cols     = max(1, cfg.total_cols)
 	slot.max_offset     = max(0, slot.total_rows - slot.viewport_rows)
 	slot.offset         = clamp(slot.offset, 0, slot.max_offset)
 	slot.selected_row   = clamp(slot.selected_row, 0, max(0, slot.total_rows - 1))
+	slot.selected_col   = clamp(slot.selected_col, 0, max(0, slot.total_cols - 1))
 	slot.scroll_padding = max(0, cfg.scroll_padding)
 
 	start_r := slot.offset
@@ -58,9 +64,11 @@ ui_virtual_list :: proc(
 			start_row     = start_r,
 			end_row       = end_r,
 			selected_row  = slot.selected_row,
+			selected_col  = slot.selected_col,
 			scroll_offset = slot.offset,
 			viewport_rows = slot.viewport_rows,
 			total_rows    = slot.total_rows,
+			total_cols    = slot.total_cols,
 		}
 	}
 
@@ -87,9 +95,10 @@ ui_virtual_list :: proc(
 		scroll_offset      = slot.offset,
 		scroll_step        = step,
 		virtual_total_rows = max(1, slot.total_rows),
-		focusable          = true,
+		focus_flags        = cfg.focus_flags,
+		focusable          = .Disabled not_in cfg.focus_flags,
 	}, {0, 0})
-	append(&ctx.parent_stack, idx)
+	enter_container_node(ctx, idx)
 	return true
 }
 
@@ -102,9 +111,7 @@ defer_end_virtual_list :: proc(
 	cfg: Virtual_List_Config,
 	out_slice: ^Virtual_Slice,
 ) {
-	if len(ctx.parent_stack) > 0 {
-		pop(&ctx.parent_stack)
-	}
+	exit_container_node(ctx)
 }
 
 // =============================================================================
@@ -493,3 +500,515 @@ surface_merge_box_cell :: proc(
 		width = 1,
 	}, eff_clip)
 }
+
+MAX_TABLE_COLS :: 16
+
+Table_Cell_Span :: struct {
+	x: i32,
+	w: i32,
+}
+
+Scroll_Slot :: struct {
+	id_hash:         u64,
+	offset:          i32, // Top visible row index (or cell offset)
+	max_offset:      i32, // Clamped maximum scroll offset
+	offset_x:        i32, // Left visible column cell offset
+	max_offset_x:    i32, // Clamped maximum horizontal scroll offset
+	viewport_rows:   i32, // Solved inner_rect.h from previous/current layout pass
+	viewport_cols:   i32, // Solved inner_rect.w from previous/current layout pass
+	total_rows:      i32, // Total rows in xitdb collection or physical content_span
+	total_content_w: i32, // Total horizontal content width (`content_span[0]`)
+	selected_row:    i32, // Highlighted cursor row index inside virtual lists
+	selected_col:    i32, // Highlighted cursor column index inside 2D virtual tables
+	total_cols:      i32, // Logical column count (> 1 enables h/l column stepping)
+	scroll_padding:  i32, // Lookahead padding rows maintained above/below selected_row
+	col_x_starts:    [MAX_TABLE_COLS]i16, // Relative x start of each column inside inner_rect
+	col_x_widths:    [MAX_TABLE_COLS]i16, // Cell width of each column
+	col_span_count:  u8,                  // Number of registered table column spans
+	col_spans_screen_space: bool,         // True when col_x_starts are in screen-space coordinates
+	last_layout_gen: u64, // Last Layout_Context generation where this slot was mounted
+}
+
+
+// =============================================================================
+// Scroll Slot Management & Z-Aware Scroll Bubbling
+// =============================================================================
+
+get_scroll_slot :: proc "contextless" (inp: ^Input_State, id_hash: u64) -> ^Scroll_Slot {
+	empty_idx := -1
+	lru_idx   := 0
+	lru_gen   := max(u64)
+	for i := 0; i < MAX_SCROLL_SLOTS; i += 1 {
+		if inp.scroll_slots[i].id_hash == id_hash {
+			return &inp.scroll_slots[i]
+		}
+		if empty_idx == -1 && inp.scroll_slots[i].id_hash == 0 {
+			empty_idx = i
+		}
+		if inp.scroll_slots[i].last_layout_gen < lru_gen {
+			lru_gen = inp.scroll_slots[i].last_layout_gen
+			lru_idx = i
+		}
+	}
+	idx := empty_idx if empty_idx >= 0 else lru_idx
+	inp.scroll_slots[idx] = Scroll_Slot{
+		id_hash       = id_hash,
+		viewport_rows = 0,
+	}
+	return &inp.scroll_slots[idx]
+}
+
+get_scroll_offset :: proc(inp: ^Input_State, id: string) -> i32 {
+	slot := get_scroll_slot(inp, hash_id(id))
+	return slot.offset
+}
+
+get_scroll_offset_x :: proc(inp: ^Input_State, id: string) -> i32 {
+	slot := get_scroll_slot(inp, hash_id(id))
+	return slot.offset_x
+}
+
+get_selected_row :: proc(inp: ^Input_State, id: string) -> i32 {
+	slot := get_scroll_slot(inp, hash_id(id))
+	return slot.selected_row
+}
+
+get_selected_col :: proc(inp: ^Input_State, id: string) -> i32 {
+	slot := get_scroll_slot(inp, hash_id(id))
+	return slot.selected_col
+}
+
+// Registers horizontal column cell spans (relative to the virtual list's `inner_rect.x`)
+// so mouse clicks inside `ui_virtual_list` automatically update `slot.selected_col`.
+register_virtual_table_col_spans_cells :: proc(inp: ^Input_State, list_id: string, spans: []Table_Cell_Span) {
+	slot := get_scroll_slot(inp, hash_id(list_id))
+	cnt := min(len(spans), MAX_TABLE_COLS)
+	slot.col_span_count = u8(cnt)
+	slot.col_spans_screen_space = false
+	if cnt > 0 && slot.total_cols < i32(cnt) {
+		slot.total_cols = i32(cnt)
+	}
+	for i := 0; i < cnt; i += 1 {
+		slot.col_x_starts[i] = i16(clamp(spans[i].x, 0, 32767))
+		slot.col_x_widths[i] = i16(clamp(spans[i].w, 1, 32767))
+	}
+}
+
+register_virtual_table_col_spans_columns :: proc(inp: ^Input_State, list_id: string, spans: []Table_Column_Span) {
+	slot := get_scroll_slot(inp, hash_id(list_id))
+	cnt := min(len(spans), MAX_TABLE_COLS)
+	slot.col_span_count = u8(cnt)
+	slot.col_spans_screen_space = true
+	if cnt > 0 && slot.total_cols < i32(cnt) {
+		slot.total_cols = i32(cnt)
+	}
+	for i := 0; i < cnt; i += 1 {
+		slot.col_x_starts[i] = i16(clamp(spans[i].x, 0, 32767))
+		slot.col_x_widths[i] = i16(clamp(spans[i].width, 1, 32767))
+	}
+}
+
+register_virtual_table_col_spans :: proc {
+	register_virtual_table_col_spans_cells,
+	register_virtual_table_col_spans_columns,
+}
+
+select_virtual_col_at_x :: proc "contextless" (slot: ^Scroll_Slot, inner_rect: Rect, mx: i32) {
+	cols := max(1, slot.total_cols)
+	if cols <= 1 || inner_rect.w <= 0 {
+		return
+	}
+	rel_x := mx - inner_rect.x + slot.offset_x
+	if slot.col_span_count > 0 {
+		probe_x := (mx + slot.offset_x) if slot.col_spans_screen_space else rel_x
+		for i := 0; i < int(slot.col_span_count); i += 1 {
+			cx := i32(slot.col_x_starts[i])
+			cw := i32(slot.col_x_widths[i])
+			if probe_x >= cx && probe_x < cx + cw {
+				slot.selected_col = clamp(i32(i), 0, cols - 1)
+				return
+			}
+		}
+	}
+	// Uniform fallback when explicit spans are not registered
+	col_w := max(1, inner_rect.w / cols)
+	slot.selected_col = clamp(rel_x / col_w, 0, cols - 1)
+}
+
+
+// =============================================================================
+// Same-Frame `scroll_node_into_view` & Unified Sibling / Viewport Paging
+// =============================================================================
+
+compute_axis_scroll_delta :: proc "contextless" (
+	target_min, target_size: i32,
+	view_min, view_size: i32,
+	padding: i32,
+) -> i32 {
+	if view_size <= 0 || target_size <= 0 {
+		return 0
+	}
+	pad := clamp(padding, 0, max(0, (view_size - target_size) / 2))
+	vis_min := view_min + pad
+	vis_max := view_min + view_size - pad
+	if target_size >= vis_max - vis_min {
+		return target_min - vis_min
+	}
+	if target_min < vis_min {
+		return target_min - vis_min
+	}
+	if target_min + target_size > vis_max {
+		return (target_min + target_size) - vis_max
+	}
+	return 0
+}
+
+// Walks upward from `target_idx`'s parent through enclosing materialized scroll containers
+// and shifts descendant `rect` and `node_clip`/`inner_clip` on the exact same frame (`0` frame lag).
+scroll_node_into_view :: proc "contextless" (inp: ^Input_State, ctx: ^Layout_Context, target_idx: i32) {
+	if target_idx < 0 || int(target_idx) >= len(ctx.nodes) {
+		return
+	}
+	curr := ctx.nodes[target_idx].parent_idx
+	for curr >= 0 && int(curr) < len(ctx.nodes) {
+		sc_node := ctx.nodes[curr]
+		if sc_node.config.scrollable && sc_node.config.virtual_total_rows == 0 {
+			slot := get_scroll_slot(inp, sc_node.id_hash)
+			t_rect := ctx.nodes[target_idx].rect
+			delta_y := compute_axis_scroll_delta(
+				t_rect.y,
+				t_rect.h,
+				sc_node.inner_rect.y,
+				sc_node.inner_rect.h,
+				slot.scroll_padding,
+			)
+			if delta_y != 0 {
+				apply_scroll_delta(inp, ctx, curr, delta_y, false)
+			}
+			t_rect = ctx.nodes[target_idx].rect
+			delta_x := compute_axis_scroll_delta(
+				t_rect.x,
+				t_rect.w,
+				sc_node.inner_rect.x,
+				sc_node.inner_rect.w,
+				slot.scroll_padding,
+			)
+			if delta_x != 0 {
+				apply_scroll_delta_x(inp, ctx, curr, delta_x)
+			}
+		}
+		if sc_node.out_of_flow {
+			break
+		}
+		curr = sc_node.parent_idx
+	}
+}
+
+
+sync_scroll_viewports :: proc "contextless" (inp: ^Input_State, ctx: ^Layout_Context) {
+	for i := 0; i < len(ctx.nodes); i += 1 {
+		node := &ctx.nodes[i]
+		if !node.config.scrollable {
+			continue
+		}
+		slot := get_scroll_slot(inp, node.id_hash)
+		slot.viewport_rows   = max(1, node.inner_rect.h)
+		slot.viewport_cols   = max(1, node.inner_rect.w)
+		slot.total_rows      = node.content_span[1]
+		slot.total_content_w = node.content_span[0]
+		slot.max_offset      = max(0, slot.total_rows - slot.viewport_rows)
+		slot.max_offset_x    = max(0, slot.total_content_w - slot.viewport_cols)
+
+		if node.config.virtual_total_rows == 0 {
+			was_consecutive := slot.last_layout_gen > 0 && ctx.layout_gen >= slot.last_layout_gen
+			desired_offset := node.config.scroll_offset
+			if desired_offset == 0 && node.applied_scroll_offset == 0 && was_consecutive {
+				desired_offset = slot.offset
+			}
+			new_offset := clamp(desired_offset, 0, slot.max_offset)
+			delta_unapplied := new_offset - node.applied_scroll_offset
+			slot.offset                = new_offset
+			node.config.scroll_offset  = new_offset
+			node.applied_scroll_offset = new_offset
+			if delta_unapplied != 0 {
+				shift_descendants_y(ctx, i32(i), -delta_unapplied, node.inner_clip)
+			}
+
+			desired_offset_x := node.config.scroll_offset_x
+			if desired_offset_x == 0 && node.applied_scroll_offset_x == 0 && was_consecutive {
+				desired_offset_x = slot.offset_x
+			}
+			new_offset_x := clamp(desired_offset_x, 0, slot.max_offset_x)
+			delta_unapplied_x := new_offset_x - node.applied_scroll_offset_x
+			slot.offset_x                = new_offset_x
+			node.config.scroll_offset_x  = new_offset_x
+			node.applied_scroll_offset_x = new_offset_x
+			if delta_unapplied_x != 0 {
+				shift_descendants_x(ctx, i32(i), -delta_unapplied_x, node.inner_clip)
+			}
+		} else {
+			slot.offset                 = clamp(slot.offset, 0, slot.max_offset)
+			slot.offset_x               = clamp(slot.offset_x, 0, slot.max_offset_x)
+			node.config.scroll_offset   = slot.offset
+			node.config.scroll_offset_x = slot.offset_x
+		}
+		slot.selected_row    = clamp(slot.selected_row, 0, max(0, slot.total_rows - 1))
+		slot.selected_col    = clamp(slot.selected_col, 0, max(0, max(1, slot.total_cols) - 1))
+		slot.last_layout_gen = ctx.layout_gen
+	}
+}
+
+// Walks ctx.z_order front-to-back to find the topmost visible node at (mx, my),
+// then bubbles up parent_idx to find the nearest enclosing scrollable container.
+hit_test_scrollable :: proc "contextless" (ctx: ^Layout_Context, capture_idx: i32, mx, my: i32) -> i32 {
+	if mx < 0 || mx >= ctx.screen_size[0] || my < 0 || my >= ctx.screen_size[1] {
+		return -1
+	}
+
+	min_allowed_z := compute_active_shield_z(ctx)
+	if capture_idx >= 0 {
+		min_allowed_z = max(min_allowed_z, ctx.nodes[capture_idx].effective_z)
+	}
+
+	for i := len(ctx.z_order) - 1; i >= 0; i -= 1 {
+		idx := ctx.z_order[i]
+		node := ctx.nodes[idx]
+
+		if node.effective_z < min_allowed_z {
+			break
+		}
+		if !is_node_allowed(ctx, idx, capture_idx) || (.Disabled in node.focus_flags) {
+			continue
+		}
+		if !point_in_rect(mx, my, node.node_clip) || !point_in_rect(mx, my, node.rect) {
+			continue
+		}
+
+		// Bubble up from the hit node to its nearest scrollable ancestor
+		// without crossing out-of-flow overlay boundaries.
+		curr := idx
+		for curr >= 0 {
+			curr_node := ctx.nodes[curr]
+			if !is_node_allowed(ctx, curr, capture_idx) {
+				break
+			}
+			if curr_node.config.scrollable {
+				return curr
+			}
+			if curr_node.out_of_flow || curr_node.config.capture_input {
+				break
+			}
+			curr = curr_node.parent_idx
+		}
+
+		// Stop if we hit a non-scrollable floating overlay or modal so wheel events never punch through
+		if node.out_of_flow || node.config.capture_input {
+			return -1
+		}
+	}
+	return -1
+}
+
+handle_mouse_scroll :: proc "contextless" (
+	inp: ^Input_State,
+	ctx: ^Layout_Context,
+	capture_idx: i32,
+	mx, my: i32,
+	dir: i32, // -1 for Scroll_Up, +1 for Scroll_Down
+) -> bool {
+	scroll_idx := hit_test_scrollable(ctx, capture_idx, mx, my)
+	if scroll_idx < 0 {
+		return false
+	}
+
+	node := &ctx.nodes[scroll_idx]
+	step := node.config.scroll_step if node.config.scroll_step > 0 else 3
+	apply_scroll_delta(inp, ctx, scroll_idx, dir * step, false)
+	return true
+}
+
+handle_key_scroll :: proc "contextless" (
+	inp: ^Input_State,
+	ctx: ^Layout_Context,
+	capture_idx: i32,
+	code: Key_Code,
+) -> bool {
+	if inp.focused_id == 0 {
+		return false
+	}
+	focus_idx, exists := ctx.id_map[inp.focused_id]
+	if !exists || !is_node_allowed(ctx, focus_idx, capture_idx) {
+		return false
+	}
+
+	scroll_idx := i32(-1)
+	curr := focus_idx
+	for curr >= 0 {
+		if ctx.nodes[curr].config.scrollable && is_node_allowed(ctx, curr, capture_idx) {
+			scroll_idx = curr
+			break
+		}
+		if ctx.nodes[curr].out_of_flow {
+			break
+		}
+		curr = ctx.nodes[curr].parent_idx
+	}
+
+	if scroll_idx < 0 {
+		return false
+	}
+
+	node := &ctx.nodes[scroll_idx]
+	slot := get_scroll_slot(inp, node.id_hash)
+	page := max(1, slot.viewport_rows - 1)
+	is_virtual := node.config.virtual_total_rows > 0
+
+	#partial switch code {
+	case .Up:
+		if is_virtual {
+			move_virtual_selection(slot, -1)
+			node.config.scroll_offset = slot.offset
+			inp.scrolled_id = node.id_hash
+		} else {
+			apply_scroll_delta(inp, ctx, scroll_idx, -1, false)
+		}
+		return true
+	case .Down:
+		if is_virtual {
+			move_virtual_selection(slot, +1)
+			node.config.scroll_offset = slot.offset
+			inp.scrolled_id = node.id_hash
+		} else {
+			apply_scroll_delta(inp, ctx, scroll_idx, +1, false)
+		}
+		return true
+	case .Page_Up:
+		if is_virtual {
+			move_virtual_selection(slot, -page)
+			node.config.scroll_offset = slot.offset
+			inp.scrolled_id = node.id_hash
+		} else {
+			apply_scroll_delta(inp, ctx, scroll_idx, -page, false)
+		}
+		return true
+	case .Page_Down:
+		if is_virtual {
+			move_virtual_selection(slot, +page)
+			node.config.scroll_offset = slot.offset
+			inp.scrolled_id = node.id_hash
+		} else {
+			apply_scroll_delta(inp, ctx, scroll_idx, +page, false)
+		}
+		return true
+	case .Home:
+		if is_virtual {
+			slot.selected_row = 0
+		}
+		apply_scroll_delta(inp, ctx, scroll_idx, -slot.max_offset - 1, false)
+		return true
+	case .End:
+		if is_virtual {
+			slot.selected_row = max(0, slot.total_rows - 1)
+		}
+		apply_scroll_delta(inp, ctx, scroll_idx, slot.max_offset + 1, false)
+		return true
+	}
+	return false
+}
+
+move_virtual_selection :: proc "contextless" (slot: ^Scroll_Slot, delta: i32) {
+	if slot.total_rows <= 0 {
+		return
+	}
+	slot.selected_row = clamp(slot.selected_row + delta, 0, slot.total_rows - 1)
+	v_rows := max(1, slot.viewport_rows)
+	pad := clamp(slot.scroll_padding, 0, max(0, (v_rows - 1) / 2))
+	if slot.selected_row < slot.offset + pad {
+		slot.offset = slot.selected_row - pad
+	} else if slot.selected_row >= slot.offset + v_rows - pad {
+		slot.offset = slot.selected_row - v_rows + 1 + pad
+	}
+	slot.offset = clamp(slot.offset, 0, slot.max_offset)
+}
+
+apply_scroll_delta :: proc "contextless" (
+	inp: ^Input_State,
+	ctx: ^Layout_Context,
+	scroll_idx: i32,
+	delta: i32,
+	move_selection: bool,
+) {
+	node := &ctx.nodes[scroll_idx]
+	slot := get_scroll_slot(inp, node.id_hash)
+	old_offset := slot.offset
+	new_offset := clamp(old_offset + delta, 0, slot.max_offset)
+	actual_delta := new_offset - old_offset
+
+	slot.offset                = new_offset
+	node.config.scroll_offset  = new_offset
+	node.applied_scroll_offset = new_offset
+	inp.scrolled_id            = node.id_hash
+
+	if move_selection && node.config.virtual_total_rows > 0 {
+		slot.selected_row = clamp(slot.selected_row + delta, 0, max(0, slot.total_rows - 1))
+	}
+
+	if actual_delta != 0 && node.config.virtual_total_rows == 0 {
+		shift_descendants_y(ctx, scroll_idx, -actual_delta, node.inner_clip)
+	}
+}
+
+shift_descendants_y :: proc "contextless" (ctx: ^Layout_Context, parent_idx: i32, dy: i32, clip_root: Rect) {
+	for c := ctx.nodes[parent_idx].first_child; c != -1; c = ctx.nodes[c].next_sibling {
+		child := &ctx.nodes[c]
+		if child.out_of_flow {
+			continue
+		}
+		child.rect.y       += dy
+		child.inner_rect.y += dy
+		child.node_clip     = rect_intersect(clip_root, child.rect)
+		child.inner_clip    = rect_intersect(child.node_clip, child.inner_rect)
+		if child.child_count > 0 {
+			shift_descendants_y(ctx, c, dy, child.inner_clip)
+		}
+	}
+}
+
+apply_scroll_delta_x :: proc "contextless" (
+	inp: ^Input_State,
+	ctx: ^Layout_Context,
+	scroll_idx: i32,
+	delta_x: i32,
+) {
+	node := &ctx.nodes[scroll_idx]
+	slot := get_scroll_slot(inp, node.id_hash)
+	old_offset_x := slot.offset_x
+	new_offset_x := clamp(old_offset_x + delta_x, 0, slot.max_offset_x)
+	actual_dx := new_offset_x - old_offset_x
+
+	slot.offset_x                = new_offset_x
+	node.config.scroll_offset_x  = new_offset_x
+	node.applied_scroll_offset_x = new_offset_x
+	inp.scrolled_id              = node.id_hash
+
+	if actual_dx != 0 && node.config.virtual_total_rows == 0 {
+		shift_descendants_x(ctx, scroll_idx, -actual_dx, node.inner_clip)
+	}
+}
+
+shift_descendants_x :: proc "contextless" (ctx: ^Layout_Context, parent_idx: i32, dx: i32, clip_root: Rect) {
+	for c := ctx.nodes[parent_idx].first_child; c != -1; c = ctx.nodes[c].next_sibling {
+		child := &ctx.nodes[c]
+		if child.out_of_flow {
+			continue
+		}
+		child.rect.x       += dx
+		child.inner_rect.x += dx
+		child.node_clip     = rect_intersect(clip_root, child.rect)
+		child.inner_clip    = rect_intersect(child.node_clip, child.inner_rect)
+		if child.child_count > 0 {
+			shift_descendants_x(ctx, c, dx, child.inner_clip)
+		}
+	}
+}
+

@@ -122,6 +122,7 @@ ui_command_palette :: proc(
 			fg             = rgb(255, 255, 255),
 			bg             = rgb(36, 42, 56),
 			placeholder_fg = rgb(130, 140, 160),
+			focus_flags    = {.Focusable, .Default_Focus, .Captures_Text, .Auto_Edit, .Scope_Text_Sink},
 		})
 
 		slice: Virtual_Slice
@@ -228,16 +229,18 @@ update_command_palette :: proc(
 }
 
 @(private)
-dispatch_palette_row :: proc "contextless" (inp: ^Input_State, cp: ^Command_Palette, row_idx: i32) -> bool {
+dispatch_palette_row :: proc(inp: ^Input_State, cp: ^Command_Palette, row_idx: i32) -> bool {
 	if row_idx < 0 || int(row_idx) >= cp.match_count {
 		return false
 	}
 	cmd_idx := cp.matches[row_idx].item_idx
 	cmd := cp.commands[cmd_idx]
-	inp.triggered_action_id   = cmd.action_id
-	inp.triggered_action_name = cmd.action
-	cp.is_open = false
-	return true
+	dispatched, blocked := trigger_action_by_id(inp, cmd.action_id, cmd.action)
+	if dispatched || blocked {
+		cp.is_open = false
+		return true
+	}
+	return false
 }
 
 // Re-scores and sorts registered commands against `query` using subsequence fuzzy matching.
@@ -394,6 +397,9 @@ lookup_action_shortcut_by_id :: proc(inp: ^Input_State, action_id: u64) -> strin
 	for i := 0; i < inp.keybinding_count; i += 1 {
 		kb := inp.keybindings[i]
 		if kb.action_id == action_id {
+			if kb.chord_len == 2 {
+				return fmt.tprintf("%s %s", format_key_event(kb.key), format_key_event(kb.key2))
+			}
 			return format_key_event(kb.key)
 		}
 	}
@@ -401,43 +407,10 @@ lookup_action_shortcut_by_id :: proc(inp: ^Input_State, action_id: u64) -> strin
 }
 
 format_key_event :: proc(ev: Key_Event) -> string {
-	ctrl  := "Ctrl+" if .Ctrl in ev.mods else ""
-	alt   := "Alt+" if .Alt in ev.mods else ""
-	shift := "Shift+" if .Shift in ev.mods else ""
-
-	#partial switch ev.code {
-	case .Rune:
-		ch := ev.ch
-		if ch >= 'a' && ch <= 'z' {
-			ch -= 32
-		}
-		return fmt.tprintf("%s%s%s%r", ctrl, alt, shift, ch)
-	case .Enter:     return fmt.tprintf("%s%s%sEnter", ctrl, alt, shift)
-	case .Escape:    return fmt.tprintf("%s%s%sEsc", ctrl, alt, shift)
-	case .Tab:       return fmt.tprintf("%s%s%sTab", ctrl, alt, shift)
-	case .Space:     return fmt.tprintf("%s%s%sSpace", ctrl, alt, shift)
-	case .Backspace: return fmt.tprintf("%s%s%sBackspace", ctrl, alt, shift)
-	case .Delete:    return fmt.tprintf("%s%s%sDel", ctrl, alt, shift)
-	case .Up:        return fmt.tprintf("%s%s%sUp", ctrl, alt, shift)
-	case .Down:      return fmt.tprintf("%s%s%sDown", ctrl, alt, shift)
-	case .Left:      return fmt.tprintf("%s%s%sLeft", ctrl, alt, shift)
-	case .Right:     return fmt.tprintf("%s%s%sRight", ctrl, alt, shift)
-	case .Page_Up:   return fmt.tprintf("%s%s%sPgUp", ctrl, alt, shift)
-	case .Page_Down: return fmt.tprintf("%s%s%sPgDn", ctrl, alt, shift)
-	case .Home:      return fmt.tprintf("%s%s%sHome", ctrl, alt, shift)
-	case .End:       return fmt.tprintf("%s%s%sEnd", ctrl, alt, shift)
-	case .F1:        return fmt.tprintf("%s%s%sF1", ctrl, alt, shift)
-	case .F2:        return fmt.tprintf("%s%s%sF2", ctrl, alt, shift)
-	case .F3:        return fmt.tprintf("%s%s%sF3", ctrl, alt, shift)
-	case .F4:        return fmt.tprintf("%s%s%sF4", ctrl, alt, shift)
-	case .F5:        return fmt.tprintf("%s%s%sF5", ctrl, alt, shift)
-	case .F6:        return fmt.tprintf("%s%s%sF6", ctrl, alt, shift)
-	case .F7:        return fmt.tprintf("%s%s%sF7", ctrl, alt, shift)
-	case .F8:        return fmt.tprintf("%s%s%sF8", ctrl, alt, shift)
-	case .F9:        return fmt.tprintf("%s%s%sF9", ctrl, alt, shift)
-	case .F10:       return fmt.tprintf("%s%s%sF10", ctrl, alt, shift)
-	case .F11:       return fmt.tprintf("%s%s%sF11", ctrl, alt, shift)
-	case .F12:       return fmt.tprintf("%s%s%sF12", ctrl, alt, shift)
+	buf: [32]u8
+	n := write_key_event_buf(buf[:], ev)
+	if n <= 0 {
+		return ""
 	}
-	return ""
+	return fmt.tprintf("%s", string(buf[:n]))
 }

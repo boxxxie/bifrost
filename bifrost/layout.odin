@@ -48,7 +48,27 @@ Wrap_Mode :: enum u8 {
 	Newlines,
 }
 
-MAX_DIM :: i32(0x3fff_ffff)
+MAX_SCOPE_DEPTH :: 32
+
+Focus_Flag :: enum u8 {
+	Focusable,       // Leaf or container can hold input.focused_id
+	Focus_Scope,     // Establishes a hierarchical focus scope & Scope_Memory_Entry
+	Trap_Focus,      // Modal barrier: traps Tab/F6/2D nav & halts ancestor memory writes
+	Captures_Text,   // Consumes printable runes, Backspace, Delete, Left/Right when editing
+	Auto_Edit,       // Enters edit mode (editing_id = id_hash) automatically upon focus
+	Loop_Spatial,    // Wrap 2D spatial nav along main axis (Bottom -> Top, Right -> Left)
+	Wrap_Spatial,    // Reading-order wrap on 2D grids (Right of row r -> col 0 of row r+1)
+	Strict_Spatial,  // Restrict 2D spatial cone strictly to half-plane without wrap
+	Default_Focus,   // Preferred initial child when scope has no prior Scope_Memory_Entry
+	Scope_Text_Sink, // Delegates printable keys within enclosing scope to this text input
+	Disabled,        // Mounted & painted dimmed, but pruned from focus/hit-testing; auto-advances if focused
+}
+
+Focus_Flags :: bit_set[Focus_Flag; u16]
+
+MAX_DIM     :: i32(0x3fff_ffff)
+FNV64A_OFFSET :: u64(0xcbf29ce484222325)
+FNV64A_PRIME  :: u64(0x100000001b3)
 
 // Sizing modes. A zero-initialized Axis_Size (nil) defaults to unconstrained Fit.
 Fit :: struct {
@@ -116,6 +136,9 @@ Box_Config :: struct {
 	clip_to_parent:     bool,
 
 	// Focus, input routing & widget role flags
+	focus_flags:        Focus_Flags,
+	id_hash:            u64,
+	local_id:           bool,
 	focusable:          bool,
 	clickable:          bool,
 	hoverable:          bool,
@@ -129,42 +152,60 @@ Box_Config :: struct {
 	virtual_total_rows: i32,
 	text_input:         bool,
 	splitter:           bool,
+	nav_overrides:      [Nav_Dir]u64, // Optional per-direction target node id_hash overrides
+}
+
+// Convenience builder for a single directional focus override on `Box_Config` / `Scope_Config`.
+nav_target :: proc "contextless" (dir: Nav_Dir, target_id: string) -> (overrides: [Nav_Dir]u64) {
+	if len(target_id) > 0 {
+		overrides[dir] = hash_local_id(0, target_id)
+	}
+	return
 }
 
 Layout_Node :: struct {
-	id:            string,
-	id_hash:       u64,
-	config:        Box_Config,
-	parent_idx:    i32,
-	first_child:   i32,
-	last_child:    i32,
-	next_sibling:  i32,
-	child_count:   i32,
-	content_size:  [2]i32,
-	computed_size: [2]i32,
-	dims:          [2]i32,
-	min_dims:      [2]i32,
-	content_span:  [2]i32,
-	rect:          Rect,
-	inner_rect:    Rect,
-	node_clip:     Rect,
-	inner_clip:    Rect,
-	scope_id:      u64,
-	effective_z:   u8,
-	out_of_flow:   bool,
-	frozen:        bool,
-	is_text:       bool,
-	text:          string,
-	wrapped_lines: []string,
+	id:               string,
+	id_hash:          u64,
+	config:           Box_Config,
+	parent_idx:       i32,
+	parent_scope_idx: i32,
+	subtree_end_idx:  i32,
+	text_sink_idx:    i32,
+	focus_flags:      Focus_Flags,
+	first_child:      i32,
+	last_child:       i32,
+	next_sibling:     i32,
+	child_count:      i32,
+	content_size:     [2]i32,
+	computed_size:    [2]i32,
+	dims:             [2]i32,
+	min_dims:         [2]i32,
+	content_span:            [2]i32,
+	applied_scroll_offset:   i32,
+	applied_scroll_offset_x: i32,
+	rect:                    Rect,
+	inner_rect:            Rect,
+	node_clip:             Rect,
+	inner_clip:            Rect,
+	scope_id:              u64,
+	effective_z:           u8,
+	out_of_flow:           bool,
+	frozen:                bool,
+	is_text:               bool,
+	text:                  string,
+	wrapped_lines:         []string,
 }
 
 Layout_Context :: struct {
-	nodes:        [dynamic]Layout_Node,
-	parent_stack: [dynamic]i32,
-	id_map:       map[u64]i32,
-	z_order:      []i32,
-	screen_size:  [2]i32,
-	allocator:    mem.Allocator,
+	nodes:           [dynamic]Layout_Node,
+	parent_stack:    [dynamic]i32,
+	scope_stack:     [MAX_SCOPE_DEPTH]i32,
+	scope_stack_len: int,
+	id_map:          map[u64]i32,
+	z_order:         []i32,
+	screen_size:     [2]i32,
+	layout_gen:      u64,
+	allocator:       mem.Allocator,
 }
 
 // =============================================================================
@@ -201,6 +242,41 @@ hash_id :: #force_inline proc(id: string) -> u64 {
 	return hash.fnv64a(transmute([]byte)id)
 }
 
+// Clay-inspired zero-allocation local ID hashing seeded by `parent_hash`.
+// When `parent_hash == 0`, produces the exact same FNV-1a 64-bit hash as `hash_id(label)`.
+hash_local_id :: #force_inline proc "contextless" (parent_hash: u64, label: string) -> u64 {
+	h := FNV64A_OFFSET
+	if parent_hash != 0 {
+		h = (parent_hash ~ u64(0x1f)) * FNV64A_PRIME
+	}
+	for i := 0; i < len(label); i += 1 {
+		h = (h ~ u64(label[i])) * FNV64A_PRIME
+	}
+	return h
+}
+
+// Clay-inspired indexed local ID hashing (`CLAY_IDI_LOCAL` equivalent) without `fmt.tprintf` allocations.
+hash_local_idi :: #force_inline proc "contextless" (parent_hash: u64, label: string, index: i32) -> u64 {
+	h := hash_local_id(parent_hash, label)
+	h = (h ~ u64(0x1e)) * FNV64A_PRIME
+	u := u32(index)
+	h = (h ~ u64(u & 0xff)) * FNV64A_PRIME
+	h = (h ~ u64((u >> 8) & 0xff)) * FNV64A_PRIME
+	h = (h ~ u64((u >> 16) & 0xff)) * FNV64A_PRIME
+	h = (h ~ u64((u >> 24) & 0xff)) * FNV64A_PRIME
+	return h
+}
+
+current_scope_hash :: #force_inline proc "contextless" (ctx: ^Layout_Context) -> u64 {
+	if ctx.scope_stack_len > 0 {
+		s_idx := ctx.scope_stack[ctx.scope_stack_len - 1]
+		if s_idx >= 0 && int(s_idx) < len(ctx.nodes) {
+			return ctx.nodes[s_idx].id_hash
+		}
+	}
+	return 0
+}
+
 rect_intersect :: #force_inline proc "contextless" (a, b: Rect) -> Rect {
 	x0 := max(a.x, b.x)
 	y0 := max(a.y, b.y)
@@ -226,25 +302,50 @@ point_in_rect :: #force_inline proc "contextless" (x, y: i32, r: Rect) -> bool {
 // =============================================================================
 
 begin_layout :: proc(ctx: ^Layout_Context, screen_w, screen_h: i32, allocator := context.temp_allocator) {
-	ctx.nodes        = make([dynamic]Layout_Node, 0, 128, allocator)
-	ctx.parent_stack = make([dynamic]i32, 0, 32, allocator)
-	ctx.id_map       = make(map[u64]i32, 128, allocator)
-	ctx.z_order      = nil
-	ctx.screen_size  = {screen_w, screen_h}
-	ctx.allocator    = allocator
+	ctx.nodes           = make([dynamic]Layout_Node, 0, 128, allocator)
+	ctx.parent_stack    = make([dynamic]i32, 0, 32, allocator)
+	ctx.scope_stack_len = 0
+	ctx.id_map          = make(map[u64]i32, 128, allocator)
+	ctx.z_order         = nil
+	ctx.screen_size     = {screen_w, screen_h}
+	ctx.layout_gen     += 1
+	ctx.allocator       = allocator
+}
+
+enter_container_node :: proc(ctx: ^Layout_Context, idx: i32) {
+	append(&ctx.parent_stack, idx)
+	if idx >= 0 && int(idx) < len(ctx.nodes) {
+		if .Focus_Scope in ctx.nodes[idx].focus_flags {
+			if ctx.scope_stack_len < MAX_SCOPE_DEPTH {
+				ctx.scope_stack[ctx.scope_stack_len] = idx
+				ctx.scope_stack_len += 1
+			}
+		}
+	}
+}
+
+exit_container_node :: proc(ctx: ^Layout_Context) {
+	if len(ctx.parent_stack) == 0 {
+		return
+	}
+	idx := pop(&ctx.parent_stack)
+	if idx >= 0 && int(idx) < len(ctx.nodes) {
+		ctx.nodes[idx].subtree_end_idx = i32(len(ctx.nodes))
+		if ctx.scope_stack_len > 0 && ctx.scope_stack[ctx.scope_stack_len - 1] == idx {
+			ctx.scope_stack_len -= 1
+		}
+	}
 }
 
 @(deferred_in = defer_end_container)
 container :: proc(ctx: ^Layout_Context, id: string, cfg: Box_Config = {}) -> bool {
 	idx := push_node(ctx, id, cfg, {0, 0})
-	append(&ctx.parent_stack, idx)
+	enter_container_node(ctx, idx)
 	return true
 }
 
 defer_end_container :: proc(ctx: ^Layout_Context, id: string, cfg: Box_Config = {}) {
-	if len(ctx.parent_stack) > 0 {
-		pop(&ctx.parent_stack)
-	}
+	exit_container_node(ctx)
 }
 
 leaf :: proc(ctx: ^Layout_Context, id: string, content_w, content_h: i32, cfg: Box_Config = {}) -> i32 {
@@ -258,18 +359,95 @@ push_node :: proc(ctx: ^Layout_Context, id: string, cfg: Box_Config, content_siz
 		parent_idx = ctx.parent_stack[len(ctx.parent_stack) - 1]
 	}
 
-	id_hash := hash_id(id) if len(id) > 0 else u64(idx + 1)
+	parent_scope_idx := i32(-1)
+	if ctx.scope_stack_len > 0 {
+		parent_scope_idx = ctx.scope_stack[ctx.scope_stack_len - 1]
+	}
+
+	// Synthesize unified Focus_Flags from explicit focus_flags + legacy Box_Config booleans
+	flags := cfg.focus_flags
+	if idx == 0 {
+		flags += {.Focus_Scope}
+	}
+	if cfg.focusable {
+		flags += {.Focusable}
+	}
+	if cfg.focus_scope {
+		flags += {.Focus_Scope}
+	}
+	if cfg.capture_input {
+		flags += {.Focus_Scope, .Trap_Focus}
+	}
+	if .Trap_Focus in flags {
+		flags += {.Focus_Scope}
+	}
+	if .Scope_Text_Sink in flags {
+		flags += {.Captures_Text}
+	}
+	if cfg.text_input {
+		flags += {.Captures_Text}
+		if cfg.focus_flags == {} {
+			flags += {.Auto_Edit}
+		}
+	}
+	if parent_idx >= 0 && (.Disabled in ctx.nodes[parent_idx].focus_flags) {
+		flags += {.Disabled}
+	}
+
+	node_cfg := cfg
+	node_cfg.focus_flags = flags
+	if .Disabled in flags {
+		node_cfg.focusable     = false
+		node_cfg.capture_input = false
+	} else {
+		if .Focusable in flags {
+			node_cfg.focusable = true
+		}
+		if .Trap_Focus in flags {
+			node_cfg.capture_input = true
+		}
+	}
+	if idx > 0 && (.Focus_Scope in flags) {
+		node_cfg.focus_scope = true
+	}
+	if .Captures_Text in flags {
+		node_cfg.text_input = true
+	}
+
+	id_hash: u64
+	if node_cfg.id_hash != 0 {
+		id_hash = node_cfg.id_hash
+	} else if len(id) > 0 {
+		if node_cfg.local_id && parent_scope_idx >= 0 {
+			id_hash = hash_local_id(ctx.nodes[parent_scope_idx].id_hash, id)
+		} else {
+			id_hash = hash_id(id)
+		}
+	} else {
+		id_hash = u64(idx + 1)
+	}
+
 	node := Layout_Node{
-		id           = id,
-		id_hash      = id_hash,
-		config       = cfg,
-		parent_idx   = parent_idx,
-		first_child  = -1,
-		last_child   = -1,
-		next_sibling = -1,
-		content_size = content_size,
-		is_text      = len(cfg.text) > 0,
-		text         = cfg.text,
+		id               = id,
+		id_hash          = id_hash,
+		config           = node_cfg,
+		parent_idx       = parent_idx,
+		parent_scope_idx = parent_scope_idx,
+		subtree_end_idx  = idx + 1,
+		text_sink_idx    = -1,
+		focus_flags      = flags,
+		first_child      = -1,
+		last_child       = -1,
+		next_sibling     = -1,
+		content_size     = content_size,
+		is_text          = len(node_cfg.text) > 0,
+		text             = node_cfg.text,
+	}
+
+	if (.Scope_Text_Sink in flags) && (.Disabled not_in flags) && parent_scope_idx >= 0 {
+		if ctx.nodes[parent_scope_idx].text_sink_idx < 0 {
+			ctx.nodes[parent_scope_idx].text_sink_idx = idx
+		}
 	}
 
 	if parent_idx >= 0 {
@@ -284,7 +462,7 @@ push_node :: proc(ctx: ^Layout_Context, id: string, cfg: Box_Config, content_siz
 	}
 
 	append(&ctx.nodes, node)
-	if len(id) > 0 {
+	if len(id) > 0 || node_cfg.id_hash != 0 {
 		ctx.id_map[id_hash] = idx
 	}
 	return idx
@@ -1059,6 +1237,10 @@ position_nodes_topological :: proc(ctx: ^Layout_Context) {
 		parent.inner_clip = rect_intersect(parent.node_clip, parent.inner_rect)
 
 		if parent.child_count == 0 {
+			if parent.config.virtual_total_rows > 0 {
+				parent.content_span[0] = parent.inner_rect.w
+				parent.content_span[1] = parent.config.virtual_total_rows
+			}
 			continue
 		}
 
@@ -1087,10 +1269,18 @@ position_nodes_topological :: proc(ctx: ^Layout_Context) {
 		}
 
 		scroll_shift: i32 = 0
-		if parent.config.scrollable && parent.config.virtual_total_rows == 0 && main_axis == 1 {
-			max_scroll := max(0, total_main_span - inner_size[1])
-			scroll_shift = clamp(parent.config.scroll_offset, 0, max_scroll)
-			parent.config.scroll_offset = scroll_shift
+		if parent.config.scrollable && parent.config.virtual_total_rows == 0 {
+			if main_axis == 1 {
+				max_scroll := max(0, total_main_span - inner_size[1])
+				scroll_shift = clamp(parent.config.scroll_offset, 0, max_scroll)
+				parent.config.scroll_offset  = scroll_shift
+				parent.applied_scroll_offset = scroll_shift
+			} else {
+				max_scroll_x := max(0, total_main_span - inner_size[0])
+				scroll_shift = clamp(parent.config.scroll_offset_x, 0, max_scroll_x)
+				parent.config.scroll_offset_x  = scroll_shift
+				parent.applied_scroll_offset_x = scroll_shift
+			}
 		}
 
 		main_cursor := align_offset(inner_size[main_axis], total_main_span, parent.config.main_align) - scroll_shift

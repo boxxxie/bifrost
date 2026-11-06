@@ -58,9 +58,17 @@ Backdrop_Mode :: enum u8 {
 	Dim_Rect,   // Dims colors by 50% only inside this node's clipped outer Rect
 }
 
+Styled_Span :: struct {
+	text:  string,
+	fg:    Color,
+	bg:    Color,
+	style: Style_Flags,
+}
+
 Paint_Spec :: struct {
 	title:       string,
 	text:        string,
+	spans:       []Styled_Span,
 	fg:          Color,
 	bg:          Color,
 	border_fg:   Color,
@@ -75,18 +83,19 @@ Paint_Spec :: struct {
 }
 
 Modal_Spec :: struct {
-	title:     string,
-	z_layer:   u8,
-	width:     Axis_Size,
-	height:    Axis_Size,
-	padding:   Padding,
-	gap:       i32,
-	border:    Border_Kind,
-	fg:        Color,
-	bg:        Color,
-	border_fg: Color,
-	title_fg:  Color,
-	backdrop:  Backdrop_Mode,
+	title:       string,
+	z_layer:     u8,
+	width:       Axis_Size,
+	height:      Axis_Size,
+	padding:     Padding,
+	gap:         i32,
+	border:      Border_Kind,
+	fg:          Color,
+	bg:          Color,
+	border_fg:   Color,
+	title_fg:    Color,
+	backdrop:    Backdrop_Mode,
+	focus_flags: Focus_Flags,
 }
 
 Border_Glyphs :: struct {
@@ -118,13 +127,14 @@ ANSI_16_DARK_TO_256 := [8]u8{
 }
 
 Screen :: struct {
-	width:       i32,
-	height:      i32,
-	front:       []Cell,
-	back:        []Cell,
-	paints:      map[u64]Paint_Spec,
-	first_frame: bool,
-	allocator:   mem.Allocator,
+	width:        i32,
+	height:       i32,
+	front:        []Cell,
+	back:         []Cell,
+	paints:       map[u64]Paint_Spec,
+	dynamic_bars: [dynamic]Dynamic_Bar_Entry,
+	first_frame:  bool,
+	allocator:    mem.Allocator,
 }
 
 // =============================================================================
@@ -242,7 +252,8 @@ begin_frame :: proc(s: ^Screen, default_bg: Color = {}, temp_alloc := context.te
 	for i in 0 ..< len(s.back) {
 		s.back[i] = clear_cell
 	}
-	s.paints = make(map[u64]Paint_Spec, 128, temp_alloc)
+	s.paints       = make(map[u64]Paint_Spec, 128, temp_alloc)
+	s.dynamic_bars = make([dynamic]Dynamic_Bar_Entry, 0, 8, temp_alloc)
 }
 
 set_paint :: proc(s: ^Screen, id: string, spec: Paint_Spec) {
@@ -297,17 +308,16 @@ ui_modal :: proc(ctx: ^Layout_Context, s: ^Screen, id: string, spec: Modal_Spec)
 		floating      = true,
 		anchor        = .Screen,
 		self_align    = {.Center, .Center},
+		focus_flags   = spec.focus_flags + {.Focus_Scope, .Trap_Focus},
 		focus_scope   = true,
 		capture_input = true,
 	}, {0, 0})
-	append(&ctx.parent_stack, idx)
+	enter_container_node(ctx, idx)
 	return true
 }
 
 defer_end_modal :: proc(ctx: ^Layout_Context, s: ^Screen, id: string, spec: Modal_Spec) {
-	if len(ctx.parent_stack) > 0 {
-		pop(&ctx.parent_stack)
-	}
+	exit_container_node(ctx)
 }
 
 // =============================================================================
@@ -783,6 +793,19 @@ render_layout :: proc(s: ^Screen, ctx: ^Layout_Context, temp_alloc := context.te
 					tx := node.inner_rect.x + align_offset(node.inner_rect.w, line_w, h_align)
 					ty := base_y + i32(line_idx)
 					draw_string_clipped(s, tx, ty, inner_clip, line, paint.fg, paint.bg, paint.style)
+				}
+			} else if len(paint.spans) > 0 {
+				spans_w: i32 = 0
+				for sp in paint.spans {
+					spans_w += string_display_width(sp.text)
+				}
+				tx := node.inner_rect.x + align_offset(node.inner_rect.w, spans_w, h_align)
+				ty := node.inner_rect.y + align_offset(node.inner_rect.h, 1, v_align)
+				cur_x := tx
+				for sp in paint.spans {
+					sp_fg := sp.fg if sp.fg.kind != .Default else paint.fg
+					sp_bg := sp.bg if sp.bg.kind != .Default else paint.bg
+					cur_x += put_text_clipped(s, cur_x, ty, sp.text, sp_fg, sp_bg, paint.style + sp.style, inner_clip)
 				}
 			} else {
 				text_str := paint.text if len(paint.text) > 0 else node.text

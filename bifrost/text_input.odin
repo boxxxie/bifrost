@@ -11,18 +11,20 @@ MAX_TEXT_SLOTS :: 16
 MAX_TEXT_BYTES :: 256
 
 Text_Input_Slot :: struct {
-	id_hash:        u64,
-	buf:            [MAX_TEXT_BYTES]byte,
-	len:            int,
-	cursor_byte:    int,
-	scroll_col:     i32,
-	inner_w:        i32,
-	inner_x:        i32,
-	linked_list_id: u64, // Optional virtual list ID hash to forward Up/Down/PageUp/PageDown keys to
-	placeholder:    string,
-	vis_buf:        [MAX_TEXT_BYTES + 16]byte,
-	vis_len:        int,
-	initialized:    bool,
+	id_hash:         u64,
+	buf:             [MAX_TEXT_BYTES]byte,
+	len:             int,
+	cursor_byte:     int,
+	sel_anchor_byte: int,  // Anchor byte offset when `has_selection == true`
+	has_selection:   bool, // True when an active `[min(anchor,cursor), max(anchor,cursor))` selection exists
+	scroll_col:      i32,
+	inner_w:         i32,
+	inner_x:         i32,
+	linked_list_id:  u64, // Optional virtual list ID hash to forward Up/Down/PageUp/PageDown keys to
+	placeholder:     string,
+	vis_buf:         [MAX_TEXT_BYTES + 16]byte,
+	vis_len:         int,
+	initialized:     bool,
 }
 
 Text_Input_Config :: struct {
@@ -37,6 +39,8 @@ Text_Input_Config :: struct {
 	placeholder_fg: Color,
 	border_fg:      Color,
 	title:          string,
+	focus_flags:    Focus_Flags,
+	two_stage:      bool,
 }
 
 Visible_Utf8_Slice :: struct {
@@ -260,10 +264,75 @@ set_text :: proc(inp: ^Input_State, id: string, value: string) {
 	for i := 0; i < n; i += 1 {
 		slot.buf[i] = value[i]
 	}
-	slot.len         = n
-	slot.cursor_byte = n
-	slot.scroll_col  = 0
-	slot.initialized = true
+	slot.len             = n
+	slot.cursor_byte     = n
+	slot.sel_anchor_byte = 0
+	slot.has_selection   = false
+	slot.scroll_col      = 0
+	slot.initialized     = true
+}
+
+get_text_selection_range :: proc "contextless" (slot: ^Text_Input_Slot) -> (lo, hi: int, active: bool) {
+	if !slot.has_selection {
+		return slot.cursor_byte, slot.cursor_byte, false
+	}
+	a := clamp(slot.sel_anchor_byte, 0, slot.len)
+	b := clamp(slot.cursor_byte, 0, slot.len)
+	if a == b {
+		return a, b, false
+	}
+	return min(a, b), max(a, b), true
+}
+
+get_selected_text :: proc(inp: ^Input_State, id: string) -> string {
+	slot := get_text_slot(inp, hash_id(id))
+	lo, hi, active := get_text_selection_range(slot)
+	if !active {
+		return ""
+	}
+	return string(slot.buf[lo:hi])
+}
+
+delete_selected_range :: proc "contextless" (inp: ^Input_State, slot: ^Text_Input_Slot) -> bool {
+	lo, hi, active := get_text_selection_range(slot)
+	if !active {
+		slot.has_selection = false
+		return false
+	}
+	del_len := hi - lo
+	for i := lo; i < slot.len - del_len; i += 1 {
+		slot.buf[i] = slot.buf[i + del_len]
+	}
+	slot.len            -= del_len
+	slot.cursor_byte     = lo
+	slot.sel_anchor_byte = lo
+	slot.has_selection   = false
+	inp.text_changed_id  = slot.id_hash
+	return true
+}
+
+copy_selection_to_clipboard :: proc "contextless" (inp: ^Input_State, slot: ^Text_Input_Slot) -> bool {
+	lo, hi, active := get_text_selection_range(slot)
+	if !active {
+		return false
+	}
+	n := min(hi - lo, len(inp.clipboard_buf))
+	for i := 0; i < n; i += 1 {
+		inp.clipboard_buf[i] = slot.buf[lo + i]
+	}
+	inp.clipboard_len = n
+	inp.osc52_pending = true
+	return true
+}
+
+text_input_insert_string :: proc "contextless" (inp: ^Input_State, slot: ^Text_Input_Slot, text: string) -> bool {
+	delete_selected_range(inp, slot)
+	for r in text {
+		if r >= 32 && r != 127 {
+			text_input_insert_rune(inp, slot, r)
+		}
+	}
+	return true
 }
 
 was_text_changed :: proc(inp: ^Input_State, id: string) -> bool {
@@ -312,13 +381,26 @@ ui_text_input :: proc(
 		fill_bg     = cfg.bg.kind != .Default,
 	}
 
+	flags := cfg.focus_flags
+	if cfg.two_stage {
+		flags += {.Focusable, .Captures_Text}
+		flags -= {.Auto_Edit}
+	} else if (.Captures_Text not_in flags) && (.Scope_Text_Sink not_in flags) {
+		flags += {.Focusable, .Captures_Text, .Auto_Edit}
+	} else {
+		flags += {.Captures_Text}
+	}
+	is_enabled := .Disabled not_in flags
+	is_focusable := (.Focusable in flags) && is_enabled
+
 	return leaf(ctx, id, string_display_width(disp_text) + b_pad, 1 + b_pad, Box_Config{
 		width       = w,
 		height      = h,
 		border      = cfg.border,
-		focusable   = true,
-		clickable   = true,
-		hoverable   = true,
+		focus_flags = flags,
+		focusable   = is_focusable,
+		clickable   = is_enabled,
+		hoverable   = is_enabled,
 		text_input  = true,
 		cross_align = .Center,
 	})
@@ -349,6 +431,7 @@ sync_text_input_paint :: proc(s: ^Screen, inp: ^Input_State, node: Layout_Node) 
 	}
 
 	focused := node.id_hash == inp.focused_id
+	editing := node.id_hash == inp.editing_id
 	if slot.len > 0 {
 		vis := slice_utf8_by_display_width(full_text, slot.scroll_col, inner_w)
 		pos := 0
@@ -361,21 +444,55 @@ sync_text_input_paint :: proc(s: ^Screen, inp: ^Input_State, node: Layout_Node) 
 			pos += 1
 		}
 		slot.vis_len = pos
-		paint.text = string(slot.vis_buf[:slot.vis_len])
+		paint.text   = string(slot.vis_buf[:slot.vis_len])
+		paint.style -= {.Dim}
+		paint.spans  = nil
+
+		if sel_lo, sel_hi, has_sel := get_text_selection_range(slot); has_sel {
+			clamped_lo := clamp(sel_lo, vis.start_byte, vis.end_byte)
+			clamped_hi := clamp(sel_hi, vis.start_byte, vis.end_byte)
+			if clamped_hi > clamped_lo {
+				lead := int(vis.lead_pad)
+				s0 := clamp(lead + (clamped_lo - vis.start_byte), 0, slot.vis_len)
+				s1 := clamp(lead + (clamped_hi - vis.start_byte), s0, slot.vis_len)
+				spans := make([dynamic]Styled_Span, 0, 3, s.paints.allocator)
+				if s0 > 0 {
+					append(&spans, Styled_Span{text = paint.text[:s0], fg = paint.fg, bg = paint.bg})
+				}
+				append(&spans, Styled_Span{
+					text  = paint.text[s0:s1],
+					fg    = paint.fg,
+					bg    = paint.bg,
+					style = {.Reverse},
+				})
+				if s1 < slot.vis_len {
+					append(&spans, Styled_Span{text = paint.text[s1:], fg = paint.fg, bg = paint.bg})
+				}
+				paint.spans = spans[:]
+			}
+		}
 	} else {
 		vis := slice_utf8_by_display_width(slot.placeholder, 0, inner_w)
 		paint.text  = vis.text
+		paint.spans = nil
 		paint.style += {.Dim}
 	}
 
-	if focused {
-		paint.has_cursor = true
-		paint.cursor_col = clamp(cur_disp_col - slot.scroll_col, 0, max(0, inner_w - 1))
-		if paint.border_fg.kind == .Default {
-			paint.border_fg = rgb(255, 215, 0)
-		}
-	} else {
+	if .Disabled in node.focus_flags {
+		paint.style += {.Dim}
 		paint.has_cursor = false
+	} else {
+		if editing {
+			paint.has_cursor = true
+			paint.cursor_col = clamp(cur_disp_col - slot.scroll_col, 0, max(0, inner_w - 1))
+		} else {
+			paint.has_cursor = false
+		}
+		if focused || editing {
+			if paint.border_fg.kind == .Default {
+				paint.border_fg = rgb(255, 215, 0)
+			}
+		}
 	}
 
 	s.paints[node.id_hash] = paint
@@ -398,57 +515,136 @@ handle_text_input_key :: proc "contextless" (
 	slot.cursor_byte = clamp(slot.cursor_byte, 0, slot.len)
 	eff_mods := ev.mods - {.Caps_Lock, .Num_Lock}
 
-	// 1. Telescope-style linked virtual list navigation (Up / Down / Page_Up / Page_Down)
-	if slot.linked_list_id != 0 && eff_mods == {} {
+	// 1. Telescope-style linked virtual list navigation (Up / Down / Page_Up / Page_Down / Ctrl+N / Ctrl+P)
+	if slot.linked_list_id != 0 {
 		if list_idx, ok := ctx.id_map[slot.linked_list_id]; ok && is_node_allowed(ctx, list_idx, capture_idx) {
 			list_node := &ctx.nodes[list_idx]
 			list_slot := get_scroll_slot(inp, slot.linked_list_id)
 			page := max(1, list_slot.viewport_rows - 1)
-			#partial switch ev.code {
-			case .Up:
-				move_virtual_selection(list_slot, -1)
-				list_node.config.scroll_offset = list_slot.offset
-				inp.scrolled_id = slot.linked_list_id
-				return true
-			case .Down:
-				move_virtual_selection(list_slot, +1)
-				list_node.config.scroll_offset = list_slot.offset
-				inp.scrolled_id = slot.linked_list_id
-				return true
-			case .Page_Up:
-				move_virtual_selection(list_slot, -page)
-				list_node.config.scroll_offset = list_slot.offset
-				inp.scrolled_id = slot.linked_list_id
-				return true
-			case .Page_Down:
-				move_virtual_selection(list_slot, +page)
-				list_node.config.scroll_offset = list_slot.offset
-				inp.scrolled_id = slot.linked_list_id
-				return true
+			if eff_mods == {} {
+				#partial switch ev.code {
+				case .Up:
+					move_virtual_selection(list_slot, -1)
+					list_node.config.scroll_offset = list_slot.offset
+					inp.scrolled_id = slot.linked_list_id
+					return true
+				case .Down:
+					move_virtual_selection(list_slot, +1)
+					list_node.config.scroll_offset = list_slot.offset
+					inp.scrolled_id = slot.linked_list_id
+					return true
+				case .Page_Up:
+					move_virtual_selection(list_slot, -page)
+					list_node.config.scroll_offset = list_slot.offset
+					inp.scrolled_id = slot.linked_list_id
+					return true
+				case .Page_Down:
+					move_virtual_selection(list_slot, +page)
+					list_node.config.scroll_offset = list_slot.offset
+					inp.scrolled_id = slot.linked_list_id
+					return true
+				}
+			} else if eff_mods == {.Ctrl} && ev.code == .Rune {
+				switch ev.ch {
+				case 'n', 'N':
+					move_virtual_selection(list_slot, +1)
+					list_node.config.scroll_offset = list_slot.offset
+					inp.scrolled_id = slot.linked_list_id
+					return true
+				case 'p', 'P':
+					move_virtual_selection(list_slot, -1)
+					list_node.config.scroll_offset = list_slot.offset
+					inp.scrolled_id = slot.linked_list_id
+					return true
+				}
 			}
 		}
 	}
 
-	// 2. Readline / Emacs Ctrl+Key and Alt+Key motions
+	// 2. Readline / Emacs / Clipboard Ctrl+Key and Alt+Key motions
 	if .Ctrl in ev.mods && ev.code == .Rune {
 		switch ev.ch {
 		case 'a', 'A':
-			slot.cursor_byte = 0
+			if inp.keymap_style == .Emacs && (.Shift not_in eff_mods) {
+				slot.has_selection = false
+				slot.cursor_byte   = 0
+				return true
+			}
+			slot.sel_anchor_byte = 0
+			slot.cursor_byte     = slot.len
+			slot.has_selection   = slot.len > 0
+			return true
+		case 'b', 'B':
+			slot.has_selection = false
+			slot.cursor_byte   = prev_grapheme_cluster(full_text, slot.cursor_byte)
+			return true
+		case 'f', 'F':
+			slot.has_selection = false
+			next_b, _, _      := next_grapheme_cluster(full_text, slot.cursor_byte)
+			slot.cursor_byte   = next_b
+			return true
+		case 'd', 'D':
+			if delete_selected_range(inp, slot) {
+				return true
+			}
+			if slot.cursor_byte < slot.len {
+				next_b, _, _ := next_grapheme_cluster(full_text, slot.cursor_byte)
+				del_len := next_b - slot.cursor_byte
+				for i := slot.cursor_byte; i < slot.len - del_len; i += 1 {
+					slot.buf[i] = slot.buf[i + del_len]
+				}
+				slot.len -= del_len
+				inp.text_changed_id = slot.id_hash
+			}
+			return true
+		case 'c', 'C':
+			if slot.has_selection {
+				copy_selection_to_clipboard(inp, slot)
+				return true
+			}
+		case 'x', 'X':
+			if slot.has_selection {
+				copy_selection_to_clipboard(inp, slot)
+				delete_selected_range(inp, slot)
+				return true
+			}
+		case 'v', 'V', 'y', 'Y':
+			if inp.clipboard_len > 0 {
+				return text_input_insert_string(inp, slot, string(inp.clipboard_buf[:inp.clipboard_len]))
+			}
 			return true
 		case 'e', 'E':
-			slot.cursor_byte = slot.len
+			slot.has_selection = false
+			slot.cursor_byte   = slot.len
 			return true
 		case 'u', 'U':
+			slot.has_selection = false
 			if slot.cursor_byte > 0 {
+				kill_len := min(slot.cursor_byte, len(inp.clipboard_buf))
+				for i := 0; i < kill_len; i += 1 {
+					inp.clipboard_buf[i] = slot.buf[i]
+				}
+				inp.clipboard_len = kill_len
+				inp.osc52_pending = kill_len > 0
 				text_input_kill_to_start(inp, slot)
 			}
 			return true
 		case 'k', 'K':
+			slot.has_selection = false
 			if slot.cursor_byte < slot.len {
+				kill_len := min(slot.len - slot.cursor_byte, len(inp.clipboard_buf))
+				for i := 0; i < kill_len; i += 1 {
+					inp.clipboard_buf[i] = slot.buf[slot.cursor_byte + i]
+				}
+				inp.clipboard_len = kill_len
+				inp.osc52_pending = kill_len > 0
 				text_input_kill_to_end(inp, slot)
 			}
 			return true
 		case 'w', 'W':
+			if delete_selected_range(inp, slot) {
+				return true
+			}
 			if slot.cursor_byte > 0 {
 				text_input_delete_word_whitespace(inp, slot)
 			}
@@ -459,12 +655,17 @@ handle_text_input_key :: proc "contextless" (
 	if .Alt in ev.mods && ev.code == .Rune {
 		switch ev.ch {
 		case 'b', 'B':
-			slot.cursor_byte = text_input_move_word_left(full_text, slot.cursor_byte)
+			slot.has_selection = false
+			slot.cursor_byte   = text_input_move_word_left(full_text, slot.cursor_byte)
 			return true
 		case 'f', 'F':
-			slot.cursor_byte = text_input_move_word_right(full_text, slot.cursor_byte)
+			slot.has_selection = false
+			slot.cursor_byte   = text_input_move_word_right(full_text, slot.cursor_byte)
 			return true
 		case 'd', 'D':
+			if delete_selected_range(inp, slot) {
+				return true
+			}
 			if slot.cursor_byte < slot.len {
 				text_input_delete_word_after(inp, slot)
 			}
@@ -472,9 +673,27 @@ handle_text_input_key :: proc "contextless" (
 		}
 	}
 
-	// 3. Standard cursor movement & deletion keys
+	// 3. Standard cursor movement, Shift-selection & deletion keys
 	#partial switch ev.code {
 	case .Left:
+		if .Shift in eff_mods {
+			if !slot.has_selection {
+				slot.sel_anchor_byte = slot.cursor_byte
+			}
+			if (.Ctrl in eff_mods) || (.Alt in eff_mods) {
+				slot.cursor_byte = text_input_move_word_left(full_text, slot.cursor_byte)
+			} else {
+				slot.cursor_byte = prev_grapheme_cluster(full_text, slot.cursor_byte)
+			}
+			slot.has_selection = (slot.cursor_byte != slot.sel_anchor_byte)
+			return true
+		}
+		if lo, _, active := get_text_selection_range(slot); active && (.Ctrl not_in eff_mods) && (.Alt not_in eff_mods) {
+			slot.cursor_byte   = lo
+			slot.has_selection = false
+			return true
+		}
+		slot.has_selection = false
 		if (.Ctrl in ev.mods) || (.Alt in ev.mods) {
 			slot.cursor_byte = text_input_move_word_left(full_text, slot.cursor_byte)
 		} else {
@@ -483,6 +702,25 @@ handle_text_input_key :: proc "contextless" (
 		return true
 
 	case .Right:
+		if .Shift in eff_mods {
+			if !slot.has_selection {
+				slot.sel_anchor_byte = slot.cursor_byte
+			}
+			if (.Ctrl in eff_mods) || (.Alt in eff_mods) {
+				slot.cursor_byte = text_input_move_word_right(full_text, slot.cursor_byte)
+			} else {
+				next_b, _, _ := next_grapheme_cluster(full_text, slot.cursor_byte)
+				slot.cursor_byte = next_b
+			}
+			slot.has_selection = (slot.cursor_byte != slot.sel_anchor_byte)
+			return true
+		}
+		if _, hi, active := get_text_selection_range(slot); active && (.Ctrl not_in eff_mods) && (.Alt not_in eff_mods) {
+			slot.cursor_byte   = hi
+			slot.has_selection = false
+			return true
+		}
+		slot.has_selection = false
 		if (.Ctrl in ev.mods) || (.Alt in ev.mods) {
 			slot.cursor_byte = text_input_move_word_right(full_text, slot.cursor_byte)
 		} else {
@@ -492,14 +730,35 @@ handle_text_input_key :: proc "contextless" (
 		return true
 
 	case .Home:
-		slot.cursor_byte = 0
+		if .Shift in eff_mods {
+			if !slot.has_selection {
+				slot.sel_anchor_byte = slot.cursor_byte
+			}
+			slot.cursor_byte   = 0
+			slot.has_selection = (slot.cursor_byte != slot.sel_anchor_byte)
+			return true
+		}
+		slot.has_selection = false
+		slot.cursor_byte   = 0
 		return true
 
 	case .End:
-		slot.cursor_byte = slot.len
+		if .Shift in eff_mods {
+			if !slot.has_selection {
+				slot.sel_anchor_byte = slot.cursor_byte
+			}
+			slot.cursor_byte   = slot.len
+			slot.has_selection = (slot.cursor_byte != slot.sel_anchor_byte)
+			return true
+		}
+		slot.has_selection = false
+		slot.cursor_byte   = slot.len
 		return true
 
 	case .Backspace:
+		if delete_selected_range(inp, slot) {
+			return true
+		}
 		if (.Alt in ev.mods) || (.Ctrl in ev.mods) {
 			if slot.cursor_byte > 0 {
 				text_input_delete_word_boundary(inp, slot)
@@ -519,6 +778,9 @@ handle_text_input_key :: proc "contextless" (
 		return true
 
 	case .Delete:
+		if delete_selected_range(inp, slot) {
+			return true
+		}
 		if (.Alt in ev.mods) || (.Ctrl in ev.mods) {
 			if slot.cursor_byte < slot.len {
 				text_input_delete_word_after(inp, slot)
@@ -538,11 +800,13 @@ handle_text_input_key :: proc "contextless" (
 
 	case .Space:
 		if eff_mods - {.Shift} == {} {
+			delete_selected_range(inp, slot)
 			return text_input_insert_rune(inp, slot, ' ')
 		}
 
 	case .Rune:
 		if (.Ctrl not_in eff_mods) && (.Alt not_in eff_mods) && ev.ch >= 32 {
+			delete_selected_range(inp, slot)
 			return text_input_insert_rune(inp, slot, ev.ch)
 		}
 	}
@@ -591,6 +855,12 @@ text_input_delete_word_whitespace :: proc "contextless" (inp: ^Input_State, slot
 	}
 	del_len := slot.cursor_byte - pos
 	if del_len > 0 {
+		kill_len := min(del_len, len(inp.clipboard_buf))
+		for i := 0; i < kill_len; i += 1 {
+			inp.clipboard_buf[i] = slot.buf[pos + i]
+		}
+		inp.clipboard_len = kill_len
+		inp.osc52_pending = kill_len > 0
 		for i := pos; i < slot.len - del_len; i += 1 {
 			slot.buf[i] = slot.buf[i + del_len]
 		}
@@ -714,7 +984,8 @@ handle_text_input_click :: proc "contextless" (
 		cur_col += cw
 		idx = next_idx
 	}
-	slot.cursor_byte = idx
+	slot.cursor_byte   = idx
+	slot.has_selection = false
 }
 
 // =============================================================================

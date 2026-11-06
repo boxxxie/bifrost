@@ -250,38 +250,64 @@ Event_Handler_Proc :: #type proc(
 	userdata: rawptr,
 ) -> (consumed: bool)
 
-MAX_FOCUS_HISTORY :: 8
-MAX_HIT_DEPTH     :: 32
-MAX_SCROLL_SLOTS  :: 32
+MAX_FOCUS_HISTORY    :: 8
+MAX_HIT_DEPTH        :: 32
+MAX_SCROLL_SLOTS     :: 32
+MAX_SCOPE_MEMORY     :: 64
+MAX_FOCUS_PATH       :: 32
+MAX_FLOATING_WINDOWS :: 16
 
-Focus_Scope_Entry :: struct {
-	modal_id:       u64,
-	z_layer:        u8,
-	saved_focus_id: u64,
-	saved_scope_id: u64,
+Nav_Dir :: enum u8 {
+	Left,
+	Right,
+	Up,
+	Down,
 }
 
-Scroll_Slot :: struct {
-	id_hash:        u64,
-	offset:         i32, // Top visible row index (or cell offset)
-	max_offset:     i32, // Clamped maximum scroll offset
-	viewport_rows:  i32, // Solved inner_rect.h from previous/current layout pass
-	total_rows:     i32, // Total rows in xitdb collection or physical content_span
-	selected_row:   i32, // Highlighted cursor row index inside virtual lists
-	scroll_padding: i32, // Lookahead padding rows maintained above/below selected_row
+Keymap_Style :: enum u8 {
+	Vim = 0, // Prefix count (`5j`, `3l`) + modal `h/j/k/l` navigation
+	Helix,   // Selection/Motion-first + postfix/suffix count (`j5`, `l3`) & `g` goto chords
+	Emacs,   // Chordal `C-n`/`C-p`/`C-f`/`C-b` navigation + `C-u` universal argument (`4x`, `C-u 7`)
 }
+
+Page_Cmd :: enum u8 {
+	Page_Up,
+	Page_Down,
+	Home,
+	End,
+}
+
+Key_Result :: enum u8 {
+	Ignored,
+	Consumed,
+}
+
+OUT_OF_LANE_PENALTY :: 1_000_000
 
 // Persistent across frames (owned by the UI Actor; zero heap allocations)
 Input_State :: struct {
-	// Focus state & nested modal LIFO restoration stack
+	// Focus state, H/H* scope memory & nested modal LIFO restoration stack
 	focused_id:          u64, // Currently focused widget ID hash
 	prev_focused_id:     u64, // Focused widget ID hash from start of resolve_input
 	wants_focus_id:      u64, // Optional programmatic focus request for next reconcile
+	editing_id:          u64, // Active text-capture target (0 = navigation stage; focused_id or ancestor Scope_Text_Sink)
+	carry_edit_mode:     bool,
+	ensure_visible:      bool,
+	preferred_nav_pos:   [2]i32,
+	has_preferred_x:     bool,
+	has_preferred_y:     bool,
+	frame_index:         u64,
 	active_scope_id:     u64, // Active focus_scope container ID hash
 	active_capture_id:   u64, // Topmost capture_input (modal) ID hash (0 if none)
 	active_shield_z:     u8,  // Highest effective_z among mounted capture_input nodes
 	focus_history:       [MAX_FOCUS_HISTORY]Focus_Scope_Entry,
 	focus_history_len:   int,
+	focus_node_path:     [MAX_FOCUS_PATH]i32,
+	focus_node_path_len: int,
+	scope_memory:        [MAX_SCOPE_MEMORY]Scope_Memory_Entry,
+	scope_memory_len:    int,
+	floating_mru:        [MAX_FLOATING_WINDOWS]u64,
+	floating_mru_len:    int,
 
 	// Mouse hover & active press capture state
 	hovered_id:          u64, // Widget currently under the mouse cursor
@@ -326,18 +352,142 @@ Input_State :: struct {
 	keybinding_count:      int,
 	triggered_action_id:   u64,
 	triggered_action_name: string,
+	triggered_enum_val:    i64,
+	has_triggered_enum:    bool,
+
+	// Track 8: Multi-key chord state, per-scope transient sub-modes & single-source action specs
+	pending_chord:         Pending_Chord_State,
+	clock_ns:              i64, // Monotonic frame clock (updated from UI_Msg_Frame_Tick.tick_ns)
+	chord_timeout_ns:      i64, // Prefix timeout in nanoseconds (0 = DEFAULT_CHORD_TIMEOUT_NS)
+	repeat_count:          i32, // Accumulated Vim-style numeric prefix or Emacs C-u count (0 = none)
+	keymap_style:          Keymap_Style,
+	has_last_motion:       bool,
+	last_motion_dir:       Nav_Dir,
+	last_motion_applied:   i32,
+	suffix_count:          i32, // Active Helix-style postfix/suffix count (e.g. `j5` -> 5)
+	emacs_universal_arg:   bool,
+	emacs_arg_digits:      bool,
+	scope_submodes:        [MAX_SCOPE_SUBMODES]Scope_Submode_Entry,
+	scope_submode_len:     int,
+	action_specs:          [MAX_ACTION_SPECS]Action_Spec,
+	action_spec_cnt:       int,
+	action_userdata:       rawptr,
+	last_disabled_reason:  string,
+
+	// Internal zero-allocation clipboard buffer & OSC 52 request flag
+	clipboard_buf:         [MAX_TEXT_BYTES]byte,
+	clipboard_len:         int,
+	osc52_pending:         bool,
+}
+
+consume_repeat_count :: proc "contextless" (inp: ^Input_State) -> i32 {
+	if inp == nil || inp.repeat_count <= 0 {
+		if inp != nil {
+			inp.emacs_universal_arg = false
+			inp.emacs_arg_digits    = false
+		}
+		return 1
+	}
+	c := clamp(inp.repeat_count, 1, 9999)
+	inp.repeat_count        = 0
+	inp.emacs_universal_arg = false
+	inp.emacs_arg_digits    = false
+	return c
+}
+
+clear_repeat_count :: proc "contextless" (inp: ^Input_State) {
+	if inp != nil {
+		inp.repeat_count        = 0
+		inp.emacs_universal_arg = false
+		inp.emacs_arg_digits    = false
+		inp.has_last_motion     = false
+		inp.last_motion_applied = 0
+		inp.suffix_count        = 0
+	}
+}
+
+set_keymap_style :: proc(inp: ^Input_State, style: Keymap_Style) {
+	if inp == nil {
+		return
+	}
+	inp.keymap_style  = style
+	inp.pending_chord = {}
+	clear_repeat_count(inp)
+
+	// Rebind all Action_Specs that declare style-specific chords (`vim=`, `helix=`, `emacs=`)
+	for i := 0; i < inp.action_spec_cnt; i += 1 {
+		spec := inp.action_specs[i]
+		target_chord := ""
+		target_desc  := ""
+		switch style {
+		case .Vim:
+			target_chord = spec.chord_vim
+			target_desc  = spec.desc_vim
+		case .Helix:
+			target_chord = spec.chord_helix if len(spec.chord_helix) > 0 else spec.chord_vim
+			target_desc  = spec.desc_helix if len(spec.desc_helix) > 0 else spec.desc_vim
+		case .Emacs:
+			target_chord = spec.chord_emacs if len(spec.chord_emacs) > 0 else spec.chord_vim
+			target_desc  = spec.desc_emacs if len(spec.desc_emacs) > 0 else spec.desc_vim
+		}
+		if len(target_desc) > 0 {
+			inp.action_specs[i].desc = target_desc
+		}
+		if !spec.user_rebound && len(target_chord) > 0 && target_chord != spec.chord_spec {
+			_ = rebind_action_chord_internal(inp, spec.action_name, target_chord, false)
+		}
+	}
+
+	// In Emacs mode, free `<C-p>` for `previous-line` (Up) and bind `palette.toggle` to `<M-x>` (`execute-extended-command`)
+	pal_id := hash_id("palette.toggle")
+	has_palette := false
+	pal_user_rebound := false
+	for i := 0; i < inp.keybinding_count; i += 1 {
+		if inp.keybindings[i].action_id == pal_id {
+			has_palette = true
+			if inp.keybindings[i].spec_idx > 0 && int(inp.keybindings[i].spec_idx - 1) < inp.action_spec_cnt {
+				pal_user_rebound = inp.action_specs[inp.keybindings[i].spec_idx - 1].user_rebound
+			}
+			break
+		}
+	}
+	if has_palette && !pal_user_rebound {
+		_ = rebind_action_chord_internal(inp, "palette.toggle", "<M-x>" if style == .Emacs else "<C-p>|<M-x>", false)
+	}
+}
+
+cycle_keymap_style :: proc(inp: ^Input_State) -> Keymap_Style {
+	if inp == nil {
+		return .Vim
+	}
+	next := Keymap_Style((int(inp.keymap_style) + 1) % len(Keymap_Style))
+	set_keymap_style(inp, next)
+	return next
+}
+
+keymap_style_name :: proc "contextless" (style: Keymap_Style) -> string {
+	switch style {
+	case .Vim:
+		return "Vim"
+	case .Helix:
+		return "Helix"
+	case .Emacs:
+		return "Emacs"
+	}
+	return "Vim"
 }
 
 Button_Spec :: struct {
-	label:    string,
-	width:    Axis_Size,
-	height:   Axis_Size,
-	border:   Border_Kind,
-	fg:       Color,
-	bg:       Color,
-	hover_bg: Color,
-	focus_fg: Color,
-	focus_bg: Color,
+	label:       string,
+	width:       Axis_Size,
+	height:      Axis_Size,
+	border:      Border_Kind,
+	fg:          Color,
+	bg:          Color,
+	hover_bg:    Color,
+	focus_fg:    Color,
+	focus_bg:    Color,
+	focus_flags: Focus_Flags,
 }
 
 // =============================================================================
@@ -430,13 +580,15 @@ state_store_sync_from_layout :: proc(
 		if entry, ok := &store.scroll_states[node.id_hash]; ok {
 			max_x := max(0, node.content_span[0] - node.inner_rect.w)
 			max_y := max(0, node.content_span[1] - node.inner_rect.h)
+			off_x := node.config.scroll_offset_x
 			off_y := node.config.scroll_offset
 			if inp != nil {
 				slot := get_scroll_slot(inp, node.id_hash)
+				off_x = slot.offset_x
 				off_y = slot.offset
 			}
 			entry.scroll_max = {max_x, max_y}
-			entry.scroll_offset[0] = clamp(node.config.scroll_offset_x, 0, max_x)
+			entry.scroll_offset[0] = clamp(off_x, 0, max_x)
 			entry.scroll_offset[1] = clamp(off_y, 0, max_y)
 		}
 	}
@@ -461,6 +613,7 @@ ui_button :: proc(ctx: ^Layout_Context, s: ^Screen, id: string, spec: Button_Spe
 		bg      = bg,
 		fill_bg = true,
 	}
+	is_enabled := .Disabled not_in spec.focus_flags
 	return leaf(ctx, id, text_w, 1, Box_Config{
 		dir         = .Row,
 		width       = w,
@@ -468,9 +621,10 @@ ui_button :: proc(ctx: ^Layout_Context, s: ^Screen, id: string, spec: Button_Spe
 		border      = spec.border,
 		main_align  = .Center,
 		cross_align = .Center,
-		focusable   = true,
-		clickable   = true,
-		hoverable   = true,
+		focus_flags = spec.focus_flags,
+		focusable   = is_enabled,
+		clickable   = is_enabled,
+		hoverable   = is_enabled,
 	})
 }
 
@@ -478,8 +632,31 @@ was_activated :: #force_inline proc(inp: ^Input_State, id: string) -> bool {
 	return inp.activated_id != 0 && inp.activated_id == hash_id(id)
 }
 
+request_focus :: #force_inline proc(inp: ^Input_State, id: string) {
+	if inp != nil && len(id) > 0 {
+		inp.wants_focus_id = hash_id(id)
+	}
+}
+
 is_focused :: #force_inline proc(inp: ^Input_State, id: string) -> bool {
 	return inp.focused_id != 0 && inp.focused_id == hash_id(id)
+}
+
+is_editing :: #force_inline proc(inp: ^Input_State, id: string) -> bool {
+	return inp.editing_id != 0 && inp.editing_id == hash_id(id)
+}
+
+is_scope_selected :: proc(inp: ^Input_State, id: string) -> bool {
+	h := hash_id(id)
+	if h == 0 {
+		return false
+	}
+	for i := 0; i < inp.scope_memory_len; i += 1 {
+		if inp.scope_memory[i].scope_hash != 0 && inp.scope_memory[i].last_leaf_hash == h {
+			return true
+		}
+	}
+	return false
 }
 
 is_hovered :: #force_inline proc(inp: ^Input_State, id: string) -> bool {
@@ -576,6 +753,18 @@ dispatch_three_phase :: proc(
 	return false
 }
 
+// Releases active mouse captures, splitter drags, and hover state upon terminal focus loss (`CSI O`).
+reset_pointer_on_focus_out :: proc "contextless" (inp: ^Input_State) {
+	inp.hovered_id         = 0
+	inp.hover_path_len     = 0
+	inp.active_id          = 0
+	inp.active_press_id    = 0
+	inp.active_splitter_id = 0
+	inp.mouse_down         = false
+	inp.mouse_initialized  = false
+	inp.drag_delta         = {0, 0}
+}
+
 // Resolves focus scopes, nested modal LIFO input capture, 3-phase keyboard/mouse routing,
 // and clipped reverse-Z mouse hit-testing. Call after end_layout(&ctx) and before render_layout(&scr, &ctx).
 resolve_input :: proc(inp: ^Input_State, ctx: ^Layout_Context, events: ..Input_Event) {
@@ -594,32 +783,42 @@ resolve_input :: proc(inp: ^Input_State, ctx: ^Layout_Context, events: ..Input_E
 	inp.text_changed_id       = 0
 	inp.triggered_action_id   = 0
 	inp.triggered_action_name = ""
+	inp.triggered_enum_val    = 0
+	inp.has_triggered_enum    = false
+	inp.last_disabled_reason  = ""
 	inp.drag_delta            = {0, 0}
 
 	if len(ctx.nodes) == 0 {
-		inp.focused_id        = 0
-		inp.hovered_id        = 0
-		inp.active_id         = 0
-		inp.active_press_id   = 0
-		inp.focus_path_len    = 0
-		inp.hover_path_len    = 0
-		inp.focus_history_len = 0
+		inp.focused_id          = 0
+		inp.editing_id          = 0
+		inp.carry_edit_mode     = false
+		inp.hovered_id          = 0
+		inp.active_id           = 0
+		inp.active_press_id     = 0
+		inp.focus_path_len      = 0
+		inp.focus_node_path_len = 0
+		inp.hover_path_len      = 0
+		inp.focus_history_len   = 0
 		return
 	}
 
-	// 0. Synchronize solved scroll container dimensions and splitter geometries
+	// 0. Apply non-modal floating window MRU z-promotion, then sync scroll & splitter geometries
+	apply_floating_z_promotion(inp, ctx)
 	sync_scroll_viewports(inp, ctx)
 	sync_splitters(inp, ctx)
 
-	// 1. Identify topmost active capture_input container (highest effective_z modal)
+	// 1. Identify topmost active Trap_Focus / capture_input container via ctx.z_order (effective_z)
 	capture_idx := find_topmost_capture_node(ctx)
 	inp.active_shield_z = compute_active_shield_z(ctx)
 	if capture_idx >= 0 {
 		inp.active_capture_id = ctx.nodes[capture_idx].id_hash
 	}
 
-	// 2. Reconcile focused_id with current tree and nested modal LIFO focus_history stack
+	// 2. Reconcile focused_id & editing_id with current scope tree, H/H* memory, and modal traps
 	reconcile_focus(inp, ctx, capture_idx)
+
+	// 2b. Expire timed-out pending prefix chords (firing any shadowed single-step fallback)
+	expire_pending_chord(inp, ctx, capture_idx, inp.clock_ns)
 
 	// 3. Process incoming keyboard, mouse, and focus-loss events
 	for ev in events {
@@ -629,30 +828,22 @@ resolve_input :: proc(inp: ^Input_State, ctx: ^Layout_Context, events: ..Input_E
 		case Mouse_Event:
 			handle_mouse_event(inp, ctx, capture_idx, e)
 		case Focus_Loss_Event:
-			inp.hovered_id         = 0
-			inp.hover_path_len     = 0
-			inp.active_id          = 0
-			inp.active_press_id    = 0
-			inp.active_splitter_id = 0
-			inp.mouse_down         = false
+			reset_pointer_on_focus_out(inp)
 		case Focus_Event:
 			if !e.focused {
-				inp.hovered_id         = 0
-				inp.hover_path_len     = 0
-				inp.active_id          = 0
-				inp.active_press_id    = 0
-				inp.active_splitter_id = 0
-				inp.mouse_down         = false
+				reset_pointer_on_focus_out(inp)
 			}
 		case Paste_Event:
-			if inp.focused_id != 0 {
-				if f_idx, exists := ctx.id_map[inp.focused_id]; exists && is_node_allowed(ctx, f_idx, capture_idx) {
-					if ctx.nodes[f_idx].config.text_input {
-						slot := get_text_slot(inp, inp.focused_id)
-						for r in e.text {
-							if r >= 32 {
-								text_input_insert_rune(inp, slot, r)
-							}
+			inp.clipboard_len, _ = copy_string_to_buf(inp.clipboard_buf[:], e.text)
+			target_id := inp.editing_id if inp.editing_id != 0 else inp.focused_id
+			if target_id != 0 {
+				if t_idx, exists := ctx.id_map[target_id]; exists && is_node_allowed(ctx, t_idx, capture_idx) {
+					t_node := ctx.nodes[t_idx]
+					if (.Captures_Text in t_node.focus_flags) && (.Disabled not_in t_node.focus_flags) {
+						slot := get_text_slot(inp, target_id)
+						text_input_insert_string(inp, slot, e.text)
+						if inp.text_changed_id == t_node.id_hash && (.Scope_Text_Sink in t_node.focus_flags) {
+							reset_scope_selection_to_default(inp, ctx, t_node.parent_scope_idx, capture_idx)
 						}
 					}
 				}
@@ -661,15 +852,31 @@ resolve_input :: proc(inp: ^Input_State, ctx: ^Layout_Context, events: ..Input_E
 		}
 	}
 
-	// 4. Refresh hovered_id against current layout & modal occlusion when no mouse event
+	// 4. Ensure programmatically requested focus visibility if pending
+	if inp.ensure_visible {
+		inp.ensure_visible = false
+		if inp.focused_id != 0 {
+			if f_idx, ok := ctx.id_map[inp.focused_id]; ok {
+				scroll_node_into_view(inp, ctx, f_idx)
+			}
+		}
+	}
+
+	// 5. Refresh hovered_id against current layout & modal occlusion when no mouse event
 	// already updated hover (e.g., stationary cursor over a scrolling viewport)
 	if inp.mouse_initialized && len(events) == 0 {
 		update_hover_at_point(inp, ctx, capture_idx, inp.mouse_pos[0], inp.mouse_pos[1])
 	}
 }
 
-// Applies visual highlight styling to focused, hovered, and active widgets before render_layout()
+// Applies 3-state visual highlight styling to focused, inactive scope-selected, hovered, and disabled widgets before render_layout()
 apply_input_highlights :: proc(s: ^Screen, ctx: ^Layout_Context, inp: ^Input_State) {
+	if len(ctx.nodes) > 0 {
+		apply_floating_z_promotion(inp, ctx)
+		sync_scroll_viewports(inp, ctx)
+		sync_splitters(inp, ctx)
+	}
+
 	for i := 0; i < len(ctx.nodes); i += 1 {
 		node := ctx.nodes[i]
 		if node.config.text_input {
@@ -680,6 +887,13 @@ apply_input_highlights :: proc(s: ^Screen, ctx: ^Layout_Context, inp: ^Input_Sta
 			sync_splitter_paint(s, inp, node)
 			continue
 		}
+		if .Disabled in node.focus_flags {
+			if paint, ok := s.paints[node.id_hash]; ok {
+				paint.style += {.Dim}
+				s.paints[node.id_hash] = paint
+			}
+			continue
+		}
 		if !node.config.focusable {
 			continue
 		}
@@ -687,384 +901,371 @@ apply_input_highlights :: proc(s: ^Screen, ctx: ^Layout_Context, inp: ^Input_Sta
 		if !ok {
 			continue
 		}
+		is_container_scope := (.Focus_Scope in node.focus_flags) || node.config.virtual_total_rows > 0
 		if node.id_hash == inp.focused_id {
-			paint.style += {.Bold, .Reverse}
+			if is_container_scope && (paint.fill_bg || paint.bg.kind != .Default) {
+				paint.title_style += {.Bold, .Reverse}
+			} else {
+				paint.style += {.Bold, .Reverse}
+			}
 			if paint.border_fg.kind == .Default {
 				paint.border_fg = rgb(255, 215, 0)
+			}
+		} else if is_inactive_scope_leaf_selected(inp, ctx, i32(i)) {
+			if is_container_scope && (paint.fill_bg || paint.bg.kind != .Default) {
+				paint.title_style += {.Dim, .Reverse}
+			} else {
+				paint.style += {.Dim, .Reverse}
 			}
 		} else if node.id_hash == inp.hovered_id {
 			paint.style += {.Underline}
 		}
 		s.paints[node.id_hash] = paint
 	}
+
+	refresh_dynamic_bars(s, ctx, inp)
 }
 
-// =============================================================================
-// Internal Focus Reconciliation, LIFO Modal History & Z-Aware Hit-Testing
-// =============================================================================
-
-find_topmost_capture_node :: proc "contextless" (ctx: ^Layout_Context) -> i32 {
-	for i := len(ctx.z_order) - 1; i >= 0; i -= 1 {
-		idx := ctx.z_order[i]
-		if ctx.nodes[idx].config.capture_input {
-			return idx
-		}
-	}
-	return -1
-}
-
-is_descendant_or_self :: proc "contextless" (ctx: ^Layout_Context, node_idx, ancestor_idx: i32) -> bool {
-	if ancestor_idx < 0 {
-		return true
-	}
-	curr := node_idx
-	for curr >= 0 {
-		if curr == ancestor_idx {
-			return true
-		}
-		curr = ctx.nodes[curr].parent_idx
-	}
-	return false
-}
-
-// A node is reachable only if no capturing modal blocks it.
-is_node_allowed :: proc "contextless" (ctx: ^Layout_Context, idx, capture_idx: i32) -> bool {
-	if idx < 0 || int(idx) >= len(ctx.nodes) {
-		return false
-	}
-	if capture_idx < 0 {
-		return true
-	}
-	cap_z := ctx.nodes[capture_idx].effective_z
-	node_z := ctx.nodes[idx].effective_z
-	if node_z > cap_z {
-		return true
-	}
-	if node_z < cap_z {
-		return false
-	}
-	return is_descendant_or_self(ctx, idx, capture_idx)
-}
 
 @(private)
 is_interactive_node :: #force_inline proc "contextless" (cfg: Box_Config) -> bool {
 	return cfg.focusable || cfg.clickable || cfg.hoverable || cfg.draggable || cfg.splitter || cfg.text_input
 }
 
-@(private)
-modal_scope_on_stack :: proc "contextless" (inp: ^Input_State, modal_id: u64) -> bool {
-	for i := 0; i < inp.focus_history_len; i += 1 {
-		if inp.focus_history[i].modal_id == modal_id {
-			return true
-		}
-	}
-	return false
-}
-
-@(private)
-is_modal_still_mounted :: proc "contextless" (ctx: ^Layout_Context, modal_id: u64) -> bool {
-	if idx, ok := ctx.id_map[modal_id]; ok {
-		return ctx.nodes[idx].config.capture_input
-	}
-	return false
-}
-
-@(private)
-push_focus_scope_entry :: proc "contextless" (inp: ^Input_State, entry: Focus_Scope_Entry) {
-	if entry.modal_id == 0 || modal_scope_on_stack(inp, entry.modal_id) {
-		return
-	}
-	if inp.focus_history_len < MAX_FOCUS_HISTORY {
-		inp.focus_history[inp.focus_history_len] = entry
-		inp.focus_history_len += 1
-	} else {
-		for i := 0; i < MAX_FOCUS_HISTORY - 1; i += 1 {
-			inp.focus_history[i] = inp.focus_history[i + 1]
-		}
-		inp.focus_history[MAX_FOCUS_HISTORY - 1] = entry
-	}
-}
-
-@(private)
-first_focusable_for_modal :: proc "contextless" (ctx: ^Layout_Context, modal_idx: i32) -> (u64, u64) {
-	for i := 0; i < len(ctx.nodes); i += 1 {
-		idx := i32(i)
-		node := ctx.nodes[idx]
-		if node.config.focusable && is_node_allowed(ctx, idx, modal_idx) {
-			return node.id_hash, node.scope_id
-		}
-	}
-	return 0, 0
-}
-
-reconcile_focus :: proc(inp: ^Input_State, ctx: ^Layout_Context, capture_idx: i32) {
-	// 1. Pop any focus_history entries from the top of the LIFO stack whose modal has unmounted
-	for inp.focus_history_len > 0 {
-		top := inp.focus_history[inp.focus_history_len - 1]
-		if is_modal_still_mounted(ctx, top.modal_id) {
-			break
-		}
-		inp.focus_history_len -= 1
-		if top.saved_focus_id != 0 {
-			inp.focused_id      = top.saved_focus_id
-			inp.active_scope_id = top.saved_scope_id
-		}
-	}
-
-	// Also compact any non-top modal entries that may have unmounted out of order
-	write_idx := 0
-	for read_idx := 0; read_idx < inp.focus_history_len; read_idx += 1 {
-		entry := inp.focus_history[read_idx]
-		if is_modal_still_mounted(ctx, entry.modal_id) {
-			inp.focus_history[write_idx] = entry
-			write_idx += 1
-		}
-	}
-	inp.focus_history_len = write_idx
-
-	// 2. Register any newly mounted capture_input modals in ascending effective_z order (via z_order),
-	// saving the currently focused widget in LIFO order and advancing focus into the new modal
-	for idx in ctx.z_order {
-		node := ctx.nodes[idx]
-		if !node.config.capture_input {
-			continue
-		}
-		if !modal_scope_on_stack(inp, node.id_hash) {
-			push_focus_scope_entry(inp, Focus_Scope_Entry{
-				modal_id       = node.id_hash,
-				z_layer        = node.effective_z,
-				saved_focus_id = inp.focused_id,
-				saved_scope_id = inp.active_scope_id,
-			})
-			new_focus, new_scope := first_focusable_for_modal(ctx, idx)
-			if new_focus != 0 {
-				inp.focused_id      = new_focus
-				inp.active_scope_id = new_scope
-			}
-		}
-	}
-
-	// 3. Apply explicit programmatic focus request if valid within active shield
-	if inp.wants_focus_id != 0 {
-		if idx, ok := ctx.id_map[inp.wants_focus_id]; ok {
-			node := ctx.nodes[idx]
-			if node.config.focusable && is_node_allowed(ctx, idx, capture_idx) {
-				inp.focused_id      = node.id_hash
-				inp.active_scope_id = node.scope_id
-			}
-		}
-		inp.wants_focus_id = 0
-	}
-
-	// 4. Verify focused_id is still mounted, focusable, and allowed by the active modal shield
-	if inp.focused_id != 0 {
-		if idx, exists := ctx.id_map[inp.focused_id]; exists {
-			node := ctx.nodes[idx]
-			if node.config.focusable && is_node_allowed(ctx, idx, capture_idx) {
-				inp.active_scope_id = node.scope_id
-				inp.focus_path_len  = build_ancestor_path(ctx, idx, &inp.focus_path)
-				return
-			}
-		}
-	}
-
-	// 5. Fallback: pick the first allowed focusable widget in topological order
-	for i := 0; i < len(ctx.nodes); i += 1 {
-		idx := i32(i)
-		node := ctx.nodes[idx]
-		if node.config.focusable && is_node_allowed(ctx, idx, capture_idx) {
-			inp.focused_id      = node.id_hash
-			inp.active_scope_id = node.scope_id
-			inp.focus_path_len  = build_ancestor_path(ctx, idx, &inp.focus_path)
-			return
-		}
-	}
-
-	inp.focused_id      = 0
-	inp.active_scope_id = 0
-	inp.focus_path_len  = 0
-}
 
 handle_key_event :: proc(inp: ^Input_State, ctx: ^Layout_Context, capture_idx: i32, ev: Key_Event) {
-	if ev.action == .Release {
+	if ev.action == .Release || is_pure_modifier_key(ev.code) {
 		return
 	}
 	if inp.focused_id != 0 {
 		if f_idx, ok := ctx.id_map[inp.focused_id]; ok {
-			inp.focus_path_len = build_ancestor_path(ctx, f_idx, &inp.focus_path)
+			inp.focus_path_len      = build_ancestor_path(ctx, f_idx, &inp.focus_path)
+			inp.focus_node_path_len = build_focus_node_path(ctx, f_idx, &inp.focus_node_path)
 		} else {
-			inp.focus_path_len = 0
+			inp.focus_path_len      = 0
+			inp.focus_node_path_len = 0
 		}
 	} else {
-		inp.focus_path_len = 0
+		inp.focus_path_len      = 0
+		inp.focus_node_path_len = 0
 	}
 
-	// 1. 3-Phase Dispatch (Capturing -> At_Target -> Bubbling) with consume short-circuiting
+	// 0a. 3-Phase Dispatch (Capturing -> At_Target -> Bubbling) with consume short-circuiting
 	if inp.focus_path_len > 0 {
 		if dispatch_three_phase(ctx, inp.focus_path[:inp.focus_path_len], ev, inp.event_handler, inp.event_userdata) {
 			return
 		}
 	}
 
-	// 2. Scoped & Global Keybinding Table (3-tier priority resolution)
-	if dispatch_keybindings(inp, ctx, capture_idx, ev) {
+	// 0a2. Pending 2-Step Key-Chord Resolution (`"g g"`, `"<C-w> l"`, `<Esc>` cancel)
+	if inp.pending_chord.active {
+		resolve_pending_chord_step(inp, ctx, capture_idx, ev)
 		return
 	}
 
-	// 3. Focused Text Input or Splitter Widget Handling
-	if inp.focused_id != 0 {
-		if f_idx, exists := ctx.id_map[inp.focused_id]; exists && is_node_allowed(ctx, f_idx, capture_idx) {
-			f_node := ctx.nodes[f_idx]
-			if f_node.config.text_input {
-				if handle_text_input_key(inp, ctx, f_idx, capture_idx, ev) {
+	// 0b. Global_Always keybindings (active even across Trap_Focus shields)
+	if dispatch_global_always_keybindings(inp, ctx, ev) {
+		return
+	}
+
+	// 0c. Active `editing_id` Text Input Routing (two-stage Escape / Emacs C-g exit, Allow_In_Text_Input chords, & UTF-8 editing)
+	if inp.editing_id != 0 {
+		is_emacs_quit := inp.keymap_style == .Emacs && ev.code == .Rune && (ev.ch == 'g' || ev.ch == 'G') && (ev.mods - {.Caps_Lock, .Num_Lock}) == {.Ctrl}
+		if ev.code == .Escape || is_emacs_quit {
+			if e_idx, ok := ctx.id_map[inp.editing_id]; ok {
+				if .Auto_Edit not_in ctx.nodes[e_idx].focus_flags {
+					inp.editing_id = 0
+					clear_repeat_count(inp)
 					return
 				}
 			}
-			if f_node.config.splitter {
-				if handle_splitter_key(inp, ctx, f_idx, ev) {
+		}
+
+		// Allow explicit .Allow_In_Text_Input / Ctrl chords (e.g. Ctrl+P, Ctrl+Left) while editing
+		if dispatch_keybindings(inp, ctx, capture_idx, ev) {
+			return
+		}
+
+		if e_idx, exists := ctx.id_map[inp.editing_id]; exists && is_node_allowed(ctx, e_idx, capture_idx) {
+			e_node := ctx.nodes[e_idx]
+			if (.Captures_Text in e_node.focus_flags) && (.Disabled not_in e_node.focus_flags) {
+				if handle_text_input_key(inp, ctx, e_idx, capture_idx, ev) {
+					if inp.text_changed_id == e_node.id_hash && (.Scope_Text_Sink in e_node.focus_flags) {
+						reset_scope_selection_to_default(inp, ctx, e_node.parent_scope_idx, capture_idx)
+					}
 					return
 				}
 			}
 		}
 	}
 
-	// 4. Default focus navigation, activation, modal escape, and keyboard scrolling
-	#partial switch ev.code {
-	case .Tab:
-		if .Ctrl in ev.mods {
-			cycle_focus_scope(inp, ctx, capture_idx, -1 if .Shift in ev.mods else 1)
-		} else {
-			cycle_focus_within_scope(inp, ctx, capture_idx, -1 if .Shift in ev.mods else 1)
+	eff_mods := ev.mods - {.Caps_Lock, .Num_Lock}
+
+	// Emacs `Ctrl+G` (`keyboard-quit`): cancel universal argument, pending chords, or active resize sub-mode
+	if inp.keymap_style == .Emacs && eff_mods == {.Ctrl} && ev.code == .Rune && (ev.ch == 'g' || ev.ch == 'G') {
+		clear_repeat_count(inp)
+		inp.pending_chord = {}
+		if inp.focused_id != 0 && get_scope_submode_by_hash(inp, inp.focused_id) != 0 {
+			set_scope_submode_by_hash(inp, inp.focused_id, 0)
 		}
-	case .F6:
-		cycle_focus_scope(inp, ctx, capture_idx, -1 if .Shift in ev.mods else 1)
-	case .Enter, .Space:
-		if inp.focused_id != 0 {
-			if idx, ok := ctx.id_map[inp.focused_id]; ok && is_node_allowed(ctx, idx, capture_idx) {
-				inp.activated_id = inp.focused_id
+		return
+	}
+
+	// Emacs `Ctrl+U` universal argument (`C-u` = 4x, `C-u C-u` = 16x, `C-u 7` = 7x)
+	if inp.keymap_style == .Emacs && inp.editing_id == 0 && eff_mods == {.Ctrl} && ev.code == .Rune && (ev.ch == 'u' || ev.ch == 'U') {
+		if !inp.emacs_universal_arg {
+			inp.emacs_universal_arg = true
+			inp.emacs_arg_digits    = false
+			inp.repeat_count        = 4
+		} else if !inp.emacs_arg_digits {
+			inp.repeat_count = min(9999, max(1, inp.repeat_count) * 4)
+		}
+		return
+	}
+
+	// Hierarchical scope ring cycling (F6 / Shift+F6 / Ctrl+Tab)
+	if ev.code == .F6 || (ev.code == .Tab && .Ctrl in eff_mods) {
+		clear_repeat_count(inp)
+		cycle_focus_scope(inp, ctx, capture_idx, -1 if .Shift in eff_mods else 1)
+		return
+	}
+
+	// Tip Splitter Priority: when focused on a splitter, Enter or active .Resize sub-mode keys
+	// take precedence before enclosing .Scope_Only bindings or spatial navigation.
+	if inp.focus_node_path_len > 0 {
+		tip_idx := inp.focus_node_path[inp.focus_node_path_len - 1]
+		if tip_idx >= 0 && int(tip_idx) < len(ctx.nodes) && is_node_allowed(ctx, tip_idx, capture_idx) {
+			if ctx.nodes[tip_idx].config.splitter && handle_splitter_key(inp, ctx, tip_idx, ev) {
+				return
 			}
 		}
-	case .Escape:
-		if capture_idx >= 0 {
-			inp.escape_modal_id = ctx.nodes[capture_idx].id_hash
-		} else if inp.focused_id != 0 {
-			// When no modal is open, pressing Escape inside a text_input transfers focus
-			// to its linked virtual list (if any) or the next focusable widget.
-			if f_idx, ok := ctx.id_map[inp.focused_id]; ok && ctx.nodes[f_idx].config.text_input {
-				slot := get_text_slot(inp, inp.focused_id)
-				if slot.linked_list_id != 0 {
-					if l_idx, l_ok := ctx.id_map[slot.linked_list_id]; l_ok && is_node_allowed(ctx, l_idx, capture_idx) {
-						inp.focused_id      = slot.linked_list_id
-						inp.active_scope_id = ctx.nodes[l_idx].scope_id
-						inp.focus_path_len  = build_ancestor_path(ctx, l_idx, &inp.focus_path)
+	}
+
+	nav_dir, is_nav := key_to_nav_dir(ev, inp.editing_id != 0, inp.keymap_style)
+	page_cmd, is_page := key_to_page_cmd(ev, inp.editing_id != 0, inp.keymap_style)
+	has_chord_mod := (.Ctrl in eff_mods) || (.Alt in eff_mods) || (.Super in eff_mods)
+	root_bindings_checked := false
+
+	// Pre-check innermost-first `.Scope_Only` keybindings along `focus_node_path` (halting at `.Trap_Focus`)
+	if inp.editing_id == 0 {
+		if inp.focus_node_path_len > 0 {
+			for p := inp.focus_node_path_len - 1; p >= 0; p -= 1 {
+				n_idx := inp.focus_node_path[p]
+				if n_idx < 0 || int(n_idx) >= len(ctx.nodes) {
+					continue
+				}
+				if dispatch_scope_keybindings_at_node(inp, ctx, capture_idx, n_idx, ev) {
+					inp.has_last_motion = false
+					if !inp.pending_chord.active {
+						inp.suffix_count = 0
+					}
+					return
+				}
+				if .Trap_Focus in ctx.nodes[n_idx].focus_flags {
+					break
+				}
+			}
+		}
+		// Evaluate `.Root_And_Scopes` bindings before spatial/page nav for modified chords (e.g. <C-p>/<C-n>)
+		// or non-navigation keys so root shortcuts are never shadowed by fallback list movement.
+		if has_chord_mod || (!is_nav && !is_page && ev.code != .Enter && ev.code != .Space && ev.code != .Tab && ev.code != .Escape) {
+			root_bindings_checked = true
+			if dispatch_root_keybindings(inp, ctx, capture_idx, ev) {
+				inp.has_last_motion = false
+				if !inp.pending_chord.active {
+					inp.suffix_count = 0
+				}
+				return
+			}
+		}
+
+		// Numeric count handling across Vim (prefix `5j`), Helix (postfix/suffix `j5` + prefix `5j`), and Emacs (`C-u 5`)
+		if !inp.pending_chord.active && eff_mods == {} && ev.code == .Rune && ev.ch >= '0' && ev.ch <= '9' {
+			digit := i32(ev.ch - '0')
+			switch inp.keymap_style {
+			case .Helix:
+				if inp.has_last_motion && (digit > 0 || inp.suffix_count > 0) {
+					new_suffix := min(9999, inp.suffix_count * 10 + digit)
+					inp.suffix_count = new_suffix
+					delta := new_suffix - inp.last_motion_applied
+					if delta > 0 {
+						inp.repeat_count = delta
+						for p := inp.focus_node_path_len - 1; p >= 0; p -= 1 {
+							n_idx := inp.focus_node_path[p]
+							if n_idx < 0 || int(n_idx) >= len(ctx.nodes) {
+								continue
+							}
+							if handle_spatial_nav_at_level(inp, ctx, capture_idx, p, inp.last_motion_dir) == .Consumed {
+								break
+							}
+							if .Trap_Focus in ctx.nodes[n_idx].focus_flags {
+								break
+							}
+						}
+						inp.repeat_count        = 0
+						inp.last_motion_applied = new_suffix
+					}
+					return
+				} else if digit > 0 || inp.repeat_count > 0 {
+					inp.repeat_count = min(9999, inp.repeat_count * 10 + digit)
+					return
+				}
+			case .Emacs:
+				if inp.emacs_universal_arg {
+					if !inp.emacs_arg_digits {
+						inp.emacs_arg_digits = true
+						inp.repeat_count     = digit
+					} else {
+						inp.repeat_count = min(9999, inp.repeat_count * 10 + digit)
+					}
+					return
+				}
+			case .Vim:
+				if digit > 0 || inp.repeat_count > 0 {
+					inp.repeat_count = min(9999, inp.repeat_count * 10 + digit)
+					return
+				}
+			}
+		}
+	}
+
+	if !is_nav {
+		inp.has_last_motion     = false
+		inp.last_motion_applied = 0
+		inp.suffix_count        = 0
+	}
+
+	if ev.code == .Escape && eff_mods == {} && (inp.repeat_count > 0 || inp.suffix_count > 0) {
+		clear_repeat_count(inp)
+	}
+
+	// 7-Step Bottom-Up `focus_node_path` Walk (tip -> enclosing scopes -> root)
+	trapped := false
+	for p := inp.focus_node_path_len - 1; p >= 0; p -= 1 {
+		node_idx := inp.focus_node_path[p]
+		if node_idx < 0 || int(node_idx) >= len(ctx.nodes) {
+			continue
+		}
+		node := ctx.nodes[node_idx]
+		is_tip := p == inp.focus_node_path_len - 1
+
+		// 1. Tip Widget Specifics: Two-Stage Edit Entry, Scope Drill-Down (`Enter`), Leaf Activation (`Enter`/`Space`)
+		if is_tip && is_node_allowed(ctx, node_idx, capture_idx) {
+			if ev.code == .Enter && eff_mods == {} {
+				if (.Captures_Text in node.focus_flags) && (.Auto_Edit not_in node.focus_flags) && inp.editing_id != node.id_hash {
+					inp.editing_id    = node.id_hash
+					inp.pending_chord = {}
+					return
+				}
+				if .Focus_Scope in node.focus_flags {
+					child_target := resolve_scope_child_target_idx(inp, ctx, node_idx, capture_idx, true)
+					if child_target >= 0 && child_target != node_idx {
+						reset_preferred_nav(inp)
+						set_focused_node(inp, ctx, child_target, capture_idx, false)
 						return
 					}
 				}
-				cycle_focus_within_scope(inp, ctx, capture_idx, 1)
+				inp.activated_id = node.id_hash
+				return
+			}
+			if ev.code == .Space && eff_mods == {} && inp.editing_id == 0 {
+				inp.activated_id = node.id_hash
+				return
 			}
 		}
-	case .Up, .Down, .Page_Up, .Page_Down, .Home, .End:
-		handle_key_scroll(inp, ctx, capture_idx, ev.code)
-	}
-}
 
-cycle_focus_within_scope :: proc(inp: ^Input_State, ctx: ^Layout_Context, capture_idx: i32, step: int) {
-	candidates := make([dynamic]i32, 0, 16, ctx.allocator)
-
-	for i := 0; i < len(ctx.nodes); i += 1 {
-		idx := i32(i)
-		node := ctx.nodes[idx]
-		if !node.config.focusable || !is_node_allowed(ctx, idx, capture_idx) {
-			continue
-		}
-		if node.scope_id == inp.active_scope_id {
-			append(&candidates, idx)
-		}
-	}
-
-	// Fallback if current scope has no focusable widgets
-	if len(candidates) == 0 {
-		for i := 0; i < len(ctx.nodes); i += 1 {
-			idx := i32(i)
-			node := ctx.nodes[idx]
-			if node.config.focusable && is_node_allowed(ctx, idx, capture_idx) {
-				append(&candidates, idx)
+		// 2. Fallback `.Root_And_Scopes` keybindings upon reaching root `p == 0`
+		if inp.editing_id == 0 && !root_bindings_checked {
+			if p == 0 && dispatch_root_keybindings(inp, ctx, capture_idx, ev) {
+				return
 			}
 		}
-	}
 
-	if len(candidates) == 0 {
-		return
-	}
-
-	cur_pos := -1
-	for idx, pos in candidates {
-		if ctx.nodes[idx].id_hash == inp.focused_id {
-			cur_pos = pos
-			break
-		}
-	}
-
-	next_pos := 0
-	if cur_pos >= 0 {
-		count := len(candidates)
-		next_pos = ((cur_pos + step) % count + count) % count
-	} else if step < 0 {
-		next_pos = len(candidates) - 1
-	}
-
-	chosen_idx := candidates[next_pos]
-	chosen := ctx.nodes[chosen_idx]
-	inp.focused_id      = chosen.id_hash
-	inp.active_scope_id = chosen.scope_id
-	inp.focus_path_len  = build_ancestor_path(ctx, chosen_idx, &inp.focus_path)
-}
-
-cycle_focus_scope :: proc(inp: ^Input_State, ctx: ^Layout_Context, capture_idx: i32, step: int) {
-	scopes := make([dynamic]u64, 0, 8, ctx.allocator)
-
-	for i := 0; i < len(ctx.nodes); i += 1 {
-		idx := i32(i)
-		node := ctx.nodes[idx]
-		if !node.config.focusable || !is_node_allowed(ctx, idx, capture_idx) {
-			continue
-		}
-		found := false
-		for s in scopes {
-			if s == node.scope_id {
-				found = true
-				break
-			}
-		}
-		if !found {
-			append(&scopes, node.scope_id)
-		}
-	}
-
-	if len(scopes) <= 1 {
-		return
-	}
-
-	cur_pos := 0
-	for s, pos in scopes {
-		if s == inp.active_scope_id {
-			cur_pos = pos
-			break
-		}
-	}
-
-	count := len(scopes)
-	next_pos := ((cur_pos + step) % count + count) % count
-	target_scope := scopes[next_pos]
-
-	for i := 0; i < len(ctx.nodes); i += 1 {
-		idx := i32(i)
-		node := ctx.nodes[idx]
-		if node.config.focusable && is_node_allowed(ctx, idx, capture_idx) && node.scope_id == target_scope {
-			inp.focused_id      = node.id_hash
-			inp.active_scope_id = target_scope
-			inp.focus_path_len  = build_ancestor_path(ctx, idx, &inp.focus_path)
+		// 3. Scope-Local `Tab` / `Shift+Tab` Topological Ring
+		if is_tip && ev.code == .Tab && (.Ctrl not_in eff_mods) {
+			reset_preferred_nav(inp)
+			step_focus_within_scope(inp, ctx, capture_idx, -1 if .Shift in eff_mods else 1, true)
 			return
+		}
+
+		// 4. 2D Spatial Navigation (`h/j/k/l`, Arrow keys, `Ctrl+N/P/F/B`)
+		if is_nav {
+			planned_steps := max(i32(1), inp.repeat_count)
+			if handle_spatial_nav_at_level(inp, ctx, capture_idx, p, nav_dir) == .Consumed {
+				if inp.keymap_style == .Helix {
+					inp.has_last_motion     = true
+					inp.last_motion_dir     = nav_dir
+					inp.last_motion_applied = planned_steps
+					inp.suffix_count        = 0
+				}
+				return
+			}
+		}
+
+		// 5. Paging (`Page_Up`, `Page_Down`, `Home`, `End`)
+		if is_page {
+			if handle_page_nav_at_level(inp, ctx, capture_idx, p, page_cmd) == .Consumed {
+				return
+			}
+		}
+
+		// 5b. Active Transient Scope Sub-Mode `Escape` Exit (before drilling focus up)
+		if ev.code == .Escape && eff_mods == {} && get_scope_submode_by_hash(inp, node.id_hash) != 0 {
+			set_scope_submode_by_hash(inp, node.id_hash, 0)
+			return
+		}
+
+		// 6. Ancestor `Escape` Drill-Up (e.g. Card -> Kanban Column Header)
+		if !is_tip && ev.code == .Escape && eff_mods == {} {
+			if (.Focus_Scope in node.focus_flags) && is_node_focusable(node) &&
+			   (.Trap_Focus not_in node.focus_flags) && is_node_allowed(ctx, node_idx, capture_idx) {
+				reset_preferred_nav(inp)
+				set_focused_node(inp, ctx, node_idx, capture_idx, false)
+				return
+			}
+		}
+
+		// 7. `.Trap_Focus` Boundary Shield (halts all further bubbling out of modal)
+		if (.Trap_Focus in node.focus_flags) || node.config.capture_input {
+			if ev.code == .Escape && eff_mods == {} {
+				inp.escape_modal_id = node.id_hash
+			}
+			trapped = true
+			break
+		}
+	}
+
+	if trapped {
+		return
+	}
+
+	if capture_idx >= 0 {
+		if ev.code == .Escape && eff_mods == {} {
+			inp.escape_modal_id = ctx.nodes[capture_idx].id_hash
+		}
+		return
+	}
+
+	// Root fallback when focus_node_path was empty (0 focusable widgets mounted)
+	if inp.focus_node_path_len == 0 && inp.editing_id == 0 {
+		if dispatch_keybindings(inp, ctx, capture_idx, ev) {
+			return
+		}
+	}
+
+	// Standalone `.Auto_Edit` text_input Escape fallback (transfers focus to linked virtual list or next widget)
+	if ev.code == .Escape && eff_mods == {} && inp.focused_id != 0 {
+		if f_idx, ok := ctx.id_map[inp.focused_id]; ok && ctx.nodes[f_idx].config.text_input {
+			slot := get_text_slot(inp, inp.focused_id)
+			if slot.linked_list_id != 0 {
+				if l_idx, l_ok := ctx.id_map[slot.linked_list_id]; l_ok && is_node_allowed(ctx, l_idx, capture_idx) {
+					reset_preferred_nav(inp)
+					set_focused_node(inp, ctx, l_idx, capture_idx, false)
+					return
+				}
+			}
+			reset_preferred_nav(inp)
+			step_focus_within_scope(inp, ctx, capture_idx, 1, false)
 		}
 	}
 }
@@ -1160,16 +1361,33 @@ handle_mouse_event :: proc(inp: ^Input_State, ctx: ^Layout_Context, capture_idx:
 				inp.active_id       = node.id_hash
 				inp.hovered_id      = node.id_hash
 				inp.hover_path_len  = build_ancestor_path(ctx, hit_idx, &inp.hover_path)
-				if node.config.focusable && is_node_allowed(ctx, hit_idx, capture_idx) {
-					inp.focused_id      = node.id_hash
-					inp.active_scope_id = node.scope_id
-					inp.focus_path_len  = build_ancestor_path(ctx, hit_idx, &inp.focus_path)
+				if is_node_focusable(node) && is_node_allowed(ctx, hit_idx, capture_idx) {
+					reset_preferred_nav(inp)
+					set_focused_node(inp, ctx, hit_idx, capture_idx, false)
 				}
 				if node.config.splitter {
 					begin_splitter_drag(inp, ctx, hit_idx, ev.x, ev.y)
 				}
-				if node.config.text_input {
+				if (.Captures_Text in node.focus_flags) && (.Disabled not_in node.focus_flags) && is_node_allowed(ctx, hit_idx, capture_idx) {
+					inp.editing_id    = node.id_hash
+					inp.pending_chord = {}
 					handle_text_input_click(inp, ctx, hit_idx, ev.x)
+				}
+				// Virtual list / 2D virtual table click row & column selection
+				for v_curr := hit_idx; v_curr >= 0; v_curr = ctx.nodes[v_curr].parent_idx {
+					v_node := ctx.nodes[v_curr]
+					if v_node.config.virtual_total_rows > 0 && is_node_allowed(ctx, v_curr, capture_idx) {
+						slot := get_scroll_slot(inp, v_node.id_hash)
+						rel_y := ev.y - v_node.inner_rect.y
+						if rel_y >= 0 && rel_y < v_node.inner_rect.h {
+							slot.selected_row = clamp(slot.offset + rel_y, 0, max(0, slot.total_rows - 1))
+						}
+						select_virtual_col_at_x(slot, v_node.inner_rect, ev.x)
+						break
+					}
+					if v_node.out_of_flow {
+						break
+					}
 				}
 				dispatch_three_phase(ctx, inp.hover_path[:inp.hover_path_len], ev, inp.event_handler, inp.event_userdata)
 			} else {
@@ -1252,7 +1470,7 @@ hit_test_point :: proc "contextless" (
 			break
 		}
 
-		if !is_node_allowed(ctx, idx, capture_idx) {
+		if !is_node_allowed(ctx, idx, capture_idx) || (.Disabled in node.focus_flags) {
 			continue
 		}
 
@@ -1278,269 +1496,3 @@ hit_test_point :: proc "contextless" (
 	return -1, 0
 }
 
-// =============================================================================
-// Scroll Slot Management & Z-Aware Scroll Bubbling
-// =============================================================================
-
-get_scroll_slot :: proc "contextless" (inp: ^Input_State, id_hash: u64) -> ^Scroll_Slot {
-	empty_idx := -1
-	for i := 0; i < MAX_SCROLL_SLOTS; i += 1 {
-		if inp.scroll_slots[i].id_hash == id_hash {
-			return &inp.scroll_slots[i]
-		}
-		if empty_idx == -1 && inp.scroll_slots[i].id_hash == 0 {
-			empty_idx = i
-		}
-	}
-	idx := empty_idx if empty_idx >= 0 else 0
-	inp.scroll_slots[idx] = Scroll_Slot{
-		id_hash       = id_hash,
-		viewport_rows = 0,
-	}
-	return &inp.scroll_slots[idx]
-}
-
-get_scroll_offset :: proc(inp: ^Input_State, id: string) -> i32 {
-	slot := get_scroll_slot(inp, hash_id(id))
-	return slot.offset
-}
-
-get_selected_row :: proc(inp: ^Input_State, id: string) -> i32 {
-	slot := get_scroll_slot(inp, hash_id(id))
-	return slot.selected_row
-}
-
-sync_scroll_viewports :: proc "contextless" (inp: ^Input_State, ctx: ^Layout_Context) {
-	for i := 0; i < len(ctx.nodes); i += 1 {
-		node := &ctx.nodes[i]
-		if !node.config.scrollable {
-			continue
-		}
-		slot := get_scroll_slot(inp, node.id_hash)
-		slot.viewport_rows = max(1, node.inner_rect.h)
-		slot.total_rows    = node.content_span[1]
-		slot.max_offset    = max(0, slot.total_rows - slot.viewport_rows)
-		if node.config.virtual_total_rows == 0 {
-			slot.offset = clamp(node.config.scroll_offset, 0, slot.max_offset)
-		} else {
-			slot.offset = clamp(slot.offset, 0, slot.max_offset)
-		}
-		slot.selected_row         = clamp(slot.selected_row, 0, max(0, slot.total_rows - 1))
-		node.config.scroll_offset = slot.offset
-	}
-}
-
-// Walks ctx.z_order front-to-back to find the topmost visible node at (mx, my),
-// then bubbles up parent_idx to find the nearest enclosing scrollable container.
-hit_test_scrollable :: proc "contextless" (ctx: ^Layout_Context, capture_idx: i32, mx, my: i32) -> i32 {
-	if mx < 0 || mx >= ctx.screen_size[0] || my < 0 || my >= ctx.screen_size[1] {
-		return -1
-	}
-
-	min_allowed_z := compute_active_shield_z(ctx)
-	if capture_idx >= 0 {
-		min_allowed_z = max(min_allowed_z, ctx.nodes[capture_idx].effective_z)
-	}
-
-	for i := len(ctx.z_order) - 1; i >= 0; i -= 1 {
-		idx := ctx.z_order[i]
-		node := ctx.nodes[idx]
-
-		if node.effective_z < min_allowed_z {
-			break
-		}
-		if !is_node_allowed(ctx, idx, capture_idx) {
-			continue
-		}
-		if !point_in_rect(mx, my, node.node_clip) || !point_in_rect(mx, my, node.rect) {
-			continue
-		}
-
-		// Bubble up from the hit node to its nearest scrollable ancestor
-		// without crossing out-of-flow overlay boundaries.
-		curr := idx
-		for curr >= 0 {
-			curr_node := ctx.nodes[curr]
-			if !is_node_allowed(ctx, curr, capture_idx) {
-				break
-			}
-			if curr_node.config.scrollable {
-				return curr
-			}
-			if curr_node.out_of_flow || curr_node.config.capture_input {
-				break
-			}
-			curr = curr_node.parent_idx
-		}
-
-		// Stop if we hit a non-scrollable floating overlay or modal so wheel events never punch through
-		if node.out_of_flow || node.config.capture_input {
-			return -1
-		}
-	}
-	return -1
-}
-
-handle_mouse_scroll :: proc "contextless" (
-	inp: ^Input_State,
-	ctx: ^Layout_Context,
-	capture_idx: i32,
-	mx, my: i32,
-	dir: i32, // -1 for Scroll_Up, +1 for Scroll_Down
-) -> bool {
-	scroll_idx := hit_test_scrollable(ctx, capture_idx, mx, my)
-	if scroll_idx < 0 {
-		return false
-	}
-
-	node := &ctx.nodes[scroll_idx]
-	step := node.config.scroll_step if node.config.scroll_step > 0 else 3
-	apply_scroll_delta(inp, ctx, scroll_idx, dir * step, false)
-	return true
-}
-
-handle_key_scroll :: proc "contextless" (
-	inp: ^Input_State,
-	ctx: ^Layout_Context,
-	capture_idx: i32,
-	code: Key_Code,
-) -> bool {
-	if inp.focused_id == 0 {
-		return false
-	}
-	focus_idx, exists := ctx.id_map[inp.focused_id]
-	if !exists || !is_node_allowed(ctx, focus_idx, capture_idx) {
-		return false
-	}
-
-	scroll_idx := i32(-1)
-	curr := focus_idx
-	for curr >= 0 {
-		if ctx.nodes[curr].config.scrollable && is_node_allowed(ctx, curr, capture_idx) {
-			scroll_idx = curr
-			break
-		}
-		if ctx.nodes[curr].out_of_flow {
-			break
-		}
-		curr = ctx.nodes[curr].parent_idx
-	}
-
-	if scroll_idx < 0 {
-		return false
-	}
-
-	node := &ctx.nodes[scroll_idx]
-	slot := get_scroll_slot(inp, node.id_hash)
-	page := max(1, slot.viewport_rows - 1)
-	is_virtual := node.config.virtual_total_rows > 0
-
-	#partial switch code {
-	case .Up:
-		if is_virtual {
-			move_virtual_selection(slot, -1)
-			node.config.scroll_offset = slot.offset
-			inp.scrolled_id = node.id_hash
-		} else {
-			apply_scroll_delta(inp, ctx, scroll_idx, -1, false)
-		}
-		return true
-	case .Down:
-		if is_virtual {
-			move_virtual_selection(slot, +1)
-			node.config.scroll_offset = slot.offset
-			inp.scrolled_id = node.id_hash
-		} else {
-			apply_scroll_delta(inp, ctx, scroll_idx, +1, false)
-		}
-		return true
-	case .Page_Up:
-		if is_virtual {
-			move_virtual_selection(slot, -page)
-			node.config.scroll_offset = slot.offset
-			inp.scrolled_id = node.id_hash
-		} else {
-			apply_scroll_delta(inp, ctx, scroll_idx, -page, false)
-		}
-		return true
-	case .Page_Down:
-		if is_virtual {
-			move_virtual_selection(slot, +page)
-			node.config.scroll_offset = slot.offset
-			inp.scrolled_id = node.id_hash
-		} else {
-			apply_scroll_delta(inp, ctx, scroll_idx, +page, false)
-		}
-		return true
-	case .Home:
-		if is_virtual {
-			slot.selected_row = 0
-		}
-		apply_scroll_delta(inp, ctx, scroll_idx, -slot.max_offset - 1, false)
-		return true
-	case .End:
-		if is_virtual {
-			slot.selected_row = max(0, slot.total_rows - 1)
-		}
-		apply_scroll_delta(inp, ctx, scroll_idx, slot.max_offset + 1, false)
-		return true
-	}
-	return false
-}
-
-move_virtual_selection :: proc "contextless" (slot: ^Scroll_Slot, delta: i32) {
-	if slot.total_rows <= 0 {
-		return
-	}
-	slot.selected_row = clamp(slot.selected_row + delta, 0, slot.total_rows - 1)
-	v_rows := max(1, slot.viewport_rows)
-	pad := clamp(slot.scroll_padding, 0, max(0, (v_rows - 1) / 2))
-	if slot.selected_row < slot.offset + pad {
-		slot.offset = slot.selected_row - pad
-	} else if slot.selected_row >= slot.offset + v_rows - pad {
-		slot.offset = slot.selected_row - v_rows + 1 + pad
-	}
-	slot.offset = clamp(slot.offset, 0, slot.max_offset)
-}
-
-apply_scroll_delta :: proc "contextless" (
-	inp: ^Input_State,
-	ctx: ^Layout_Context,
-	scroll_idx: i32,
-	delta: i32,
-	move_selection: bool,
-) {
-	node := &ctx.nodes[scroll_idx]
-	slot := get_scroll_slot(inp, node.id_hash)
-	old_offset := slot.offset
-	new_offset := clamp(old_offset + delta, 0, slot.max_offset)
-	actual_delta := new_offset - old_offset
-
-	slot.offset               = new_offset
-	node.config.scroll_offset = new_offset
-	inp.scrolled_id           = node.id_hash
-
-	if move_selection && node.config.virtual_total_rows > 0 {
-		slot.selected_row = clamp(slot.selected_row + delta, 0, max(0, slot.total_rows - 1))
-	}
-
-	if actual_delta != 0 && node.config.virtual_total_rows == 0 {
-		shift_descendants_y(ctx, scroll_idx, -actual_delta, node.inner_clip)
-	}
-}
-
-shift_descendants_y :: proc "contextless" (ctx: ^Layout_Context, parent_idx: i32, dy: i32, clip_root: Rect) {
-	for c := ctx.nodes[parent_idx].first_child; c != -1; c = ctx.nodes[c].next_sibling {
-		child := &ctx.nodes[c]
-		if child.out_of_flow {
-			continue
-		}
-		child.rect.y       += dy
-		child.inner_rect.y += dy
-		child.node_clip     = rect_intersect(clip_root, child.rect)
-		child.inner_clip    = rect_intersect(child.node_clip, child.inner_rect)
-		if child.child_count > 0 {
-			shift_descendants_y(ctx, c, dy, child.inner_clip)
-		}
-	}
-}
