@@ -266,3 +266,115 @@ on_panic_save :: proc(app: ^App) {}
 	testing.expect(t, strings.contains(good_gen, `action_name     = "app.panic_save"`))
 	testing.expect(t, strings.contains(good_gen, `category        = "System"`))
 }
+
+@(test)
+test_atdd_codegen_emits_scoped_scenario_vtable_and_enforces_layer1_purity :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	context.allocator = mem.tracking_allocator(&track)
+	defer {
+		free_all(context.temp_allocator)
+		testing.expect_value(t, len(track.allocation_map), 0)
+		testing.expect_value(t, len(track.bad_free_array), 0)
+		mem.tracking_allocator_destroy(&track)
+	}
+
+	dsl_src :: `package sample_tests
+
+import "core:testing"
+import "../bifrost"
+
+given_focused_widget :: proc(s: ^Suite_Ctx, id: string) {}
+upon_pressing_key :: proc(s: ^Suite_Ctx, code: bifrost.Key_Code, mods: bifrost.Mod_Flags = {}, ch: rune = 0) {}
+upon_pressing_key_rune :: proc(s: ^Suite_Ctx, ch: rune, mods: bifrost.Mod_Flags = {}) {}
+upon_input_events :: proc(s: ^Suite_Ctx, events: ..bifrost.Input_Event, loc := #caller_location) {}
+upon_query_rect :: proc(s: ^Suite_Ctx, id: string) -> (bifrost.Rect, bool) { return {}, false }
+then_focused_widget_is_ctx :: proc(s: ^Suite_Ctx, id: string, loc := #caller_location) {}
+`
+
+	clean_spec_src :: `package sample_tests
+
+import "core:testing"
+
+@(test)
+@(scenario)
+spec_clean_layer1_scenario :: proc(t: ^testing.T) {
+	_ = scenario(t, w = 80, h = 24)
+	given.focused_widget("save_btn")
+	upon.pressing_key(.Enter)
+	then.focused_widget_is("save_btn")
+}
+`
+
+	diags := make([dynamic]Codegen_Diagnostic)
+	defer destroy_diagnostics(&diags)
+
+	gen_code, ok := generate_atdd_from_sources(
+		{dsl_src},
+		{"dsl_sample.odin"},
+		{clean_spec_src},
+		{"spec_clean.odin"},
+		&diags,
+	)
+	defer delete(gen_code)
+
+	testing.expect(t, ok)
+	testing.expect_value(t, len(diags), 0)
+	testing.expect(t, strings.contains(gen_code, "@(deferred_out = scenario_scope_end)"))
+	testing.expect(t, strings.contains(gen_code, `assert(_scenario_depth < MAX_SCENARIO_DEPTH`))
+	testing.expect(t, strings.contains(gen_code, `assert(_active_scenario_ctx != nil`))
+	testing.expect(t, strings.contains(gen_code, "@(rodata)"))
+	testing.expect(t, strings.contains(gen_code, "Suite_Ctx_VTable :: struct"))
+	testing.expect(t, strings.contains(gen_code, "Given_DSL :: struct"))
+	testing.expect(t, strings.contains(gen_code, "Upon_DSL :: struct"))
+	testing.expect(t, strings.contains(gen_code, "Then_DSL :: struct"))
+	testing.expect(t, strings.contains(gen_code, "events: ..bifrost.Input_Event"))
+	testing.expect(t, strings.contains(gen_code, "..events, loc = loc"))
+	testing.expect(t, strings.contains(gen_code, "-> (bifrost.Rect, bool)"))
+	testing.expect(t, strings.contains(gen_code, "then_focused_widget_is :: proc {"))
+	testing.expect(t, strings.contains(gen_code, "loc := #caller_location"))
+
+	// Now verify Layer 1 AST purity linter rejects:
+	// - raw `testing.expect*` (including inside `:=` Value_Decl and inside callback `proc(...) { ... }`)
+	// - direct `driver_*` (including inside `defer` and `s->driver_*`)
+	// - 0-arg `then.*()`, `s->then_*()`, and `then_*()`
+	impure_spec_src :: `package sample_tests
+
+import "core:testing"
+
+@(test)
+@(scenario)
+spec_impure_layer1_scenario :: proc(t: ^testing.T) {
+	s := driver_init(nil, t, 80, 24)
+	defer driver_destroy(&s)
+	ok := testing.expect_value(t, 1, 1)
+	then.everything_works()
+	s->then_all_good()
+	upon.rendering_frame(proc(ctx: ^bifrost.Layout_Context) {
+		testing.expect(t, ctx != nil)
+	})
+}
+`
+	bad_diags := make([dynamic]Codegen_Diagnostic)
+	defer destroy_diagnostics(&bad_diags)
+
+	bad_code, bad_ok := generate_atdd_from_sources(
+		{dsl_src},
+		{"dsl_sample.odin"},
+		{impure_spec_src},
+		{"spec_impure.odin"},
+		&bad_diags,
+	)
+	defer delete(bad_code)
+
+	testing.expect(t, !bad_ok)
+	testing.expect_value(t, len(bad_diags), 6)
+	if len(bad_diags) == 6 {
+		testing.expect(t, strings.contains(bad_diags[0].message, "driver_init"))
+		testing.expect(t, strings.contains(bad_diags[1].message, "driver_destroy"))
+		testing.expect(t, strings.contains(bad_diags[2].message, "testing.expect_value"))
+		testing.expect(t, strings.contains(bad_diags[3].message, "then.everything_works()"))
+		testing.expect(t, strings.contains(bad_diags[4].message, "s->then_all_good()"))
+		testing.expect(t, strings.contains(bad_diags[5].message, "testing.expect"))
+	}
+}
