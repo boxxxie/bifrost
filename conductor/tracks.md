@@ -64,5 +64,20 @@ This file tracks all major tracks for the `bifrost` project. Each track has its 
 
 ---
 
-- [ ] **Track 11: Multi-Line Text Editor (`ui_text_area`), Collapsible Tree (`ui_tree`), Tab Bar (`ui_tabs`) & Braille/Sparkline Data-Viz Canvas (`ui_canvas`)**
-  *Link: [./tracks/multiline_editor_and_dataviz_widgets_20261106/](./tracks/multiline_editor_and_dataviz_widgets_20261106/)*
+- [ ] **Track 11: Multi-Line Text Editor (`bifrost/text_area.odin`)**
+  *Link: [./tracks/multiline_text_area_20261106/](./tracks/multiline_text_area_20261106/)*
+
+---
+
+- [ ] **Track 12: Virtualized Collapsible Tree (`bifrost/tree.odin`)**
+  *Link: [./tracks/virtualized_collapsible_tree_20261106/](./tracks/virtualized_collapsible_tree_20261106/)*
+
+---
+
+- [ ] **Track 13: Focus-Scope-Integrated Tab Bar (`bifrost/tabs.odin`)**
+  *Link: [./tracks/focus_scoped_tabs_20261106/](./tracks/focus_scoped_tabs_20261106/)*
+
+---
+
+- [ ] **Track 14: Braille & Sparkline Data-Viz Canvas (`bifrost/canvas.odin`)**
+  *Link: [./tracks/braille_and_sparkline_canvas_20261106/](./tracks/braille_and_sparkline_canvas_20261106/)*

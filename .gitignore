@@ -1,5 +1,6 @@
 # Build artifacts & temporary files
 .tmp/
+.worktrees/
 *.bin
 *.out
 *.o
