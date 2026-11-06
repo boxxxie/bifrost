@@ -104,7 +104,7 @@ Showcase_Actions :: struct {
 }
 
 @(rodata)
-SHOWCASE_TREE_NODES := [18]bifrost.Tree_Node{
+SHOWCASE_TREE_NODES := [21]bifrost.Tree_Node{
 	{id = "root_bifrost",    label = "bifrost/",              icon = "📦", depth = 0, expanded = true,  has_children = true},
 	{id = "dir_core",        label = "core/",                 icon = "📂", depth = 1, expanded = true,  has_children = true},
 	{id = "mod_layout",      label = "layout.odin",           icon = "📐", depth = 2, expanded = false, has_children = false},
@@ -123,10 +123,13 @@ SHOWCASE_TREE_NODES := [18]bifrost.Tree_Node{
 	{id = "spec_canvas",     label = "spec_canvas.odin",      icon = "✓",  depth = 2, expanded = false, has_children = false},
 	{id = "root_sleipnir",   label = "deps/sleipnir/",        icon = "🐎", depth = 0, expanded = false, has_children = true},
 	{id = "mod_scheduler",   label = "scheduler.odin",        icon = "⚡", depth = 1, expanded = false, has_children = false},
+	{id = "dir_schema",      label = "schema/",               icon = "📂", depth = 0, expanded = true,  has_children = true},
+	{id = "cue_site",        label = "site.cue",              icon = "⚙",  depth = 1, expanded = false, has_children = false},
+	{id = "cue_theme",       label = "theme.cue",             icon = "🎨", depth = 1, expanded = false, has_children = false},
 }
 
 @(rodata)
-NODE_DOC_SNIPPETS := [18]string{
+NODE_DOC_SNIPPETS := [21]string{
 	"bifrost/: Zero-allocation terminal UI framework in Odin.\nFeatures Flexbox layout, SGR diffing, and 2D spatial focus.",
 	"core/: Layout solver, cell renderer, 3-phase input router, and directional cone scorer.",
 	"layout.odin: 3-pass Flexbox layout engine (bottom-up intrinsic, top-down distribution, absolute screen rects).",
@@ -134,7 +137,7 @@ NODE_DOC_SNIPPETS := [18]string{
 	"input.odin: 3-phase Capturing -> At_Target -> Bubbling input dispatch + modal Trap_Focus shields.",
 	"spatial_nav.odin: Directional cone hit-testing with sticky preferred_nav_pos lane memory.",
 	"widgets/: High-density interactive terminal widgets (Tracks 11-14).",
-	"text_area.odin (Track 11):\n- 2D UTF-8/grapheme cursor & sticky preferred_col\n- Shift+Arrow selection & OSC 52 clipboard\n- Optional 1-based line-number gutter",
+	"text_area.odin (Track 11):\n- 2D UTF-8/grapheme cursor & sticky preferred_col\n- Shift+Arrow selection & OSC 52 clipboard\n- Built-in Odin & CUE syntax highlighting",
 	"tree.odin (Track 12):\n- Box-drawing guides (├─, ╰─, │, ▾, ▸)\n- h/l/Left/Right expand/collapse & parent jump\n- O(visible_rows) virtualization for 10,000+ nodes",
 	"tabs.odin (Track 13):\n- Per-tab Focus_Scope containers with H* deep restoration\n- [/] & Alt+1..9 keyboard switching\n- Active tab brackets & badge indicators",
 	"canvas.odin (Track 14):\n- 2x4 sub-cell Unicode Braille (U+2800..U+28FF)\n- Integer Bresenham line/rect/series plotting\n- 8-level vertical block sparklines (▁▂▃▄▅▆▇█)",
@@ -145,11 +148,192 @@ NODE_DOC_SNIPPETS := [18]string{
 	"spec_canvas.odin: Verifies ISO/TR 11548-1 Braille bitmasks, Bresenham lines, and sparkline blocks.",
 	"deps/sleipnir/: Lock-free MPSC actor scheduler powering the non-blocking UI Actor loop.",
 	"scheduler.odin: Work-stealing actor runtime with bounded backpressure mailboxes.",
+	"schema/: CUE configuration & theme schemas highlighted with syntax_mode = .Cue.",
+	"site.cue: CUE workspace & widget schema definitions (#Workspace, #WidgetSpec, @tag).",
+	"theme.cue: CUE color palette constraints (#Palette, #RGB, Nord/Tokyo/Gruvbox presets).",
+}
+
+@(rodata)
+NODE_FILE_SNIPPETS := [21]string{
+	// 0: bifrost/
+	`// Bifrost Tracks 11-14 Interactive Notes
+// Click any file in the left Tree (or press Enter) to load it!
+track_11 :: "ui_text_area (2D UTF-8 editor + Odin/CUE syntax)"
+track_12 :: "ui_tree (virtualized collapsible tree)"
+track_13 :: "ui_tabs (focus-scoped tabs + H* memory)"
+track_14 :: "ui_canvas & ui_sparkline (Braille 2x4)"`,
+	// 1: core/
+	`package bifrost
+// Core subsystem: layout.odin, renderer.odin, input.odin`,
+	// 2: layout.odin
+	`package bifrost
+
+// 3-Pass Flexbox Layout Solver (Bottom-Up, Top-Down, Screen Rects)
+begin_layout :: proc(ctx: ^Layout_Context, width, height: i32) {
+    ctx.screen_size = {max(0, width), max(0, height)}
+    ctx.layout_gen += 1
+}`,
+	// 3: renderer.odin
+	`package bifrost
+
+// Double-buffered Cell Grid & Run-Length ANSI SGR Diffing
+Cell :: struct {
+    ch:    rune,
+    fg:    Color,
+    bg:    Color,
+    style: Style_Flags,
+    width: u8,
+}`,
+	// 4: input.odin
+	`package bifrost
+
+// 3-Phase Input Router (Capturing -> At_Target -> Bubbling)
+resolve_input :: proc(inp: ^Input_State, ctx: ^Layout_Context, events: ..Input_Event) {
+    for ev in events {
+        dispatch_event(inp, ctx, ev)
+    }
+}`,
+	// 5: spatial_nav.odin
+	`package bifrost
+
+// Directional Cone Scorer with Sticky Lane Memory
+find_spatial_candidate :: proc "contextless" (ctx: ^Layout_Context, origin: Rect, dir: Nav_Dir) -> i32 {
+    return best_candidate_in_cone(ctx, origin, dir)
+}`,
+	// 6: widgets/
+	`package bifrost
+// Widgets subsystem: text_area, tree, tabs, canvas`,
+	// 7: text_area.odin (T11)
+	`package bifrost
+
+// Track 11: Multi-Line UTF-8 Text Editor with Odin & CUE Highlighting
+Text_Area_Syntax_Mode :: enum u8 {
+    None = 0,
+    Odin = 1,
+    Cue  = 2,
+}`,
+	// 8: tree.odin (T12)
+	`package bifrost
+
+// Track 12: O(visible_rows) Virtualized Collapsible Tree
+Tree_Node :: struct {
+    id:           string,
+    label:        string,
+    icon:         string,
+    depth:        i32,
+    expanded:     bool,
+    has_children: bool,
+}`,
+	// 9: tabs.odin (T13)
+	`package bifrost
+
+// Track 13: Focus-Scope-Integrated Tab Bar with H* Deep Restoration
+@(deferred_in_out = defer_end_ui_tabs)
+ui_tabs :: proc(ctx: ^Layout_Context, s: ^Screen, inp: ^Input_State, id: string, items: []Tab_Item_Spec) -> bool {
+    return begin_ui_tabs_internal(ctx, s, inp, id, items)
+}`,
+	// 10: canvas.odin (T14)
+	`package bifrost
+
+// Track 14: 2x4 Sub-Cell Unicode Braille Canvas (U+2800..U+28FF)
+braille_dot_bit :: #force_inline proc "contextless" (sub_x, sub_y: i32) -> u8 {
+    if sub_x < 0 || sub_x > 1 || sub_y < 0 || sub_y > 3 {
+        return 0
+    }
+    return BRAILLE_BIT_LUT[sub_y][sub_x]
+}`,
+	// 11: tests/
+	`package bifrost_tests
+// 4-Layer ATDD Executable Specifications (@(scenario))`,
+	// 12: spec_text_area.odin
+	`package bifrost_tests
+
+@(test)
+@(scenario)
+spec_text_area_odin_syntax_highlighting :: proc(t: ^testing.T) {
+    _ = scenario(t, w = 48, h = 8)
+    then.cell_style_has(1, 1, .Bold, true)
+}`,
+	// 13: spec_tree.odin
+	`package bifrost_tests
+
+@(test)
+@(scenario)
+spec_tree_virtualizes_ten_thousand_nodes :: proc(t: ^testing.T) {
+    _ = scenario(t, w = 60, h = 14)
+    then.layout_node_count_is(14)
+}`,
+	// 14: spec_tabs.odin
+	`package bifrost_tests
+
+@(test)
+@(scenario)
+spec_tabs_switching_and_deep_focus_restoration :: proc(t: ^testing.T) {
+    _ = scenario(t, w = 64, h = 14)
+    then.active_tab_is("work_tabs", 1)
+}`,
+	// 15: spec_canvas.odin
+	`package bifrost_tests
+
+@(test)
+@(scenario)
+spec_canvas_braille_encoding_and_sparklines :: proc(t: ^testing.T) {
+    _ = scenario(t, w = 48, h = 14)
+    then.braille_dot_bit_is(0, 3, 0x40)
+}`,
+	// 16: deps/sleipnir/
+	`package actor
+// Lock-free MPSC actor scheduler`,
+	// 17: scheduler.odin
+	`package actor
+
+// Work-Stealing Actor Scheduler with Bounded Backpressure
+step_actor_turn :: proc(sched: ^Scheduler, aid: Actor_Id) -> bool {
+    return drain_mailbox_batch(sched, aid, 64)
+}`,
+	// 18: schema/
+	`package schema
+// CUE schemas for workspace & themes`,
+	// 19: site.cue
+	`package schema
+
+// CUE Workspace & Widget Schema (Highlighted with syntax_mode = .Cue)
+#WidgetSpec: {
+    id!:        string & !=""
+    track:      int & >=11 & <=14
+    focusable:  bool | *true
+    max_Buffer: int | *4096 @tag(bytes)
+}
+
+workspace: #WidgetSpec & {
+    id:    "notes_editor"
+    track: 11
+}`,
+	// 20: theme.cue
+	`package schema
+
+// CUE Color Palette Constraints (Highlighted with syntax_mode = .Cue)
+#RGB: {
+    r: uint8
+    g: uint8
+    b: uint8
+}
+
+#Theme: {
+    name!:   "Nord" | "Tokyo Night" | "Gruvbox"
+    accent!: #RGB
+    invalid: _|_ // Bottom constraint literal
+}
+
+nord: #Theme & {
+    name:   "Nord"
+    accent: {r: 136, g: 192, b: 208}
+}`,
 }
 
 INITIAL_EDITOR_NOTES :: `// Bifrost Tracks 11-14 Interactive Notes
-// Press Enter or 'i' to edit, Esc for 2D navigation.
-track_11 :: "ui_text_area (2D UTF-8 editor + gutter)"
+// Click any file in the left Tree (or press Enter) to load it!
+track_11 :: "ui_text_area (2D UTF-8 editor + Odin/CUE syntax)"
 track_12 :: "ui_tree (virtualized collapsible tree)"
 track_13 :: "ui_tabs (focus-scoped tabs + H* memory)"
 track_14 :: "ui_canvas & ui_sparkline (Braille 2x4)"`
@@ -171,6 +355,8 @@ Showcase_App :: struct {
 	spark_mem:       [32]int,
 	last_tree_node:  i32,
 	last_activated:  string,
+	active_file:     string,
+	editor_syntax:   bifrost.Text_Area_Syntax_Mode,
 	last_action:     string,
 	action_count:    int,
 	frames_rendered: int,
@@ -222,6 +408,8 @@ showcase_init :: proc(app: ^Showcase_App, cols, rows: i32, allocator := context.
 	app.last_action     = "ready"
 	app.last_activated  = "mod_text_area"
 	app.last_tree_node  = 7 // `text_area.odin (T11)`
+	app.active_file     = "notes.odin"
+	app.editor_syntax   = .Odin
 	app.wave_phase      = 0.0
 	recompute_telemetry(app)
 
@@ -399,8 +587,9 @@ build_showcase_ui :: proc(app: ^Showcase_App, out_tree_slice: ^bifrost.Tree_Slic
 					ta_lines := bifrost.get_text_area_line_count(&app.input, "notes_editor")
 					ta_r, ta_c, _ := bifrost.get_text_area_cursor(&app.input, "notes_editor")
 					ta_pref := bifrost.get_text_area_state(&app.input, "notes_editor").preferred_col
+					syntax_name := "CUE" if app.editor_syntax == .Cue else "Odin"
 					bifrost.ui_text_area(&app.layout_ctx, &app.screen, &app.input, "notes_editor", bifrost.Text_Area_Config{
-						title             = fmt.tprintf("Multi-Line Editor (Lines: %d | Cur: %d:%d | PrefCol: %d)", ta_lines, ta_r + 1, ta_c + 1, ta_pref),
+						title             = fmt.tprintf("Editor [%s · %s] (Lines: %d | Cur: %d:%d | PrefCol: %d)", app.active_file, syntax_name, ta_lines, ta_r + 1, ta_c + 1, ta_pref),
 						placeholder       = "Press Enter or 'i' to edit multi-line notes...",
 						width             = bifrost.grow(1),
 						height            = bifrost.grow(1),
@@ -413,7 +602,7 @@ build_showcase_ui :: proc(app: ^Showcase_App, out_tree_slice: ^bifrost.Tree_Slic
 						two_stage         = true,
 						show_line_numbers = true,
 						tab_width         = 4,
-						syntax_mode       = .Odin,
+						syntax_mode       = app.editor_syntax,
 						focus_flags       = {.Default_Focus},
 					})
 
@@ -620,12 +809,16 @@ handle_showcase_interactions :: proc(app: ^Showcase_App) -> bool {
 		changed = true
 	}
 
-	// Track 12: Check if a leaf node in `arch_tree` was activated via Enter / Space
+	// Track 12: Check if a leaf node in `arch_tree` was activated via Enter / Space / Mouse Click
 	act_node := bifrost.get_tree_activated_node(&app.input, "arch_tree")
 	if act_node >= 0 && int(act_node) < len(SHOWCASE_TREE_NODES) {
+		node_label         := SHOWCASE_TREE_NODES[act_node].label
 		app.last_tree_node = act_node
 		app.last_activated = SHOWCASE_TREE_NODES[act_node].id
-		app.last_action    = fmt.tprintf("tree.activate:%s", SHOWCASE_TREE_NODES[act_node].label)
+		app.active_file    = node_label
+		app.editor_syntax  = .Cue if strings.has_suffix(node_label, ".cue") else .Odin
+		bifrost.set_text_area(&app.input, "notes_editor", NODE_FILE_SNIPPETS[act_node])
+		app.last_action    = fmt.tprintf("tree.open:%s", node_label)
 		app.action_count  += 1
 		changed = true
 	}
@@ -681,6 +874,8 @@ handle_showcase_interactions :: proc(app: ^Showcase_App) -> bool {
 		changed = true
 	}
 	if bifrost.was_activated(&app.input, "btn_reset_notes") {
+		app.active_file   = "notes.odin"
+		app.editor_syntax = .Odin
 		bifrost.set_text_area(&app.input, "notes_editor", INITIAL_EDITOR_NOTES)
 		app.last_action   = "editor.reset"
 		app.action_count += 1

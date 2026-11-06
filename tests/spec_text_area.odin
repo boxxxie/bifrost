@@ -341,4 +341,35 @@ spec_text_area_odin_syntax_highlighting_and_hover_title_underline :: proc(t: ^te
 	then.cell_style_has(1, 1, .Underline, false)
 	then.cell_style_has(20, 2, .Underline, false)
 	then.cell_style_has(3, 0, .Underline, true)
+
+	// Verify built-in CUE syntax highlighting (`syntax_mode = .Cue`):
+	// `#Spec` definition in Gold rgb(245, 200, 95), `field!:` key in Soft Blue rgb(130, 190, 255),
+	// `string` type in Cyan rgb(110, 215, 255), and `@tag(x)` attribute in Gold rgb(245, 200, 95)
+	build_cue_ui :: proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen) {
+		s := current_scenario()
+		if bifrost.container(ctx, "root", {dir = .Column, width = bifrost.grow(1), height = bifrost.grow(1)}) {
+			bifrost.ui_text_area(ctx, scr, &s.input, "cue_editor", {
+				title        = "CUE Editor",
+				initial_text = "#Spec: {\nfield!: string @tag(x)\n}",
+				width        = bifrost.fixed(40),
+				height       = bifrost.fixed(6),
+				border       = .Rounded,
+				fg           = bifrost.rgb(220, 228, 240),
+				bg           = bifrost.rgb(16, 20, 28),
+				syntax_mode  = .Cue,
+				two_stage    = true,
+			})
+		}
+	}
+
+	upon.rendering_frame(build_cue_ui)
+	then.cell_at_is(1, 1, '#')
+	then.cell_colors_at_are(1, 1, bifrost.rgb(245, 200, 95), bifrost.rgb(16, 20, 28))
+	then.cell_style_has(1, 1, .Bold, true)
+	then.cell_at_is(1, 2, 'f')
+	then.cell_colors_at_are(1, 2, bifrost.rgb(130, 190, 255), bifrost.rgb(16, 20, 28))
+	then.cell_at_is(9, 2, 's')
+	then.cell_colors_at_are(9, 2, bifrost.rgb(110, 215, 255), bifrost.rgb(16, 20, 28))
+	then.cell_at_is(16, 2, '@')
+	then.cell_colors_at_are(16, 2, bifrost.rgb(245, 200, 95), bifrost.rgb(16, 20, 28))
 }

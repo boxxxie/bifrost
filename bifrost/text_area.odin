@@ -14,6 +14,7 @@ MAX_TEXT_AREA_LINES :: 256
 Text_Area_Syntax_Mode :: enum u8 {
 	None = 0,
 	Odin = 1,
+	Cue  = 2,
 }
 
 Text_Area_Highlighter_Proc :: #type proc(
@@ -757,6 +758,195 @@ highlight_odin_line :: proc(
 }
 
 @(private)
+is_cue_ident_char :: #force_inline proc "contextless" (c: u8) -> bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '#' || c == '$'
+}
+
+@(private)
+is_cue_keyword :: proc "contextless" (w: string) -> bool {
+	switch w {
+	case "package", "import", "let", "if", "for", "in", "true", "false", "null":
+		return true
+	}
+	return false
+}
+
+@(private)
+is_cue_builtin_type :: proc "contextless" (w: string) -> bool {
+	switch w {
+	case "string", "bytes", "bool", "int", "float", "number", "uint",
+	     "uint8", "int8", "uint16", "int16", "uint32", "int32", "uint64", "int64",
+	     "rune", "_":
+		return true
+	}
+	return false
+}
+
+// Built-in zero-allocation CUE lexical highlighter for `Text_Area_Syntax_Mode.Cue`.
+highlight_cue_line :: proc(
+	line: string,
+	line_idx: i32,
+	out_spans: ^[dynamic]Styled_Span,
+	default_fg: Color,
+	default_bg: Color,
+	userdata: rawptr,
+) {
+	_ = line_idx
+	_ = userdata
+	n := len(line)
+	if n == 0 {
+		return
+	}
+
+	col_comment := rgb(125, 138, 162) // `//` Line comment (Muted Slate)
+	col_keyword := rgb(255, 130, 195) // CUE keyword (Pink/Magenta)
+	col_def     := rgb(245, 200,  95) // `#Schema` / `_#Hidden` / `@attr(...)` (Gold)
+	col_type    := rgb(110, 215, 255) // Built-in constraint/type (`string`, `int`, `_|_`) (Cyan)
+	col_field   := rgb(130, 190, 255) // Field label (`field:`, `field?:`, `field!:`) (Soft Blue)
+	col_string  := rgb(158, 232, 132) // String literal (Green)
+	col_number  := rgb(255, 175, 105) // Numeric literal (Orange)
+	col_op      := rgb(165, 200, 235) // Operators & punctuation
+
+	i := 0
+	for i < n {
+		b := line[i]
+
+		// 1. Whitespace run
+		if b == ' ' || b == '\t' {
+			start := i
+			for i < n && (line[i] == ' ' || line[i] == '\t') {
+				i += 1
+			}
+			append(out_spans, Styled_Span{text = line[start:i], fg = default_fg, bg = default_bg})
+			continue
+		}
+
+		// 2. Single-line comment `// ...`
+		if b == '/' && i + 1 < n && line[i + 1] == '/' {
+			append(out_spans, Styled_Span{
+				text  = line[i:],
+				fg    = col_comment,
+				bg    = default_bg,
+				style = {.Dim},
+			})
+			break
+		}
+
+		// 3. CUE `@attribute(...)`
+		if b == '@' {
+			start := i
+			i += 1
+			for i < n && is_cue_ident_char(line[i]) {
+				i += 1
+			}
+			if i < n && line[i] == '(' {
+				depth := 0
+				for i < n {
+					if line[i] == '(' {
+						depth += 1
+					} else if line[i] == ')' {
+						depth -= 1
+						if depth <= 0 {
+							i += 1
+							break
+						}
+					}
+					i += 1
+				}
+			}
+			append(out_spans, Styled_Span{text = line[start:i], fg = col_def, bg = default_bg, style = {.Bold}})
+			continue
+		}
+
+		// 4. String or byte literal (`"..."`, `'...'`, `` `...` ``)
+		if b == '"' || b == '\'' || b == '`' {
+			quote := b
+			start := i
+			i += 1
+			for i < n {
+				if quote != '`' && line[i] == '\\' && i + 1 < n {
+					i += 2
+					continue
+				}
+				if line[i] == quote {
+					i += 1
+					break
+				}
+				i += 1
+			}
+			append(out_spans, Styled_Span{text = line[start:i], fg = col_string, bg = default_bg})
+			continue
+		}
+
+		// 5. Numeric literal (including SI/IEC suffixes like `10K`, `64Mi`)
+		if b >= '0' && b <= '9' {
+			start := i
+			i += 1
+			for i < n && (is_cue_ident_char(line[i]) || line[i] == '.') {
+				i += 1
+			}
+			append(out_spans, Styled_Span{text = line[start:i], fg = col_number, bg = default_bg})
+			continue
+		}
+
+		// 6. CUE Definitions (`#Def`, `_#Hidden`) & Identifiers / Keywords / Field keys
+		if b == '#' || b == '$' || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '_' {
+			start := i
+			is_def := b == '#' || (b == '_' && i + 1 < n && line[i + 1] == '#')
+			i += 1
+			for i < n && is_cue_ident_char(line[i]) {
+				i += 1
+			}
+			word := line[start:i]
+
+			// Bottom literal `_|_`
+			if word == "_" && i + 1 < n && line[i] == '|' && line[i + 1] == '_' {
+				i += 2
+				append(out_spans, Styled_Span{text = line[start:i], fg = col_type, bg = default_bg, style = {.Bold}})
+				continue
+			}
+
+			// Look ahead past optional `?` / `!` constraint markers and spaces for `:` field label
+			look := i
+			if look < n && (line[look] == '?' || line[look] == '!') {
+				look += 1
+			}
+			for look < n && (line[look] == ' ' || line[look] == '\t') {
+				look += 1
+			}
+			is_field_key := look < n && line[look] == ':'
+
+			fg := default_fg
+			st := Style_Flags{}
+			if is_def {
+				fg = col_def
+				st = {.Bold}
+			} else if is_cue_keyword(word) {
+				fg = col_keyword
+				st = {.Bold}
+			} else if is_cue_builtin_type(word) && !is_field_key {
+				fg = col_type
+			} else if is_field_key {
+				fg = col_field
+				st = {.Bold}
+			}
+			append(out_spans, Styled_Span{text = word, fg = fg, bg = default_bg, style = st})
+			continue
+		}
+
+		// 7. Operators / Punctuation
+		start := i
+		_, rw := utf8.decode_rune_in_string(line[i:])
+		i += max(1, rw)
+		append(out_spans, Styled_Span{
+			text = line[start:i],
+			fg   = col_op if (line[start] < 128) else default_fg,
+			bg   = default_bg,
+		})
+	}
+}
+
+@(private)
 render_text_area_range_with_spans :: proc(
 	s: ^Screen,
 	cur_x: ^i32,
@@ -930,6 +1120,8 @@ render_text_area_node :: proc(s: ^Screen, node: Layout_Node, paint: Paint_Spec, 
 				slot.highlighter(line_str, doc_row, &var_line_spans, paint.fg, paint.bg, slot.highlight_data)
 			} else if slot.syntax_mode == .Odin {
 				highlight_odin_line(line_str, doc_row, &var_line_spans, paint.fg, paint.bg, slot.highlight_data)
+			} else if slot.syntax_mode == .Cue {
+				highlight_cue_line(line_str, doc_row, &var_line_spans, paint.fg, paint.bg, slot.highlight_data)
 			}
 		}
 
