@@ -25,3 +25,15 @@
 [submodule "reference/lipgloss"]
 	path = reference/lipgloss
 	url = https://github.com/charmbracelet/lipgloss.git
+[submodule "reference/lazygit"]
+	path = reference/lazygit
+	url = https://github.com/jesseduffield/lazygit.git
+[submodule "reference/textual"]
+	path = reference/textual
+	url = https://github.com/Textualize/textual.git
+[submodule "reference/imgui"]
+	path = reference/imgui
+	url = https://github.com/ocornut/imgui.git
+[submodule "reference/qpc"]
+	path = reference/qpc
+	url = https://github.com/QuantumLeaps/qpc.git
