@@ -266,62 +266,70 @@ poll_tty_and_sigwinch :: proc(
 		return false, true, .None
 	}
 
-	dw_timeout := win32.INFINITE if timeout_ms < 0 else win32.DWORD(timeout_ms)
-	wait_rc := win32.WaitForSingleObject(term.in_fd, dw_timeout)
-	if wait_rc == win32.WAIT_TIMEOUT {
-		if peek_pipe_avail(term.resize_pipe[0]) > 0 {
-			return false, true, .None
+	remaining_ms := timeout_ms
+	for {
+		dw_timeout := win32.INFINITE if remaining_ms < 0 else win32.DWORD(remaining_ms)
+		wait_rc := win32.WaitForSingleObject(term.in_fd, dw_timeout)
+		if wait_rc == win32.WAIT_TIMEOUT {
+			if peek_pipe_avail(term.resize_pipe[0]) > 0 {
+				return false, true, .None
+			}
+			return false, false, .None
 		}
-		return false, false, .None
+		if wait_rc != win32.WAIT_OBJECT_0 {
+			return false, false, .Poll_Failed
+		}
+
+		// Drain available Console INPUT_RECORDs
+		num_events: win32.DWORD = 0
+		if !win32.GetNumberOfConsoleInputEvents(term.in_fd, &num_events) {
+			return false, false, .Read_Failed
+		}
+
+		prev_len := term.read_len
+		for i: win32.DWORD = 0; i < num_events; i += 1 {
+			raw_rec: win32.INPUT_RECORD
+			events_read: win32.DWORD = 0
+			if !win32.ReadConsoleInputW(term.in_fd, &raw_rec, 1, &events_read) || events_read == 0 {
+				break
+			}
+
+			rec := Win32_Console_Record{
+				kind = Win32_Console_Event_Kind(u16(raw_rec.EventType)),
+			}
+			#partial switch raw_rec.EventType {
+			case .KEY_EVENT:
+				ke := raw_rec.Event.KeyEvent
+				rec.key_down          = bool(ke.bKeyDown)
+				rec.repeat_count      = u16(ke.wRepeatCount)
+				rec.virtual_key_code  = u16(ke.wVirtualKeyCode)
+				rec.unicode_char      = u16(ke.uChar.UnicodeChar)
+				rec.control_key_state = transmute(u32)ke.dwControlKeyState
+			case .WINDOW_BUFFER_SIZE_EVENT:
+				we := raw_rec.Event.WindowBufferSizeEvent
+				rec.window_cols = i16(we.dwSize.X)
+				rec.window_rows = i16(we.dwSize.Y)
+			case .FOCUS_EVENT:
+				fe := raw_rec.Event.FocusEvent
+				rec.focused = bool(fe.bSetFocus)
+			}
+
+			rsz_ev, has_rsz := terminal_feed_win32_console_record(term, rec)
+			if has_rsz {
+				term.pending_resize     = rsz_ev
+				term.has_pending_resize = true
+				resize_ready            = true
+			}
+		}
+
+		stdin_ready = (term.read_len > prev_len)
+		if stdin_ready || resize_ready || remaining_ms == 0 {
+			return stdin_ready, resize_ready, .None
+		}
+		if remaining_ms > 0 {
+			remaining_ms = 0
+		}
 	}
-	if wait_rc != win32.WAIT_OBJECT_0 {
-		return false, false, .Poll_Failed
-	}
-
-	// Drain available Console INPUT_RECORDs
-	num_events: win32.DWORD = 0
-	if !win32.GetNumberOfConsoleInputEvents(term.in_fd, &num_events) {
-		return false, false, .Read_Failed
-	}
-
-	prev_len := term.read_len
-	for i: win32.DWORD = 0; i < num_events; i += 1 {
-		raw_rec: win32.INPUT_RECORD
-		events_read: win32.DWORD = 0
-		if !win32.ReadConsoleInputW(term.in_fd, &raw_rec, 1, &events_read) || events_read == 0 {
-			break
-		}
-
-		rec := Win32_Console_Record{
-			kind = Win32_Console_Event_Kind(u16(raw_rec.EventType)),
-		}
-		#partial switch raw_rec.EventType {
-		case .KEY_EVENT:
-			ke := raw_rec.Event.KeyEvent
-			rec.key_down          = bool(ke.bKeyDown)
-			rec.repeat_count      = u16(ke.wRepeatCount)
-			rec.virtual_key_code  = u16(ke.wVirtualKeyCode)
-			rec.unicode_char      = u16(ke.uChar.UnicodeChar)
-			rec.control_key_state = transmute(u32)ke.dwControlKeyState
-		case .WINDOW_BUFFER_SIZE_EVENT:
-			we := raw_rec.Event.WindowBufferSizeEvent
-			rec.window_cols = i16(we.dwSize.X)
-			rec.window_rows = i16(we.dwSize.Y)
-		case .FOCUS_EVENT:
-			fe := raw_rec.Event.FocusEvent
-			rec.focused = bool(fe.bSetFocus)
-		}
-
-		rsz_ev, has_rsz := terminal_feed_win32_console_record(term, rec)
-		if has_rsz {
-			term.pending_resize     = rsz_ev
-			term.has_pending_resize = true
-			resize_ready            = true
-		}
-	}
-
-	stdin_ready = (term.read_len > prev_len)
-	return stdin_ready, resize_ready, .None
 }
 
 @(private)

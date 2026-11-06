@@ -59,7 +59,7 @@ This file tracks all major tracks for the `bifrost` project. Each track has its 
 
 ---
 
-- [~] **Track 10: Windows ConPTY / Console VT Terminal Backend & Multi-OS GitHub Actions CI Matrix (`bifrost/terminal.odin`, `.github/workflows/ci.yml`)**
+- [x] **Track 10: Windows ConPTY / Console VT Terminal Backend & Multi-OS GitHub Actions CI Matrix (`bifrost/terminal.odin`, `.github/workflows/ci.yml`)**
   *Link: [./tracks/windows_terminal_and_github_actions_ci_20261106/](./tracks/windows_terminal_and_github_actions_ci_20261106/)*
 
 ---

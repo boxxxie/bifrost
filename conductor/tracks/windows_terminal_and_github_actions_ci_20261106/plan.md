@@ -10,3 +10,6 @@
 - [x] Task: Create `.github/workflows/ci.yml` for `ubuntu-latest`, `macos-latest`, and `windows-latest`
     - [x] Configure Odin toolchain setup and recursive submodule checkout (`deps/sleipnir`, `deps/xitdb`).
     - [x] Run `tools/bifrost_gen -- --atdd tests`, unit test suites (`bifrost`, `bifrost/codegen`), ATDD suite (`tests`), and headless verification for all 5 `examples/*` TUIs across all matrix OS targets.
+
+## Phase: Review Fixes
+- [x] Task: Apply review suggestions (loop on ignored Win32 Console records and bump `actions/checkout@v7`)
