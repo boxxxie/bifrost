@@ -1,0 +1,14 @@
+{
+  "track_id": "keymap_chord_dsl_and_ast_gen_20261104",
+  "title": "Track 8: Declarative Key-Chord DSL, Transient Sub-Modes, Contextual Hint Bar & AST Codegen",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2026-11-04T14:07:30+08:00",
+  "updated_at": "2026-11-04T14:07:30+08:00",
+  "description": "Build a two-tier Odin UI navigation DSL: (Tier 1) runtime Vim/TUI chord parser, multi-key chord & transient widget sub-modes, core:reflect struct-tag action registration unifying Keymap_Table + Command_Palette + contextual breadcrumb/shortcut bars, and (Tier 2) an optional core:odin/ast CLI generator (tools/bifrost_gen) for static @(ui_scope)/@(ui_action) dispatch tables.",
+  "patches": [
+    ".tmp/patches/track8_qpc_qhsm_lca.patch",
+    ".tmp/patches/track8_lazygit_keybindings_hints.patch",
+    ".tmp/patches/track8_sleipnir_ast_codegen.patch"
+  ]
+}

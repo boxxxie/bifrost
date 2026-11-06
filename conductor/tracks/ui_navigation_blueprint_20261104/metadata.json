@@ -1,0 +1,24 @@
+{
+  "track_id": "ui_navigation_blueprint_20261104",
+  "title": "Master Reference Blueprint: Layered Focus Trees, 2D Spatial Navigation, Chord DSL & Actor Command Routing",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2026-11-04T14:05:00+08:00",
+  "updated_at": "2026-11-04T14:25:30+08:00",
+  "description": "Master architectural blueprint unifying Focus Trees, Shallow/Deep History (H/H*), 2D Spatial Navigation, Bottom-Up Bubbling, Odin Key-Chord/AST DSLs, and Sleipnir Actor Command Routing.",
+  "patches": [
+    ".tmp/patches/track6_lazygit_context_stack.patch",
+    ".tmp/patches/track6_textual_focus_and_screen.patch",
+    ".tmp/patches/track6_clay_local_id_hashing.patch",
+    ".tmp/patches/track7_imgui_nav_internal.patch",
+    ".tmp/patches/track7_ratatui_table_list_state.patch",
+    ".tmp/patches/track7_textual_event_bubbling.patch",
+    ".tmp/patches/track7_ftxui_containers_and_stacking.patch",
+    ".tmp/patches/track8_qpc_qhsm_lca.patch",
+    ".tmp/patches/track8_lazygit_keybindings_hints.patch",
+    ".tmp/patches/track8_sleipnir_ast_codegen.patch",
+    ".tmp/patches/track9_libvaxis_vxfw_commands_focus.patch",
+    ".tmp/patches/track9_bubbletea_batch_seq_filter.patch",
+    ".tmp/patches/track9_xitdb_marshal_dsl.patch"
+  ]
+}

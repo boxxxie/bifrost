@@ -1,0 +1,15 @@
+{
+  "track_id": "focus_scope_tree_and_history_20261104",
+  "title": "Track 6: Hierarchical Focus Scope Tree, Shallow/Deep History (H/H*) & Two-Stage Edit",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2026-11-04T14:06:00+08:00",
+  "updated_at": "2026-11-04T14:22:30+08:00",
+  "description": "Upgrade Bifrost's layout and focus engine with nested Focus_Flags scopes, Clay-inspired scope-seeded local IDs, z_order-aware Trap_Focus shields, shallow/deep per-scope history (H/H*) with inactive selection highlights, mouse-to-history sync, two-stage vs Auto_Edit text capture, and Scope_Text_Sink delegation.",
+  "patches": [
+    ".tmp/patches/track6_lazygit_context_stack.patch",
+    ".tmp/patches/track6_textual_focus_and_screen.patch",
+    ".tmp/patches/track6_clay_local_id_hashing.patch",
+    ".tmp/patches/track7_ftxui_containers_and_stacking.patch"
+  ]
+}

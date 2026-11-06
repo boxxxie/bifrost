@@ -1,0 +1,15 @@
+{
+  "track_id": "sleipnir_actor_action_routing_20261104",
+  "title": "Track 9: Sleipnir Actor Command Routing, actor_bridge Focus Unification & xitdb Workspace Persistence",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2026-11-04T14:08:00+08:00",
+  "updated_at": "2026-11-04T14:25:00+08:00",
+  "description": "Eliminate the key-handling split-brain in actor_bridge.odin, add Frame-0 and two-pass focus reconciliation, support vxfw-style UI side-effect commands and terminal focus_out drag reset, wire UI actions to batched Sleipnir actor messages with Bubble Tea quit-filter guards, and persist workspace state in xitdb.",
+  "patches": [
+    ".tmp/patches/track5_sleipnir_actor_api.patch",
+    ".tmp/patches/track9_xitdb_marshal_dsl.patch",
+    ".tmp/patches/track9_libvaxis_vxfw_commands_focus.patch",
+    ".tmp/patches/track9_bubbletea_batch_seq_filter.patch"
+  ]
+}

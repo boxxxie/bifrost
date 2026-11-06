@@ -8,7 +8,7 @@ An immediate-mode, actor-driven Terminal User Interface (TUI) engine for Odin th
 
 **Bifrost** (`package bifrost`) is the bridge between lock-free background actor state (Sleipnir + xitdb) and a tear-free, microsecond-scale terminal UI in Odin. Instead of retained-mode widget trees or mutex-guarded shared state, worker actors commit immutable snapshots to `xitdb` and send lightweight moment indices (`i64`) over `sleipnir` mailboxes to a single-writer UI coordinator actor. The UI actor resolves layout, input, focus, and cell diffing on `context.temp_allocator` with zero per-frame heap allocations.
 
-## Core Capabilities (v0.1.0)
+## Core Capabilities (v0.2.0)
 
 1. **Two-Pass Topological Layout Engine (`layout.odin`):**
    - Clay-inspired `Fit` (shrink-wrap with `min`/`max`), `Grow` (weighted flex with `min`/`max` freeze clamping and exact integer remainder distribution), and `Fixed` sizing.
@@ -20,22 +20,25 @@ An immediate-mode, actor-driven Terminal User Interface (TUI) engine for Odin th
    - Stable `effective_z` layer sorting and in-place 50% RGB bit-shift backdrop dimming (`.Dim_Screen`, `.Dim_Rect`) for stacked modals and HUD overlays.
    - Zero-allocation hot-loop ANSI diff emitter (`screen_diff_ansi`) with incremental SGR transitions, contiguous cursor-jump elimination, and DEC Mode 2026 synchronized output (`\x1b[?2026h ... \x1b[?2026l`).
 
-3. **Z-Aware Input, Scoped Focus & Hit-Testing Engine (`input.odin`):**
+3. **Hierarchical Focus Scopes, 2D Spatial Navigation & Hit-Testing (`focus_scope.odin`, `spatial_nav.odin`, `input.odin`):**
    - Reverse `z_order` mouse hit-testing with floating/modal occlusion and backdrop click detection (`was_modal_dismissed`).
-   - Scoped `Tab` / `Shift+Tab` focus cycling (`focus_scope`), `F6` / `Ctrl+Tab` scope switching, and an 8-deep focus restoration history stack (`focus_history`) when modals open and close.
+   - Hierarchical focus scope tree (`Focus_Scope_Node`) with Harel statechart shallow/deep history (`H` / `H*`), modal history stack (`focus_history`), and two-stage `.Navigation` vs. `.Editing` sub-modes (`Enter`/`i` to edit, `Esc` to exit to scope navigation).
+   - 2D directional navigation (`Left`/`Right`/`Up`/`Down`) with orthogonal projection-overlap cone scoring, bottom-up scope boundary bubbling, and explicit `nav_overrides` (`Node_Nav_Override`).
 
-4. **Virtualized `xitdb` Viewports & Smooth Scrolling (`scroll.odin`):**
-   - Zero-allocation persistent `Scroll_Slot` table and `ui_virtual_list` scoped container that materializes only the visible `[start_row ..< end_row]` slice from 100,000+ row `xitdb` collections (`Linked_Array_List`, `Sorted_Map`, `Array_List`).
-   - Z-ordered mouse-wheel target bubbling (`hit_test_scrollable`) and proportional border scrollbar rendering (`┃` / `│`).
+4. **Virtualized 2D `xitdb` Viewports & Smooth Scrolling (`scroll.odin`, `xitdb_bridge.odin`):**
+   - Zero-allocation persistent `Scroll_Slot` table and `ui_virtual_list` / `ui_virtual_table` scoped containers that materialize only the visible `[start_row ..< end_row]` slice from 100,000+ row `xitdb` collections (`Linked_Array_List`, `Sorted_Map`, `Array_List`).
+   - Vertical (`offset`) and horizontal (`offset_x`) viewport scrolling, mouse click column selection (`select_virtual_col_at_x`), z-ordered mouse-wheel target bubbling (`hit_test_scrollable`), and proportional border scrollbars (`┃` / `│`).
 
-5. **Interactive UTF-8 Text Input & Real-Time `xitdb` Filtering (`text_input.odin`):**
+5. **Interactive UTF-8 Text Input, Selection, OSC 52 Clipboard & Real-Time `xitdb` Filtering (`text_input.odin`):**
    - Codepoint-exact UTF-8 cursor editing (`Left`, `Right`, `Ctrl+Left/Right`, `Home`, `End`, `Backspace`, `Delete`, `Ctrl+W/U/K`, click-to-place) with horizontal rune scrolling.
+   - Visual selection (`Shift+Left/Right/Home/End`) and zero-CGO OSC 52 terminal clipboard copy/cut (`Ctrl+C`/`Ctrl+X`).
    - Telescope-style `linked_list_id` arrow-key forwarding and moment/query-cached `Xitdb_Filter`.
 
-6. **Interactive Split-Pane Dividers, Keybinding Router & Command Palette (`splitter_keymap.odin`, `command_palette.odin`):**
+6. **Declarative Key-Chord Engine, Multi-Style Modal Editing (`Vim`/`Helix`/`Emacs`), AST Codegen & Command Palette (`keymap.odin`, `status_bars.odin`, `splitter.odin`, `command_palette.odin`, `bifrost/codegen`):**
    - Mouse-dragged and keyboard-driven 1-cell splitters (`ui_splitter`) with same-frame sibling geometry and clip adjustment.
-   - Three-tier keybinding router (`.Scope_Only`, `.Root_And_Scopes`, `.Global_Always`) with automatic text-input shielding and `.Allow_In_Text_Input` chord support.
-   - Reusable `Ctrl+P` fuzzy command palette (`ui_command_palette`) with word-boundary/consecutive-run ranking and live shortcut badge discovery.
+   - Three-tier keybinding router (`.Scope_Only`, `.Root_And_Scopes`, `.Global_Always`) supporting 1- and 2-step chords (`g g`, `C-x C-f`, `<leader> f`), transient sub-modes (`.Resize`), compile-time + runtime conflict detection, and AST code generation (`tools/bifrost_gen`).
+   - Live runtime keymap style switching (`set_keymap_style`, `<F2>` cycle or `<F3>`–`<F5>`) across **Vim** (`5j` prefix counts, `gg`/`G`), **Helix** (`j5` post-fix counts, `gg`/`ge`), and **Emacs** (`C-n`/`C-p`/`C-f`/`C-b`, `M-<`/`M->`, `C-v`/`M-v`, `C-u` universal argument, `M-x` palette).
+   - Auto-populating Which-Key popup (`ui_which_key_overlay`), focus breadcrumb bar (`ui_focus_breadcrumb_bar`), contextual key hint bar (`ui_key_hint_bar`), and reusable `Ctrl+P`/`M-x` fuzzy command palette (`ui_command_palette`).
 
-7. **Sleipnir Actor Runtime & Terminal Backend Integration (`actor_loop.odin`, `terminal.odin`):**
-   - Single-writer UI coordinator actor integrated with `sleipnir` (`package actor`) and `xitdb` (`package xitdb`), plus raw terminal mode (`termios`), `SIGWINCH` resize handling, and ANSI input sequence parsing.
+7. **Sleipnir Actor Runtime, Action Sinks & `xitdb` Workspace Persistence (`ui_coordinator.odin`, `ui_actions_effects.odin`, `workspace_persistence.odin`, `terminal.odin`, `ansi_parser.odin`):**
+   - Single-writer UI coordinator actor integrated with `sleipnir` (`package actor`) and `xitdb` (`package xitdb`), typed actor command routing (`bind_action_actor_sink`), declarative `UI_Effect` side effects, and persistent workspace layout/split/focus/keymap serialization (`save_workspace_state` / `load_workspace_state`).

@@ -1,0 +1,15 @@
+{
+  "track_id": "spatial_2d_nav_and_bubbling_20261104",
+  "title": "Track 7: 2D Spatial Navigation, Virtualized List Paging & Bottom-Up Bubbling",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2026-11-04T14:06:45+08:00",
+  "updated_at": "2026-11-04T14:23:15+08:00",
+  "description": "Implement integer-only lane-aware 2D spatial rect scoring with sticky preferred_nav_pos axis memory, Loop_Spatial vs Wrap_Spatial grid wrapping, same-frame scroll_node_into_view, 2D (row, col) ui_virtual_list stepping, hierarchical F6 cycling, and bottom-up Enter/Escape focus bubbling.",
+  "patches": [
+    ".tmp/patches/track7_imgui_nav_internal.patch",
+    ".tmp/patches/track7_ratatui_table_list_state.patch",
+    ".tmp/patches/track7_textual_event_bubbling.patch",
+    ".tmp/patches/track7_ftxui_containers_and_stacking.patch"
+  ]
+}
