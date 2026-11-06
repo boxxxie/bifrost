@@ -169,3 +169,41 @@ test_z_layer_sorting_and_backdrop_dimming :: proc(t: ^testing.T) {
 	testing.expect_value(t, modal_text_cell.fg, rgb(255, 255, 255))
 	testing.expect_value(t, modal_text_cell.bg, rgb(30, 30, 50))
 }
+
+@(test)
+test_unicode_symbol_widths_and_wide_row_clear_diff :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+
+	// Bare text-presentation symbols ('⌨' U+2328, '🗂' U+1F5C2) have East_Asian_Width = N (width 1),
+	// whereas VS16 ("⌨️") and East_Asian_Width = W ('⚡' U+26A1, '📝' U+1F4DD) have width 2.
+	testing.expect_value(t, rune_display_width('⌨'), u8(1))
+	testing.expect_value(t, rune_display_width('🗂'), u8(1))
+	testing.expect_value(t, rune_display_width('⚡'), u8(2))
+	testing.expect_value(t, rune_display_width('📝'), u8(2))
+	testing.expect_value(t, string_display_width("⌨️"), i32(2))
+
+	scr: Screen
+	_ = screen_init(&scr, 24, 2)
+	defer screen_destroy(&scr)
+
+	out := strings.builder_make(0, 256, context.temp_allocator)
+
+	// Frame 1: Render a row containing a wide emoji + spaces + text ("📝 tabs.odin (T13)")
+	begin_frame(&scr)
+	clip := Rect{x = 0, y = 0, w = 24, h = 2}
+	fill_rect(&scr, clip, clip, ' ', rgb(200, 200, 200), rgb(20, 20, 30), {})
+	put_text_clipped(&scr, 1, 0, "📝 tabs.odin (T13)", rgb(200, 200, 200), rgb(20, 20, 30), {}, clip)
+	_ = screen_diff_ansi(&scr, &out)
+	frame1_ansi := strings.to_string(out)
+	// Cursor is explicitly re-anchored at col 4 (`\x1b[1;4H`) right after the 2-column '📝' at cols 2..3
+	testing.expect(t, strings.contains(frame1_ansi, "\x1b[1;4H"), "Expected explicit CUP re-anchor after 2-column glyph")
+
+	// Frame 2: Clear row 0 back to blank spaces; `force_row_flush` ensures interior space cells
+	// are also emitted so no shifted glyph can ever remain on screen.
+	strings.builder_reset(&out)
+	begin_frame(&scr)
+	fill_rect(&scr, clip, clip, ' ', rgb(200, 200, 200), rgb(20, 20, 30), {})
+	_ = screen_diff_ansi(&scr, &out)
+	frame2_ansi := strings.to_string(out)
+	testing.expect(t, strings.contains(frame2_ansi, "                  "), "Expected full contiguous space wipe across cleared wide row")
+}

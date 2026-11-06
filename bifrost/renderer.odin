@@ -179,9 +179,21 @@ rune_display_width :: proc "contextless" (r: rune) -> u8 {
 	   r == 0xfeff || (r >= 0xfe00 && r <= 0xfe0f) || (r >= 0xe0100 && r <= 0xe01ef) {
 		return 0
 	}
-	// Wide / Fullwidth East Asian, CJK, and Emoji blocks
+	// Wide / Fullwidth East Asian, CJK, and Emoji blocks (Unicode East_Asian_Width = W / F)
 	if (r >= 0x1100 && r <= 0x115f) ||
-	   r == 0x2328 || r == 0x2329 || r == 0x232a ||
+	   r == 0x231a || r == 0x231b ||
+	   r == 0x2329 || r == 0x232a ||
+	   (r >= 0x23e9 && r <= 0x23ec) || r == 0x23f0 || r == 0x23f3 ||
+	   r == 0x25fd || r == 0x25fe ||
+	   r == 0x2614 || r == 0x2615 ||
+	   (r >= 0x2648 && r <= 0x2653) || r == 0x267f || r == 0x2693 || r == 0x26a1 ||
+	   r == 0x26aa || r == 0x26ab || r == 0x26bd || r == 0x26be ||
+	   r == 0x26c4 || r == 0x26c5 || r == 0x26ce || r == 0x26d4 || r == 0x26ea ||
+	   r == 0x26f2 || r == 0x26f3 || r == 0x26f5 || r == 0x26fa || r == 0x26fd ||
+	   r == 0x2705 || r == 0x270a || r == 0x270b || r == 0x2728 || r == 0x274c ||
+	   r == 0x274e || (r >= 0x2753 && r <= 0x2755) || r == 0x2757 ||
+	   (r >= 0x2795 && r <= 0x2797) || r == 0x27b0 || r == 0x27bf ||
+	   r == 0x2b1b || r == 0x2b1c || r == 0x2b50 || r == 0x2b55 ||
 	   (r >= 0x2e80 && r <= 0x303e) ||
 	   (r >= 0x3040 && r <= 0xa4cf && r != 0x303f) ||
 	   (r >= 0xac00 && r <= 0xd7a3) ||
@@ -190,7 +202,7 @@ rune_display_width :: proc "contextless" (r: rune) -> u8 {
 	   (r >= 0xfe30 && r <= 0xfe6f) ||
 	   (r >= 0xff00 && r <= 0xff60) ||
 	   (r >= 0xffe0 && r <= 0xffe6) ||
-	   (r >= 0x1f1e6 && r <= 0x1f6ff) ||
+	   (r >= 0x1f1e6 && r <= 0x1f6ff && !(r >= 0x1f568 && r <= 0x1f5fa && r != 0x1f57a && r != 0x1f595 && r != 0x1f596 && r != 0x1f5a4)) ||
 	   (r >= 0x1f900 && r <= 0x1faff) ||
 	   (r >= 0x20000 && r <= 0x3fffd) {
 		return 2
@@ -874,10 +886,21 @@ screen_diff_ansi :: proc(s: ^Screen, out: ^strings.Builder) -> int {
 
 	for y: i32 = 0; y < s.height; y += 1 {
 		row_base := int(y * s.width)
+		last_dirty_x: i32 = -1
+		if !s.first_frame {
+			for rx: i32 = 0; rx < s.width; rx += 1 {
+				r_idx := row_base + int(rx)
+				if s.back[r_idx] != s.front[r_idx] {
+					last_dirty_x = rx
+				}
+			}
+		}
+		force_row_flush := false
 		x: i32 = 0
 		for x < s.width {
 			idx := row_base + int(x)
 			next := s.back[idx]
+			prev := s.front[idx]
 
 			// Trailing spacer cell of a 2-column glyph is never emitted directly
 			if next.width == 0 {
@@ -886,7 +909,7 @@ screen_diff_ansi :: proc(s: ^Screen, out: ^strings.Builder) -> int {
 				continue
 			}
 
-			dirty := s.first_frame || (next != s.front[idx])
+			dirty := s.first_frame || (next != prev) || (force_row_flush && x <= last_dirty_x)
 			if next.width == 2 && x + 1 < s.width {
 				if s.back[idx + 1] != s.front[idx + 1] {
 					dirty = true
@@ -896,6 +919,10 @@ screen_diff_ansi :: proc(s: ^Screen, out: ^strings.Builder) -> int {
 			if !dirty {
 				x += i32(max(1, next.width))
 				continue
+			}
+
+			if prev.width != 1 || next.width != 1 || prev.ch >= 0x2000 || next.ch >= 0x2000 {
+				force_row_flush = true
 			}
 
 			if !emitted_any {
@@ -928,12 +955,20 @@ screen_diff_ansi :: proc(s: ^Screen, out: ^strings.Builder) -> int {
 			s.front[idx] = next
 			if next.width == 2 && x + 1 < s.width {
 				s.front[idx + 1] = s.back[idx + 1]
-				cur_x = x + 2
-				cur_y = y
+				// Re-anchor cursor position after 2-column glyphs so any terminal font/wcwidth
+				// discrepancy cannot shift subsequent characters on the same row.
+				cur_x = -1
+				cur_y = -1
 				x += 2
 			} else {
-				cur_x = x + 1
-				cur_y = y
+				// Also re-anchor after non-box-drawing astral/symbol glyphs (>= U+2300, excluding 2500..259F & 2800..28FF)
+				if ch >= 0x2300 && !(ch >= 0x2500 && ch <= 0x259f) && !(ch >= 0x2800 && ch <= 0x28ff) {
+					cur_x = -1
+					cur_y = -1
+				} else {
+					cur_x = x + 1
+					cur_y = y
+				}
 				x += 1
 			}
 		}

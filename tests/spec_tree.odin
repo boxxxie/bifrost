@@ -313,3 +313,45 @@ spec_tree_skipped_depth_clamping_and_dynamic_id_hash_expand_persistence :: proc(
 	then.tree_visible_count_is("dyn_tree", 2)
 	then.tree_selection_is("dyn_tree", 1, 1)
 }
+
+@(test)
+@(scenario)
+spec_tree_collapse_clears_unicode_icon_rows_cleanly :: proc(t: ^testing.T) {
+	_ = scenario(t, w = 44, h = 8)
+
+	build_icon_tree :: proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen) {
+		s := current_scenario()
+		nodes := [?]bifrost.Tree_Node{
+			{id = "root_pkg",  label = "bifrost/",        icon = "📦", depth = 0, expanded = true,  has_children = true},
+			{id = "mod_input", label = "input.odin",      icon = "⌨",  depth = 1, expanded = false, has_children = false},
+			{id = "mod_tabs",  label = "tabs.odin (T13)", icon = "🗂",  depth = 1, expanded = false, has_children = false},
+			{id = "mod_sched", label = "scheduler.odin",  icon = "⚡", depth = 1, expanded = false, has_children = false},
+		}
+		if bifrost.container(ctx, "root", {dir = .Column, width = bifrost.grow(1), height = bifrost.grow(1)}) {
+			bifrost.ui_tree(ctx, scr, &s.input, "icon_tree", nodes[:], {
+				width         = bifrost.grow(1),
+				height        = bifrost.grow(1),
+				border        = .Rounded,
+				fg            = bifrost.rgb(216, 222, 233),
+				bg            = bifrost.rgb(46, 52, 64),
+				fallback_rows = 6,
+			})
+		}
+	}
+
+	// Frame 1: Expanded tree with mixed 1-col ('⌨', '🗂') and 2-col ('📦', '⚡') icons
+	upon.rendering_frame(build_icon_tree)
+	then.tree_visible_count_is("icon_tree", 4)
+	then.vt_row_contains_text(2, "input.odin")
+	then.vt_row_contains_text(3, "tabs.odin (T13)")
+	then.vt_row_contains_text(4, "scheduler.odin")
+
+	// Frame 2: Collapse root node via 'h' -> rows 2..4 must be completely wiped with spaces in the ANSI diff
+	upon.pressing_key_rune('h')
+	upon.rendering_frame(build_icon_tree)
+	then.tree_visible_count_is("icon_tree", 1)
+	then.vt_row_contains_text(2, "input.odin", false)
+	then.vt_row_contains_text(3, "tabs.odin", false)
+	then.vt_row_contains_text(4, "scheduler.odin", false)
+	then.diff_ansi_contains("                    ")
+}
