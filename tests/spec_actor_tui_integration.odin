@@ -174,3 +174,178 @@ spec_100k_row_log16_viewport_slicing_and_interactive_widgets :: proc(t: ^testing
 	testing.expect_value(t, slice.rows[0].val_text, fmt.tprintf("%d", 99_990 * 10))
 	testing.expect_value(t, slice.rows[9].logical_index, i64(99_999))
 }
+
+@(test)
+spec_typing_in_search_box_or_palette_never_scrolls_unpins_or_quits :: proc(t: ^testing.T) {
+	s: Suite_Ctx
+	given_actor_xitdb_inspector(&s, t, 110, 24, 2, "$services")
+	defer driver_destroy(&s)
+
+	// Seed 2 moments so historical Moment @0 can be pinned while Moment @1 is latest
+	upon_worker_committing_batch(&s, "$services", "kafka_quit_fail_j_k", 1, 20, true, "m0")
+	upon_worker_committing_batch(&s, "$services", "kafka_quit_fail_j_k", 21, 20, true, "m1")
+	upon_ticking_ui_frame(&s, 1)
+
+	// Frame 1 with no inputs must have reconciled default focus onto "records_pane"
+	then_ui_focused_widget_is(&s, "records_pane")
+	then_ui_editing_widget_is(&s, "")
+
+	// Step down 3 rows via 'j' while focused on "records_pane" and pin to Moment @0 via '['
+	upon_typing_ui_keys(&s, "jjj[")
+	upon_ticking_ui_frame(&s, 2)
+
+	then_ui_vlist_row_is(&s, 3)
+	then_ui_active_moment_is(&s, 0, 1, true)
+	then_ui_quit_requested_is(&s, false)
+
+	// 1. Focus "search_box" via '/' and type "kafka fail [j] quit" containing 'k', 'f', '[', 'j', ']', 'q'
+	upon_sending_ui_key(&s, .Rune, '/')
+	upon_ticking_ui_frame(&s, 3)
+	then_ui_focused_widget_is(&s, "search_box")
+	then_ui_editing_widget_is(&s, "search_box")
+
+	upon_typing_ui_keys(&s, "kafka_quit_fail_j_k")
+	upon_ticking_ui_frame(&s, 4)
+
+	// Filter text updated, but vlist row stayed at 3, pinned_moment stayed @0, and quit_requested stayed false
+	then_ui_text_value_is(&s, "search_box", "kafka_quit_fail_j_k")
+	then_ui_vlist_row_is(&s, 3)
+	then_ui_active_moment_is(&s, 0, 1, true)
+	then_ui_quit_requested_is(&s, false)
+
+	// 2. Open Ctrl+P Command Palette: on the EXACT SAME FRAME, cmd_palette_input acquires focus & editing_id
+	upon_sending_ui_key(&s, .Rune, 'p', true)
+	upon_ticking_ui_frame(&s, 5)
+	then_ui_palette_open_is(&s, true)
+	then_ui_focused_widget_is(&s, "cmd_palette_input")
+	then_ui_editing_widget_is(&s, "cmd_palette_input")
+
+	// Typing "quit [f] jk" inside Command Palette edits cmd_palette_input without scrolling records_pane, unpinning, or quitting
+	upon_typing_ui_keys(&s, "quit [f] jk")
+	upon_ticking_ui_frame(&s, 6)
+
+	then_ui_text_value_is(&s, "cmd_palette_input", "quit [f] jk")
+	then_ui_vlist_row_is(&s, 3)
+	then_ui_active_moment_is(&s, 0, 1, true)
+	then_ui_quit_requested_is(&s, false)
+
+	// Escape closes Command Palette and restores focus back to "search_box" on the same frame
+	upon_sending_ui_key(&s, .Escape)
+	upon_ticking_ui_frame(&s, 7)
+	then_ui_palette_open_is(&s, false)
+	then_ui_focused_widget_is(&s, "search_box")
+}
+
+@(test)
+spec_declarative_actor_action_routing_and_xitdb_workspace_snapshot :: proc(t: ^testing.T) {
+	s: Suite_Ctx
+	given_actor_xitdb_inspector(&s, t, 110, 24, 2, "$orders")
+	defer driver_destroy(&s)
+
+	upon_worker_committing_batch(&s, "$orders", "ord", 1, 12, true, "m0")
+	upon_worker_committing_batch(&s, "$orders", "ord", 13, 18, true, "m1")
+	upon_ticking_ui_frame(&s, 1)
+
+	// Bind Inspector's "query.datalog" and dynamic "query.diff" actions directly to s.worker_pid
+	given_actor_action_bound_static(
+		&s,
+		"query.datalog",
+		bifrost.Xitdb_Worker_Msg(bifrost.Worker_Msg_Run_Datalog{
+			query_source = "find ?k, ?v where $orders[?k] = ?v",
+		}),
+	)
+	given_actor_action_bound_dynamic(
+		&s,
+		"query.diff",
+		proc(coord: ^bifrost.UI_Coordinator_State, _: rawptr) -> (bifrost.Xitdb_Worker_Msg, bool) {
+			return bifrost.Worker_Msg_Diff_Moments{
+				moment_a = coord.active_moment_idx,
+				moment_b = coord.latest_moment_idx,
+			}, true
+		},
+	)
+
+	// Pin to @0 via '[' and trigger "query.diff" via Ctrl+G shortcut -> worker computes Diff(@0->@1): +18
+	upon_sending_ui_key(&s, .Rune, '[')
+	upon_ticking_ui_frame(&s, 2)
+	then_ui_active_moment_is(&s, 0, 1, true)
+
+	upon_sending_ui_key(&s, .Rune, 'g', true)
+	upon_ticking_ui_frame(&s, 3)
+	upon_ticking_ui_frame(&s, 4)
+	then_ui_screen_contains_text(&s, "Diff(@0->@1): +18 ~0 -0")
+
+	// Open Command Palette (Ctrl+P), filter to "Datalog", and press Enter -> dispatches Worker_Msg_Run_Datalog
+	upon_sending_ui_key(&s, .Rune, 'p', true)
+	upon_typing_ui_keys(&s, "Datalog")
+	upon_sending_ui_key(&s, .Enter)
+	upon_ticking_ui_frame(&s, 5)
+	upon_ticking_ui_frame(&s, 6)
+	then_ui_palette_open_is(&s, false)
+	then_ui_screen_contains_text(&s, "datalog rows=30 cols=2")
+
+	// Customize splitter width + scope memory, persist workspace to xitdb, and restore into a fresh coordinator
+	upon_customizing_ui_workspace(&s, "main_split", 34, "inspector_body", "records_pane", "records_pane")
+	upon_saving_ui_workspace(&s, "orders_ws")
+	then_restored_ui_workspace_matches(
+		&s,
+		"orders_ws",
+		"main_split",
+		34,
+		"$orders",
+		true,
+		0,
+		"inspector_body",
+		"records_pane",
+	)
+}
+
+@(test)
+spec_ui_side_effects_osc52_title_cursor_quit_filter_and_focus_out_drag_reset :: proc(t: ^testing.T) {
+	s: Suite_Ctx
+	given_actor_xitdb_inspector(&s, t, 96, 24, 2, "$events")
+	defer driver_destroy(&s)
+
+	Quit_Guard_State :: struct {
+		unsaved_changes:   bool,
+		intercepted_count: int,
+	}
+	guard := Quit_Guard_State{unsaved_changes = true}
+	given_ui_quit_filter(&s, proc(c: ^bifrost.UI_Coordinator_State) -> bool {
+		g := (^Quit_Guard_State)(c.user_ptr)
+		if g != nil && g.unsaved_changes {
+			g.intercepted_count += 1
+			return false
+		}
+		return true
+	}, &guard)
+
+	upon_ticking_ui_frame(&s, 1)
+	then_ui_focused_widget_is(&s, "records_pane")
+
+	// 1. Issue pure UI_Side_Effect commands (focus, OSC 52 clipboard "ok" -> "b2s=", OSC 2 title, DECSCUSR cursor, quit)
+	upon_issuing_ui_side_effects(&s, "search_box", "ok", "Bifrost Inspector", .Bar_Steady, true)
+	upon_ticking_ui_frame(&s, 2)
+
+	then_ui_focused_widget_is(&s, "search_box")
+	then_ui_editing_widget_is(&s, "search_box")
+	then_ui_ansi_output_contains(&s, "\x1b]52;c;b2s=\x07")
+	then_ui_ansi_output_contains(&s, "\x1b]2;Bifrost Inspector\x07")
+	then_ui_ansi_output_contains(&s, "\x1b[6 q")
+	then_ui_quit_requested_is(&s, false)
+
+	// 2. Start a mouse drag on "main_split", then send terminal Focus_Event{focused = false} -> clears active drag & hover
+	upon_pressing_mouse_on_ui_widget(&s, "main_split")
+	upon_ticking_ui_frame(&s, 3)
+	then_ui_pointer_capture_is(&s, "main_split", "main_split")
+
+	upon_sending_ui_focus_event(&s, false)
+	upon_ticking_ui_frame(&s, 4)
+	then_ui_pointer_capture_is(&s, "", "")
+
+	// 3. Once unsaved_changes is cleared, pressing Ctrl+Q passes quit_filter and sets quit_requested = true
+	guard.unsaved_changes = false
+	upon_sending_ui_key(&s, .Rune, 'q', true)
+	upon_ticking_ui_frame(&s, 5)
+	then_ui_quit_requested_is(&s, true)
+}

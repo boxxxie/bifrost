@@ -395,8 +395,9 @@ vt_parse_sgr :: proc(params: string, fg, bg: ^bifrost.Color, style: ^bifrost.Sty
 
 // Automatically verifies all 7 cross-cutting layout and rendering invariants after every frame.
 assert_frame_invariants :: proc(t: ^testing.T, s: ^Suite_Ctx) {
-	// 1. Stack balance: parent_stack must be empty after end_layout
+	// 1. Stack balance: parent_stack and scope_stack must be empty after end_layout
 	testing.expect_value(t, len(s.layout_ctx.parent_stack), 0)
+	testing.expect_value(t, s.layout_ctx.scope_stack_len, 0)
 
 	// 2. Non-negative geometry, clip containment, and non-overlapping in-flow siblings
 	screen_bounds := bifrost.Rect{x = 0, y = 0, w = s.screen.width, h = s.screen.height}

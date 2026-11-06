@@ -395,3 +395,103 @@ spec_clipped_hit_testing_and_stationary_scroll_hover_transitions :: proc(t: ^tes
 
 	then_state_store_contains(&s, "scroll_list", false)
 }
+
+
+@(test)
+spec_disabled_widget_and_subtree_auto_advance_and_floating_window_bring_to_front :: proc(t: ^testing.T) {
+	s: Suite_Ctx
+	given_terminal(&s, t, w = 80, h = 24)
+	defer driver_destroy(&s)
+
+	build_disabled_and_floating_ui :: proc(
+		s: ^Suite_Ctx,
+		disable_btn_2: bool,
+		disable_group: bool,
+		events: ..bifrost.Input_Event,
+	) {
+		driver_begin_frame(s, bifrost.rgb(18, 22, 30))
+		if bifrost.container(&s.layout_ctx, "root", {dir = .Column, width = bifrost.grow(1), height = bifrost.grow(1)}) {
+			bifrost.ui_button(&s.layout_ctx, &s.screen, "btn_1", {label = "One"})
+			b2_flags := bifrost.Focus_Flags{.Disabled} if disable_btn_2 else bifrost.Focus_Flags{}
+			bifrost.ui_button(&s.layout_ctx, &s.screen, "btn_2", {label = "Two", focus_flags = b2_flags})
+
+			grp_flags := bifrost.Focus_Flags{.Disabled} if disable_group else bifrost.Focus_Flags{}
+			if bifrost.container(&s.layout_ctx, "sub_grp", {
+				dir         = .Row,
+				width       = bifrost.fit(),
+				height      = bifrost.fit(),
+				focus_flags = grp_flags,
+			}) {
+				bifrost.ui_button(&s.layout_ctx, &s.screen, "btn_3", {label = "Three"})
+			}
+
+			// Two overlapping non-modal floating tool windows at z_layer = 10
+			if bifrost.container(&s.layout_ctx, "float_a", {
+				dir         = .Column,
+				width       = bifrost.fixed(20),
+				height      = bifrost.fixed(4),
+				z_layer     = 10,
+				floating    = true,
+				offset      = {10, 8},
+				focus_flags = {.Focus_Scope},
+			}) {
+				bifrost.ui_button(&s.layout_ctx, &s.screen, "float_a_btn", {
+					label  = "Float A",
+					width  = bifrost.fixed(18),
+					height = bifrost.fixed(2),
+				})
+			}
+			if bifrost.container(&s.layout_ctx, "float_b", {
+				dir         = .Column,
+				width       = bifrost.fixed(20),
+				height      = bifrost.fixed(4),
+				z_layer     = 10,
+				floating    = true,
+				offset      = {10, 8},
+				focus_flags = {.Focus_Scope},
+			}) {
+				bifrost.ui_button(&s.layout_ctx, &s.screen, "float_b_btn", {
+					label  = "Float B",
+					width  = bifrost.fixed(18),
+					height = bifrost.fixed(2),
+				})
+			}
+		}
+		driver_end_frame(s, ..events)
+	}
+
+	// 1. Focus btn_2 via Tab, then mark btn_2 .Disabled on next frame -> auto-advances off disabled btn_2
+	build_disabled_and_floating_ui(&s, false, false, bifrost.Key_Event{code = .Tab})
+	then_focused_widget_is(&s, "btn_2")
+
+	build_disabled_and_floating_ui(&s, true, false)
+	then_focused_widget_is(&s, "btn_1")
+
+	// Clicking disabled btn_2 must not focus or activate it
+	upon_clicking_widget(&s, "btn_2")
+	then_activated_widget_is(&s, "")
+	then_focused_widget_is(&s, "btn_1")
+
+	// 2. Focus btn_3 inside sub_grp, then disable ancestor sub_grp -> inherited .Disabled evacuates focus
+	upon_requesting_focus(&s, "btn_3")
+	build_disabled_and_floating_ui(&s, true, false)
+	then_focused_widget_is(&s, "btn_3")
+
+	build_disabled_and_floating_ui(&s, true, true)
+	then_focused_widget_is(&s, "btn_1")
+
+	// 3. Promoting non-modal floating window float_a brings it in front of sibling float_b at z_layer=10
+	upon_requesting_focus(&s, "float_a_btn")
+	build_disabled_and_floating_ui(&s, false, false)
+	then_focused_widget_is(&s, "float_a_btn")
+
+	build_disabled_and_floating_ui(
+		&s,
+		false,
+		false,
+		bifrost.Mouse_Event{x = 12, y = 8, action = .Press, button = .Left},
+		bifrost.Mouse_Event{x = 12, y = 8, action = .Release, button = .Left},
+	)
+	then_activated_widget_is(&s, "float_a_btn")
+}
+

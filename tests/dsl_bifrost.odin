@@ -80,6 +80,26 @@ then_diff_ansi_contains :: proc(s: ^Suite_Ctx, substr: string, loc := #caller_lo
 	testing.expect(s.t, strings.contains(s.last_ansi_str, substr), "Expected ANSI diff to contain substring", loc = loc)
 }
 
+then_vt_contains_text :: proc(s: ^Suite_Ctx, needle: string, expected: bool = true, loc := #caller_location) {
+	found := false
+	w := int(s.vt_w)
+	h := int(s.vt_h)
+	for r := 0; r < h; r += 1 {
+		b := strings.builder_make(0, w, context.temp_allocator)
+		for x := 0; x < w; x += 1 {
+			ch := s.vt_cells[r * w + x].ch
+			if ch != 0 {
+				strings.write_rune(&b, ch)
+			}
+		}
+		if strings.contains(strings.to_string(b), needle) {
+			found = true
+			break
+		}
+	}
+	testing.expect_value(s.t, found, expected, loc = loc)
+}
+
 // =============================================================================
 // Layer 2: Domain-Specific Language (Focus, 3-Phase Input Routing & Hit-Testing)
 // =============================================================================
@@ -140,6 +160,18 @@ then_focused_widget_is :: proc(s: ^Suite_Ctx, id: string, loc := #caller_locatio
 	} else {
 		testing.expect(s.t, bifrost.is_focused(&s.input, id), "Expected widget to have focus", loc = loc)
 	}
+}
+
+then_editing_widget_is :: proc(s: ^Suite_Ctx, id: string, loc := #caller_location) {
+	if len(id) == 0 {
+		testing.expect_value(s.t, s.input.editing_id, u64(0), loc = loc)
+	} else {
+		testing.expect(s.t, bifrost.is_editing(&s.input, id), "Expected widget to own editing_id", loc = loc)
+	}
+}
+
+then_scope_selected_is :: proc(s: ^Suite_Ctx, id: string, expected: bool, loc := #caller_location) {
+	testing.expect_value(s.t, bifrost.is_scope_selected(&s.input, id), expected, loc = loc)
 }
 
 then_hovered_widget_is :: proc(s: ^Suite_Ctx, id: string, loc := #caller_location) {
@@ -529,6 +561,7 @@ upon_ticking_ui_frame :: proc(s: ^Suite_Ctx, tick_ns: i64 = 1) {
 	actor.scheduler_wait_idle(&s.sched)
 	actor.send(&s.sched, s.ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Frame_Tick{tick_ns = tick_ns}))
 	actor.scheduler_wait_idle(&s.sched)
+	actor.scheduler_wait_idle(&s.sched)
 }
 
 then_ui_coordinator_metrics_are :: proc(
@@ -562,7 +595,15 @@ then_ui_screen_contains_text :: proc(s: ^Suite_Ctx, needle: string, loc := #call
 			break
 		}
 	}
-	testing.expect(s.t, found, "Expected UI coordinator screen to contain substring", loc = loc)
+	testing.expectf(
+		s.t,
+		found,
+		"Expected UI coordinator screen to contain %q (diff=%v, datalog=%q)",
+		needle,
+		s.ui_actor.state.last_diff_summary,
+		s.ui_actor.state.last_datalog_summary,
+		loc = loc,
+	)
 }
 
 then_worker_ping_count_is :: proc(s: ^Suite_Ctx, expected_moments: i64, loc := #caller_location) {
@@ -570,7 +611,319 @@ then_worker_ping_count_is :: proc(s: ^Suite_Ctx, expected_moments: i64, loc := #
 	testing.expect_value(s.t, cnt, expected_moments, loc = loc)
 }
 
+// =============================================================================
+// Layer 2: Domain-Specific Language (Track 8: Key-Chord DSL, Sub-Modes & Hint Bar)
+// =============================================================================
 
+upon_requesting_focus :: proc(s: ^Suite_Ctx, id: string) {
+	s.input.wants_focus_id = bifrost.hash_id(id) if len(id) > 0 else 0
+}
 
+upon_clicking_widget :: proc(s: ^Suite_Ctx, id: string, loc := #caller_location) {
+	rect, ok := bifrost.get_rect(&s.layout_ctx, id)
+	testing.expect(s.t, ok, "Expected widget rect for click", loc = loc)
+	if ok {
+		upon_mouse_click(s, rect.x + 1, rect.y)
+	}
+}
 
+then_virtual_table_cell_is :: proc(
+	s: ^Suite_Ctx,
+	id: string,
+	expected_row: i32,
+	expected_col: i32,
+	loc := #caller_location,
+) {
+	testing.expect_value(s.t, bifrost.get_selected_row(&s.input, id), expected_row, loc = loc)
+	testing.expect_value(s.t, bifrost.get_selected_col(&s.input, id), expected_col, loc = loc)
+}
+
+given_actions_struct_registered :: proc(s: ^Suite_Ctx, cp: ^bifrost.Command_Palette, inst: $T, loc := #caller_location) {
+	ok := bifrost.register_actions_struct(&s.input, cp, inst)
+	testing.expect(s.t, ok, "Expected register_actions_struct to succeed", loc = loc)
+}
+
+given_chord_bound :: proc(
+	s: ^Suite_Ctx,
+	chord_spec: string,
+	action_name: string,
+	policy: bifrost.Key_Scope_Policy = .Root_And_Scopes,
+	scope_id: string = "",
+	loc := #caller_location,
+) {
+	ok := bifrost.bind_chord(&s.input, chord_spec, action_name, policy, scope_id)
+	testing.expect(s.t, ok, "Expected bind_chord to succeed", loc = loc)
+}
+
+given_action_guard :: proc(
+	s: ^Suite_Ctx,
+	action_name: string,
+	guard: bifrost.Action_Guard_Proc,
+	userdata: rawptr = nil,
+) {
+	bifrost.set_action_guard(&s.input, action_name, guard, userdata)
+}
+
+given_action_availability :: proc(
+	s: ^Suite_Ctx,
+	action_name: string,
+	avail: bifrost.Action_Availability,
+	avail_proc: bifrost.Action_Avail_Proc = nil,
+	userdata: rawptr = nil,
+) {
+	bifrost.set_action_availability(&s.input, action_name, avail, avail_proc, userdata)
+}
+
+then_disabled_action_reason_is :: proc(s: ^Suite_Ctx, expected_reason: string, loc := #caller_location) {
+	testing.expect_value(s.t, s.input.last_disabled_reason, expected_reason, loc = loc)
+}
+
+then_typed_action_triggered_is :: proc(s: ^Suite_Ctx, expected_val: $E, loc := #caller_location) {
+	act, ok := bifrost.triggered_action(&s.input, E)
+	testing.expect(s.t, ok, "Expected typed action enum to be triggered", loc = loc)
+	testing.expect_value(s.t, act, expected_val, loc = loc)
+}
+
+then_paint_has_dimmed_span :: proc(s: ^Suite_Ctx, id: string, snippet: string, expected: bool, loc := #caller_location) {
+	paint := s.screen.paints[bifrost.hash_id(id)]
+	found := false
+	for sp in paint.spans {
+		if strings.contains(sp.text, snippet) && (.Dim in sp.style) {
+			found = true
+			break
+		}
+	}
+	testing.expect_value(s.t, found, expected, loc = loc)
+}
+
+then_pending_chord_is :: proc(
+	s: ^Suite_Ctx,
+	expected_active: bool,
+	expected_prefix: string = "",
+	loc := #caller_location,
+) {
+	testing.expect_value(s.t, s.input.pending_chord.active, expected_active, loc = loc)
+	if expected_active && len(expected_prefix) > 0 {
+		testing.expect_value(s.t, bifrost.pending_chord_prefix(&s.input), expected_prefix, loc = loc)
+	}
+}
+
+then_splitter_submode_is :: proc(
+	s: ^Suite_Ctx,
+	id: string,
+	expected: bifrost.Splitter_Submode,
+	loc := #caller_location,
+) {
+	testing.expect_value(s.t, bifrost.get_scope_submode_typed(&s.input, id, bifrost.Splitter_Submode), expected, loc = loc)
+}
+
+// =============================================================================
+// Layer 2: Domain-Specific Language (Track 9: Actor Bridge Isolation, Action Sinks & Persistence)
+// =============================================================================
+
+given_actor_action_bound_static :: proc(
+	s: ^Suite_Ctx,
+	action_name: string,
+	payload: bifrost.Xitdb_Worker_Msg,
+	loc := #caller_location,
+) {
+	ok := bifrost.bind_actor_action(&s.ui_actor.state, action_name, s.worker_pid, payload)
+	testing.expect(s.t, ok, "Expected static bind_actor_action to succeed", loc = loc)
+}
+
+given_actor_action_bound_dynamic :: proc(
+	s: ^Suite_Ctx,
+	action_name: string,
+	builder_fn: proc(coord: ^bifrost.UI_Coordinator_State, userdata: rawptr) -> (bifrost.Xitdb_Worker_Msg, bool),
+	userdata: rawptr = nil,
+	loc := #caller_location,
+) {
+	ok := bifrost.bind_actor_action(&s.ui_actor.state, action_name, s.worker_pid, builder_fn, userdata)
+	testing.expect(s.t, ok, "Expected dynamic bind_actor_action to succeed", loc = loc)
+}
+
+given_ui_quit_filter :: proc(
+	s: ^Suite_Ctx,
+	filter_fn: bifrost.UI_Quit_Filter_Fn,
+	user_ptr: rawptr = nil,
+) {
+	bifrost.ui_set_quit_filter(&s.ui_actor.state, filter_fn, user_ptr)
+}
+
+upon_sending_ui_key :: proc(
+	s: ^Suite_Ctx,
+	code: bifrost.Key_Code,
+	ch: rune = 0,
+	ctrl: bool = false,
+	alt: bool = false,
+	shift: bool = false,
+) {
+	upon_sending_ui_msg(s, bifrost.UI_Msg(bifrost.UI_Msg_Key{
+		code  = code,
+		ch    = ch,
+		ctrl  = ctrl,
+		alt   = alt,
+		shift = shift,
+	}))
+}
+
+upon_typing_ui_keys :: proc(s: ^Suite_Ctx, text: string) {
+	for ch in text {
+		if ch == ' ' {
+			upon_sending_ui_key(s, .Space, ' ')
+		} else {
+			upon_sending_ui_key(s, .Rune, ch)
+		}
+	}
+}
+
+upon_issuing_ui_side_effects :: proc(
+	s: ^Suite_Ctx,
+	focus_id: string,
+	osc52_text: string,
+	title: string,
+	cursor_shape: bifrost.Cursor_Shape,
+	request_quit: bool,
+) {
+	if len(focus_id) > 0 {
+		bifrost.ui_cmd_request_focus(&s.ui_actor.state, focus_id)
+	}
+	if len(osc52_text) > 0 {
+		bifrost.ui_cmd_copy_osc52(&s.ui_actor.state, osc52_text)
+	}
+	if len(title) > 0 {
+		bifrost.ui_cmd_set_title(&s.ui_actor.state, title)
+	}
+	bifrost.ui_cmd_set_cursor_shape(&s.ui_actor.state, cursor_shape)
+	if request_quit {
+		bifrost.ui_cmd_request_quit(&s.ui_actor.state)
+	}
+}
+
+upon_pressing_mouse_on_ui_widget :: proc(s: ^Suite_Ctx, id: string, loc := #caller_location) {
+	rect, ok := bifrost.get_rect(&s.ui_actor.state.layout_ctx, id)
+	testing.expect(s.t, ok, "Expected UI coordinator widget rect to exist", loc = loc)
+	if ok {
+		upon_sending_ui_msg(s, bifrost.UI_Msg(bifrost.UI_Msg_Mouse{
+			x      = rect.x,
+			y      = rect.y + 1,
+			button = 1,
+			action = .Press,
+		}))
+	}
+}
+
+upon_sending_ui_focus_event :: proc(s: ^Suite_Ctx, focused: bool) {
+	upon_sending_ui_msg(s, bifrost.UI_Msg(bifrost.UI_Msg_Input{
+		event = bifrost.Focus_Event{focused = focused},
+	}))
+}
+
+upon_customizing_ui_workspace :: proc(
+	s: ^Suite_Ctx,
+	splitter_id: string,
+	split_size: i32,
+	scope_id: string,
+	child_id: string,
+	leaf_id: string,
+) {
+	slot := bifrost.get_splitter_slot(&s.ui_actor.state.input, bifrost.hash_id(splitter_id))
+	slot.size = split_size
+	bifrost.upsert_scope_memory(
+		&s.ui_actor.state.input,
+		bifrost.hash_id(scope_id),
+		bifrost.hash_id(child_id),
+		bifrost.hash_id(leaf_id),
+	)
+}
+
+upon_saving_ui_workspace :: proc(s: ^Suite_Ctx, workspace_id: string, loc := #caller_location) {
+	ok := bifrost.save_ui_workspace_to_xitdb(&s.shared_db, &s.ui_actor.state, workspace_id)
+	testing.expect(s.t, ok, "Expected save_ui_workspace_to_xitdb to succeed", loc = loc)
+}
+
+then_restored_ui_workspace_matches :: proc(
+	s: ^Suite_Ctx,
+	workspace_id: string,
+	splitter_id: string,
+	expected_split: i32,
+	expected_collection: string,
+	expected_pinned: bool,
+	expected_moment: i64,
+	scope_id: string,
+	expected_leaf_id: string,
+	loc := #caller_location,
+) {
+	restored: bifrost.UI_Coordinator_State
+	testing.expect(s.t, bifrost.ui_coordinator_init(&restored, 110, 24, &s.shared_db, nil, s.alloc), loc = loc)
+	defer bifrost.ui_coordinator_destroy(&restored)
+
+	testing.expect(s.t, bifrost.load_ui_workspace_from_xitdb(&s.shared_db, &restored, workspace_id), loc = loc)
+	testing.expect_value(s.t, bifrost.get_split_size(&restored.input, splitter_id, 25, 12, 60), expected_split, loc = loc)
+	testing.expect_value(s.t, restored.active_collection, expected_collection, loc = loc)
+	testing.expect_value(s.t, restored.pinned_moment, expected_pinned, loc = loc)
+	testing.expect_value(s.t, restored.active_moment_idx, expected_moment, loc = loc)
+
+	mem_entry := bifrost.get_scope_memory(&restored.input, bifrost.hash_id(scope_id))
+	testing.expect(s.t, mem_entry != nil, "Expected restored scope memory entry", loc = loc)
+	if mem_entry != nil {
+		testing.expect_value(s.t, mem_entry.last_leaf_hash, bifrost.hash_id(expected_leaf_id), loc = loc)
+	}
+}
+
+then_ui_palette_open_is :: proc(s: ^Suite_Ctx, expected: bool, loc := #caller_location) {
+	testing.expect_value(s.t, s.ui_actor.state.palette_open, expected, loc = loc)
+}
+
+then_ui_ansi_output_contains :: proc(s: ^Suite_Ctx, needle: string, loc := #caller_location) {
+	ansi_str := strings.to_string(s.ui_actor.state.ansi_builder)
+	testing.expectf(
+		s.t,
+		strings.contains(ansi_str, needle),
+		"Expected UI coordinator ANSI stream to contain %q, got %q",
+		needle,
+		ansi_str,
+		loc = loc,
+	)
+}
+
+then_ui_pointer_capture_is :: proc(
+	s: ^Suite_Ctx,
+	expected_press_id: string,
+	expected_splitter_id: string,
+	loc := #caller_location,
+) {
+	exp_press := bifrost.hash_id(expected_press_id) if len(expected_press_id) > 0 else u64(0)
+	exp_split := bifrost.hash_id(expected_splitter_id) if len(expected_splitter_id) > 0 else u64(0)
+	testing.expect_value(s.t, s.ui_actor.state.input.active_press_id, exp_press, loc = loc)
+	testing.expect_value(s.t, s.ui_actor.state.input.active_splitter_id, exp_split, loc = loc)
+}
+
+then_ui_focused_widget_is :: proc(s: ^Suite_Ctx, id: string, loc := #caller_location) {
+	if len(id) == 0 {
+		testing.expect_value(s.t, s.ui_actor.state.input.focused_id, u64(0), loc = loc)
+	} else {
+		testing.expect(s.t, bifrost.is_focused(&s.ui_actor.state.input, id), "Expected UI coordinator widget to hold focus", loc = loc)
+	}
+}
+
+then_ui_editing_widget_is :: proc(s: ^Suite_Ctx, id: string, loc := #caller_location) {
+	if len(id) == 0 {
+		testing.expect_value(s.t, s.ui_actor.state.input.editing_id, u64(0), loc = loc)
+	} else {
+		testing.expect(s.t, bifrost.is_editing(&s.ui_actor.state.input, id), "Expected UI coordinator widget to own editing_id", loc = loc)
+	}
+}
+
+then_ui_text_value_is :: proc(s: ^Suite_Ctx, id: string, expected: string, loc := #caller_location) {
+	testing.expect_value(s.t, bifrost.get_text(&s.ui_actor.state.input, id), expected, loc = loc)
+}
+
+then_ui_vlist_row_is :: proc(s: ^Suite_Ctx, expected_row: int, loc := #caller_location) {
+	testing.expect_value(s.t, s.ui_actor.state.vlist.selected_row, expected_row, loc = loc)
+}
+
+then_ui_quit_requested_is :: proc(s: ^Suite_Ctx, expected: bool, loc := #caller_location) {
+	testing.expect_value(s.t, s.ui_actor.state.quit_requested, expected, loc = loc)
+}
 
