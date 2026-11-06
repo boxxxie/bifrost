@@ -1268,21 +1268,6 @@ then_osc52_flushed_is :: proc(
 	testing.expect(s.t, strings.contains(strings.to_string(b), expected_substr), "Expected OSC 52 sequence to contain base64 substring", loc = loc)
 }
 
-then_cell_style_has :: proc(
-	s: ^Suite_Ctx,
-	x, y: i32,
-	expected_flag: bifrost.Style_Flag,
-	expected_present: bool,
-	loc := #caller_location,
-) {
-	idx := int(y * s.screen.width + x)
-	testing.expect(s.t, idx >= 0 && idx < len(s.screen.back), "Expected screen cell in bounds", loc = loc)
-	if idx >= 0 && idx < len(s.screen.back) {
-		actual := expected_flag in s.screen.back[idx].style
-		testing.expect_value(s.t, actual, expected_present, loc = loc)
-	}
-}
-
 // =============================================================================
 // Layer 2: Domain-Specific Language (Track 12: Virtualized Collapsible Tree)
 // =============================================================================
@@ -1360,5 +1345,39 @@ then_vt_row_contains_text :: proc(
 	)
 }
 
+// =============================================================================
+// Layer 2: Domain-Specific Language (Track 13: Focus-Scope-Integrated Tab Bar)
+// =============================================================================
 
+given_active_tab :: proc(s: ^Suite_Ctx, id: string, tab_idx: int, restore_body_focus: bool = true) {
+	bifrost.set_active_tab(&s.input, id, tab_idx, restore_body_focus)
+}
+
+upon_clicking_tab :: proc(s: ^Suite_Ctx, id: string, tab_idx: int, loc := #caller_location) {
+	tab_id := bifrost.tab_header_id(id, tab_idx)
+	upon_clicking_widget(s, tab_id, loc)
+}
+
+then_active_tab_is :: proc(s: ^Suite_Ctx, id: string, expected_tab: int, loc := #caller_location) {
+	testing.expect_value(s.t, bifrost.get_active_tab(&s.input, id), expected_tab, loc = loc)
+}
+
+then_tab_changed_is :: proc(s: ^Suite_Ctx, id: string, expected: bool, loc := #caller_location) {
+	testing.expect_value(s.t, bifrost.was_tab_changed(&s.input, id), expected, loc = loc)
+}
+
+then_cell_style_has :: proc(
+	s: ^Suite_Ctx,
+	x, y: i32,
+	expected_flag: bifrost.Style_Flag,
+	expected_present: bool,
+	loc := #caller_location,
+) {
+	idx := int(y * s.screen.width + x)
+	testing.expect(s.t, idx >= 0 && idx < len(s.screen.back), "Expected screen cell in bounds", loc = loc)
+	if idx >= 0 && idx < len(s.screen.back) {
+		actual := expected_flag in s.screen.back[idx].style
+		testing.expect_value(s.t, actual, expected_present, loc = loc)
+	}
+}
 

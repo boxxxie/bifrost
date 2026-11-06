@@ -197,12 +197,16 @@ Suite_Ctx_VTable :: struct {
 	then_text_area_dynamic_state_is: proc(s: ^Suite_Ctx, st: ^bifrost.Text_Area_State, expected_text: string, loc := #caller_location),
 	then_clipboard_text_is: proc(s: ^Suite_Ctx, expected: string, expected_osc52: bool = true, loc := #caller_location),
 	then_osc52_flushed_is: proc(s: ^Suite_Ctx, expected_substr: string, loc := #caller_location),
-	then_cell_style_has: proc(s: ^Suite_Ctx, x: i32, y: i32, expected_flag: bifrost.Style_Flag, expected_present: bool, loc := #caller_location),
 	then_tree_selection_is: proc(s: ^Suite_Ctx, id: string, expected_node_idx: i32, expected_vis_row: i32, loc := #caller_location),
 	then_tree_node_expanded_is: proc(s: ^Suite_Ctx, id: string, node_idx: i32, expected: bool, loc := #caller_location),
 	then_tree_visible_count_is: proc(s: ^Suite_Ctx, id: string, expected_visible_rows: i32, loc := #caller_location),
 	then_tree_activated_node_is: proc(s: ^Suite_Ctx, id: string, expected_node_idx: i32, loc := #caller_location),
 	then_vt_row_contains_text: proc(s: ^Suite_Ctx, row: i32, needle: string, expected: bool = true, loc := #caller_location),
+	given_active_tab: proc(s: ^Suite_Ctx, id: string, tab_idx: int, restore_body_focus: bool = true),
+	upon_clicking_tab: proc(s: ^Suite_Ctx, id: string, tab_idx: int, loc := #caller_location),
+	then_active_tab_is: proc(s: ^Suite_Ctx, id: string, expected_tab: int, loc := #caller_location),
+	then_tab_changed_is: proc(s: ^Suite_Ctx, id: string, expected: bool, loc := #caller_location),
+	then_cell_style_has: proc(s: ^Suite_Ctx, x: i32, y: i32, expected_flag: bifrost.Style_Flag, expected_present: bool, loc := #caller_location),
 }
 
 @(private)
@@ -331,12 +335,16 @@ _suite_ctx_vtable := Suite_Ctx_VTable{
 	then_text_area_dynamic_state_is = then_text_area_dynamic_state_is,
 	then_clipboard_text_is = then_clipboard_text_is,
 	then_osc52_flushed_is = then_osc52_flushed_is,
-	then_cell_style_has = then_cell_style_has,
 	then_tree_selection_is = then_tree_selection_is,
 	then_tree_node_expanded_is = then_tree_node_expanded_is,
 	then_tree_visible_count_is = then_tree_visible_count_is,
 	then_tree_activated_node_is = then_tree_activated_node_is,
 	then_vt_row_contains_text = then_vt_row_contains_text,
+	given_active_tab = given_active_tab,
+	upon_clicking_tab = upon_clicking_tab,
+	then_active_tab_is = then_active_tab_is,
+	then_tab_changed_is = then_tab_changed_is,
+	then_cell_style_has = then_cell_style_has,
 }
 
 Given_DSL :: struct {
@@ -354,6 +362,7 @@ Given_DSL :: struct {
 	xitdb_array_list_populated: proc(list_name: string, count: int, step_multiplier: i64 = 10, expected_moment: i64 = 0, loc := #caller_location),
 	nonblocking_pipe_terminal: proc(loc := #caller_location),
 	text_area_text: proc(id: string, text: string),
+	active_tab: proc(id: string, tab_idx: int, restore_body_focus: bool = true),
 }
 
 @(rodata)
@@ -372,6 +381,7 @@ given := Given_DSL{
 	xitdb_array_list_populated = given_xitdb_array_list_populated_ambient,
 	nonblocking_pipe_terminal = given_nonblocking_pipe_terminal_ambient,
 	text_area_text = given_text_area_text_ambient,
+	active_tab = given_active_tab_ambient,
 }
 
 Upon_DSL :: struct {
@@ -410,6 +420,7 @@ Upon_DSL :: struct {
 	writing_to_terminal_pipe: proc(data: string),
 	feeding_win32_console_record: proc(rec: bifrost.Win32_Console_Record),
 	pasting_text: proc(text: string),
+	clicking_tab: proc(id: string, tab_idx: int, loc := #caller_location),
 }
 
 @(rodata)
@@ -449,6 +460,7 @@ upon := Upon_DSL{
 	writing_to_terminal_pipe = upon_writing_to_terminal_pipe_ambient,
 	feeding_win32_console_record = upon_feeding_win32_console_record_ambient,
 	pasting_text = upon_pasting_text_ambient,
+	clicking_tab = upon_clicking_tab_ambient,
 }
 
 Then_DSL :: struct {
@@ -526,12 +538,14 @@ Then_DSL :: struct {
 	text_area_dynamic_state_is: proc(st: ^bifrost.Text_Area_State, expected_text: string, loc := #caller_location),
 	clipboard_text_is: proc(expected: string, expected_osc52: bool = true, loc := #caller_location),
 	osc52_flushed_is: proc(expected_substr: string, loc := #caller_location),
-	cell_style_has: proc(x: i32, y: i32, expected_flag: bifrost.Style_Flag, expected_present: bool, loc := #caller_location),
 	tree_selection_is: proc(id: string, expected_node_idx: i32, expected_vis_row: i32, loc := #caller_location),
 	tree_node_expanded_is: proc(id: string, node_idx: i32, expected: bool, loc := #caller_location),
 	tree_visible_count_is: proc(id: string, expected_visible_rows: i32, loc := #caller_location),
 	tree_activated_node_is: proc(id: string, expected_node_idx: i32, loc := #caller_location),
 	vt_row_contains_text: proc(row: i32, needle: string, expected: bool = true, loc := #caller_location),
+	active_tab_is: proc(id: string, expected_tab: int, loc := #caller_location),
+	tab_changed_is: proc(id: string, expected: bool, loc := #caller_location),
+	cell_style_has: proc(x: i32, y: i32, expected_flag: bifrost.Style_Flag, expected_present: bool, loc := #caller_location),
 }
 
 @(rodata)
@@ -610,12 +624,14 @@ then := Then_DSL{
 	text_area_dynamic_state_is = then_text_area_dynamic_state_is_ambient,
 	clipboard_text_is = then_clipboard_text_is_ambient,
 	osc52_flushed_is = then_osc52_flushed_is_ambient,
-	cell_style_has = then_cell_style_has_ambient,
 	tree_selection_is = then_tree_selection_is_ambient,
 	tree_node_expanded_is = then_tree_node_expanded_is_ambient,
 	tree_visible_count_is = then_tree_visible_count_is_ambient,
 	tree_activated_node_is = then_tree_activated_node_is_ambient,
 	vt_row_contains_text = then_vt_row_contains_text_ambient,
+	active_tab_is = then_active_tab_is_ambient,
+	tab_changed_is = then_tab_changed_is_ambient,
+	cell_style_has = then_cell_style_has_ambient,
 }
 
 // =============================================================================
@@ -1132,10 +1148,6 @@ then_osc52_flushed_is_ambient :: #force_inline proc(expected_substr: string, loc
 	then_osc52_flushed_is(current_scenario(loc), expected_substr, loc)
 }
 
-then_cell_style_has_ambient :: #force_inline proc(x: i32, y: i32, expected_flag: bifrost.Style_Flag, expected_present: bool, loc := #caller_location) {
-	then_cell_style_has(current_scenario(loc), x, y, expected_flag, expected_present, loc)
-}
-
 then_tree_selection_is_ambient :: #force_inline proc(id: string, expected_node_idx: i32, expected_vis_row: i32, loc := #caller_location) {
 	then_tree_selection_is(current_scenario(loc), id, expected_node_idx, expected_vis_row, loc)
 }
@@ -1154,5 +1166,25 @@ then_tree_activated_node_is_ambient :: #force_inline proc(id: string, expected_n
 
 then_vt_row_contains_text_ambient :: #force_inline proc(row: i32, needle: string, expected: bool = true, loc := #caller_location) {
 	then_vt_row_contains_text(current_scenario(loc), row, needle, expected, loc)
+}
+
+given_active_tab_ambient :: #force_inline proc(id: string, tab_idx: int, restore_body_focus: bool = true) {
+	given_active_tab(current_scenario(), id, tab_idx, restore_body_focus)
+}
+
+upon_clicking_tab_ambient :: #force_inline proc(id: string, tab_idx: int, loc := #caller_location) {
+	upon_clicking_tab(current_scenario(loc), id, tab_idx, loc)
+}
+
+then_active_tab_is_ambient :: #force_inline proc(id: string, expected_tab: int, loc := #caller_location) {
+	then_active_tab_is(current_scenario(loc), id, expected_tab, loc)
+}
+
+then_tab_changed_is_ambient :: #force_inline proc(id: string, expected: bool, loc := #caller_location) {
+	then_tab_changed_is(current_scenario(loc), id, expected, loc)
+}
+
+then_cell_style_has_ambient :: #force_inline proc(x: i32, y: i32, expected_flag: bifrost.Style_Flag, expected_present: bool, loc := #caller_location) {
+	then_cell_style_has(current_scenario(loc), x, y, expected_flag, expected_present, loc)
 }
 

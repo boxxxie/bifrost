@@ -351,6 +351,10 @@ Input_State :: struct {
 	// Fixed-capacity virtualized collapsible tree slots
 	tree_slots:          [MAX_TREE_SLOTS]Tree_Slot,
 
+	// Fixed-capacity focus-scoped tab bar slots
+	tab_changed_id:      u64,
+	tabs_slots:          [MAX_TABS_SLOTS]Tabs_Slot,
+
 	// 3-tier scoped/global keybinding table & per-frame action dispatch
 	keybindings:           [MAX_KEYBINDINGS]Keybinding,
 	keybinding_count:      int,
@@ -785,6 +789,7 @@ resolve_input :: proc(inp: ^Input_State, ctx: ^Layout_Context, events: ..Input_E
 	inp.active_capture_id     = 0
 	inp.active_shield_z       = 0
 	inp.text_changed_id       = 0
+	inp.tab_changed_id        = 0
 	inp.triggered_action_id   = 0
 	inp.triggered_action_name = ""
 	inp.triggered_enum_val    = 0
@@ -1158,6 +1163,13 @@ handle_key_event :: proc(inp: ^Input_State, ctx: ^Layout_Context, capture_idx: i
 				}
 			}
 		}
+
+		// Tab Bar keyboard switching (`[` / `]`, `Alt+1..9`, and `h`/`l` / `Left`/`Right` / `j` / `Enter` on tab header)
+		if handle_tabs_key(inp, ctx, capture_idx, ev) {
+			inp.has_last_motion = false
+			inp.suffix_count    = 0
+			return
+		}
 	}
 
 	if !is_nav {
@@ -1410,6 +1422,9 @@ handle_mouse_event :: proc(inp: ^Input_State, ctx: ^Layout_Context, capture_idx:
 				if is_node_focusable(node) && is_node_allowed(ctx, hit_idx, capture_idx) {
 					reset_preferred_nav(inp)
 					set_focused_node(inp, ctx, hit_idx, capture_idx, false)
+				}
+				if is_node_allowed(ctx, hit_idx, capture_idx) {
+					handle_tabs_mouse_press(inp, ctx, capture_idx, hit_idx)
 				}
 				if node.config.splitter {
 					begin_splitter_drag(inp, ctx, hit_idx, ev.x, ev.y)
