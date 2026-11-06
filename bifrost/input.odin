@@ -937,7 +937,11 @@ apply_input_highlights :: proc(s: ^Screen, ctx: ^Layout_Context, inp: ^Input_Sta
 				paint.style += {.Dim, .Reverse}
 			}
 		} else if node.id_hash == inp.hovered_id {
-			paint.style += {.Underline}
+			if is_container_scope && (paint.fill_bg || paint.bg.kind != .Default) {
+				paint.title_style += {.Underline}
+			} else {
+				paint.style += {.Underline}
+			}
 		}
 		s.paints[node.id_hash] = paint
 	}

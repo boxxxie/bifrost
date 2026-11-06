@@ -293,3 +293,52 @@ spec_text_area_dynamic_buffer_state_ownership_and_max_lines_cap :: proc(t: ^test
 	upon.rendering_frame(build_dyn_ui)
 	then.text_area_line_length_is("dyn_editor", bifrost.MAX_TEXT_AREA_LINES - 1, 1)
 }
+
+@(test)
+@(scenario)
+spec_text_area_odin_syntax_highlighting_and_hover_title_underline :: proc(t: ^testing.T) {
+	_ = scenario(t, w = 48, h = 8)
+
+	build_syntax_ui :: proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen) {
+		s := current_scenario()
+		if bifrost.container(ctx, "root", {dir = .Column, width = bifrost.grow(1), height = bifrost.grow(1)}) {
+			bifrost.ui_text_area(ctx, scr, &s.input, "code_editor", {
+				title        = "Odin Editor",
+				initial_text = "package main\n// comment\nx := \"hi\" + 42",
+				width        = bifrost.fixed(40),
+				height       = bifrost.fixed(6),
+				border       = .Rounded,
+				fg           = bifrost.rgb(220, 228, 240),
+				bg           = bifrost.rgb(16, 20, 28),
+				syntax_mode  = .Odin,
+				two_stage    = true,
+			})
+		}
+	}
+
+	upon.rendering_frame(build_syntax_ui)
+
+	// Row 1 (y = 1, x = 1): "package main" -> 'p' is highlighted with keyword fg rgb(255, 130, 195) and Bold
+	then.cell_at_is(1, 1, 'p')
+	then.cell_colors_at_are(1, 1, bifrost.rgb(255, 130, 195), bifrost.rgb(16, 20, 28))
+	then.cell_style_has(1, 1, .Bold, true)
+
+	// Row 2 (y = 2, x = 1): "// comment" -> '/' is highlighted with comment fg rgb(125, 138, 162) and Dim
+	then.cell_at_is(1, 2, '/')
+	then.cell_colors_at_are(1, 2, bifrost.rgb(125, 138, 162), bifrost.rgb(16, 20, 28))
+	then.cell_style_has(1, 2, .Dim, true)
+
+	// Row 3 (y = 3): "x := \"hi\" + 42" -> '"hi"' starts at x = 6 (rgb(158, 232, 132)), '42' starts at x = 13 (rgb(255, 175, 105))
+	then.cell_at_is(6, 3, '"')
+	then.cell_colors_at_are(6, 3, bifrost.rgb(158, 232, 132), bifrost.rgb(16, 20, 28))
+	then.cell_at_is(13, 3, '4')
+	then.cell_colors_at_are(13, 3, bifrost.rgb(255, 175, 105), bifrost.rgb(16, 20, 28))
+
+	// Hovering over the text editor underlines the border title ("Odin Editor"), NOT the interior text/background cells!
+	upon.mouse_move(5, 2)
+	upon.rendering_frame(build_syntax_ui)
+	then.hovered_widget_is("code_editor")
+	then.cell_style_has(1, 1, .Underline, false)
+	then.cell_style_has(20, 2, .Underline, false)
+	then.cell_style_has(3, 0, .Underline, true)
+}

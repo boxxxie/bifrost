@@ -11,6 +11,20 @@ MAX_TEXT_AREA_SLOTS :: 8
 MAX_TEXT_AREA_BYTES :: 4096
 MAX_TEXT_AREA_LINES :: 256
 
+Text_Area_Syntax_Mode :: enum u8 {
+	None = 0,
+	Odin = 1,
+}
+
+Text_Area_Highlighter_Proc :: #type proc(
+	line: string,
+	line_idx: i32,
+	out_spans: ^[dynamic]Styled_Span,
+	default_fg: Color,
+	default_bg: Color,
+	userdata: rawptr,
+)
+
 Text_Area_State :: struct {
 	id_hash:           u64,
 	buf:               [MAX_TEXT_AREA_BYTES]u8,
@@ -35,6 +49,9 @@ Text_Area_State :: struct {
 	placeholder:       string,
 	placeholder_fg:    Color,
 	gutter_fg:         Color,
+	syntax_mode:       Text_Area_Syntax_Mode,
+	highlighter:       Text_Area_Highlighter_Proc,
+	highlight_data:    rawptr,
 	state_ptr:         ^Text_Area_State,
 	last_layout_gen:   u64,
 	exited_edit:       bool,
@@ -59,6 +76,9 @@ Text_Area_Config :: struct {
 	two_stage:         bool,
 	show_line_numbers: bool,
 	tab_width:         i32,
+	syntax_mode:       Text_Area_Syntax_Mode,
+	highlighter:       Text_Area_Highlighter_Proc,
+	highlight_data:    rawptr,
 	state:             ^Text_Area_State,
 }
 
@@ -367,6 +387,9 @@ sync_external_text_area_state :: proc "contextless" (dst: ^Text_Area_State, src:
 	dst.placeholder       = src.placeholder
 	dst.placeholder_fg    = src.placeholder_fg
 	dst.gutter_fg         = src.gutter_fg
+	dst.syntax_mode       = src.syntax_mode
+	dst.highlighter       = src.highlighter
+	dst.highlight_data    = src.highlight_data
 	dst.last_layout_gen   = src.last_layout_gen
 	dst.exited_edit       = src.exited_edit
 	dst.initialized       = true
@@ -407,6 +430,9 @@ ui_text_area :: proc(
 	slot.gutter_fg         = cfg.gutter_fg
 	slot.show_line_numbers = cfg.show_line_numbers
 	slot.tab_width         = cfg.tab_width if cfg.tab_width > 0 else 4
+	slot.syntax_mode       = cfg.syntax_mode
+	slot.highlighter       = cfg.highlighter
+	slot.highlight_data    = cfg.highlight_data
 	slot.gutter_w          = text_area_gutter_width(slot)
 
 	w := cfg.width if cfg.width != nil else grow(1)
@@ -506,7 +532,10 @@ sync_text_area_paint :: proc(s: ^Screen, inp: ^Input_State, node: Layout_Node) {
 		paint.has_cursor   = false
 	} else {
 		if node.id_hash == inp.hovered_id {
-			paint.style += {.Underline}
+			if paint.border_fg.kind == .Default {
+				paint.border_fg = rgb(135, 195, 255)
+			}
+			paint.title_style += {.Underline}
 		}
 		paint.has_cursor = false
 	}
@@ -516,6 +545,261 @@ sync_text_area_paint :: proc(s: ^Screen, inp: ^Input_State, node: Layout_Node) {
 	}
 	s.paints[node.id_hash]     = paint
 	s.text_areas[node.id_hash] = slot
+}
+
+// =============================================================================
+// Built-In Odin Syntax Lexer & Line Highlighter (`Text_Area_Syntax_Mode.Odin`)
+// =============================================================================
+
+@(private)
+is_odin_keyword :: proc "contextless" (word: string) -> bool {
+	switch word {
+	case "package", "import", "foreign", "when", "if", "else", "for", "switch", "case", "break",
+	     "continue", "fallthrough", "defer", "return", "proc", "struct", "union", "enum",
+	     "bit_set", "bit_field", "map", "dynamic", "matrix", "distinct", "using", "where",
+	     "in", "not_in", "or_else", "or_return", "or_break", "or_continue", "cast", "auto_cast",
+	     "transmute", "inline", "no_inline", "context":
+		return true
+	}
+	return false
+}
+
+@(private)
+is_odin_builtin_type_or_literal :: proc "contextless" (word: string) -> bool {
+	switch word {
+	case "bool", "b8", "b16", "b32", "b64",
+	     "int", "i8", "i16", "i32", "i64", "i128",
+	     "uint", "u8", "u16", "u32", "u64", "u128", "uintptr",
+	     "f16", "f32", "f64", "rune", "string", "cstring", "rawptr", "any", "typeid", "byte",
+	     "true", "false", "nil", "len", "cap", "size_of", "align_of", "offset_of", "type_of",
+	     "make", "delete", "new", "free", "free_all", "append", "clear", "copy", "min", "max", "abs", "clamp":
+		return true
+	}
+	return false
+}
+
+// Tokenizes a single line of Odin source code into colored `Styled_Span`s covering `line` byte-for-byte.
+highlight_odin_line :: proc(
+	line: string,
+	line_idx: i32,
+	out_spans: ^[dynamic]Styled_Span,
+	default_fg: Color,
+	default_bg: Color,
+	userdata: rawptr = nil,
+) {
+	_ = line_idx
+	_ = userdata
+	if out_spans == nil || len(line) == 0 {
+		return
+	}
+
+	kw_fg      := rgb(255, 130, 195) // Keyword / Control flow (Pink/Magenta)
+	type_fg    := rgb(115, 218, 255) // Built-in Type / Proc / Call (Cyan)
+	decl_fg    := rgb(255, 215, 110) // `::` / `:=` Constant or Proc identifier (Gold)
+	str_fg     := rgb(158, 232, 132) // String / Rune literal (Green)
+	num_fg     := rgb(255, 175, 105) // Numeric literal (Orange)
+	comment_fg := rgb(125, 138, 162) // `//` Line comment (Muted Slate)
+	dir_fg     := rgb(205, 160, 255) // `@(...)` / `#...` directive (Purple)
+	op_fg      := rgb(165, 200, 235) // Punctuation / operators
+
+	n := len(line)
+	i := 0
+	for i < n {
+		// 1. Line comment `//...`
+		if i + 1 < n && line[i] == '/' && line[i + 1] == '/' {
+			append(out_spans, Styled_Span{
+				text  = line[i:],
+				fg    = comment_fg,
+				bg    = default_bg,
+				style = {.Dim},
+			})
+			break
+		}
+
+		// 2. Attribute `@(...)` or `@ident` or compiler directive `#ident`
+		if line[i] == '@' || line[i] == '#' {
+			start := i
+			i += 1
+			if i < n && line[i] == '(' {
+				depth := 1
+				i += 1
+				for i < n && depth > 0 {
+					if line[i] == '(' {
+						depth += 1
+					} else if line[i] == ')' {
+						depth -= 1
+					}
+					i += 1
+				}
+			} else {
+				for i < n && ((line[i] >= 'a' && line[i] <= 'z') || (line[i] >= 'A' && line[i] <= 'Z') || (line[i] >= '0' && line[i] <= '9') || line[i] == '_') {
+					i += 1
+				}
+			}
+			append(out_spans, Styled_Span{
+				text  = line[start:i],
+				fg    = dir_fg,
+				bg    = default_bg,
+				style = {.Bold},
+			})
+			continue
+		}
+
+		// 3. String or raw string or rune literal (`"..."`, `` `...` ``, `'...'`)
+		if line[i] == '"' || line[i] == '`' || line[i] == '\'' {
+			quote := line[i]
+			start := i
+			i += 1
+			for i < n {
+				if quote != '`' && line[i] == '\\' && i + 1 < n {
+					i += 2
+					continue
+				}
+				if line[i] == quote {
+					i += 1
+					break
+				}
+				i += 1
+			}
+			append(out_spans, Styled_Span{
+				text = line[start:i],
+				fg   = str_fg,
+				bg   = default_bg,
+			})
+			continue
+		}
+
+		// 4. Numeric literal (`0..9`, `0x..`, floats)
+		if line[i] >= '0' && line[i] <= '9' {
+			start := i
+			for i < n && ((line[i] >= '0' && line[i] <= '9') || (line[i] >= 'a' && line[i] <= 'f') || (line[i] >= 'A' && line[i] <= 'F') || line[i] == '_' || line[i] == '.' || line[i] == 'x' || line[i] == 'X') {
+				i += 1
+			}
+			append(out_spans, Styled_Span{
+				text = line[start:i],
+				fg   = num_fg,
+				bg   = default_bg,
+			})
+			continue
+		}
+
+		// 5. Identifier or Keyword
+		if (line[i] >= 'a' && line[i] <= 'z') || (line[i] >= 'A' && line[i] <= 'Z') || line[i] == '_' {
+			start := i
+			for i < n && ((line[i] >= 'a' && line[i] <= 'z') || (line[i] >= 'A' && line[i] <= 'Z') || (line[i] >= '0' && line[i] <= '9') || line[i] == '_') {
+				i += 1
+			}
+			word := line[start:i]
+			tok_fg := default_fg
+			tok_style: Style_Flags = {}
+
+			if is_odin_keyword(word) {
+				tok_fg    = kw_fg
+				tok_style = {.Bold}
+			} else if is_odin_builtin_type_or_literal(word) {
+				tok_fg = type_fg
+			} else {
+				// Look ahead past spaces for `::`, `:=`, or `(`
+				look := i
+				for look < n && (line[look] == ' ' || line[look] == '\t') {
+					look += 1
+				}
+				if look + 1 < n && line[look] == ':' && (line[look + 1] == ':' || line[look + 1] == '=') {
+					tok_fg    = decl_fg
+					tok_style = {.Bold}
+				} else if look < n && line[look] == '(' {
+					tok_fg = type_fg
+				}
+			}
+			append(out_spans, Styled_Span{
+				text  = word,
+				fg    = tok_fg,
+				bg    = default_bg,
+				style = tok_style,
+			})
+			continue
+		}
+
+		// 6. Whitespace run
+		if line[i] == ' ' || line[i] == '\t' {
+			start := i
+			for i < n && (line[i] == ' ' || line[i] == '\t') {
+				i += 1
+			}
+			append(out_spans, Styled_Span{
+				text = line[start:i],
+				fg   = default_fg,
+				bg   = default_bg,
+			})
+			continue
+		}
+
+		// 7. Operators / Punctuation (`::`, `:=`, `->`, `..`, brackets, or single UTF-8 rune)
+		start := i
+		if i + 1 < n && ((line[i] == ':' && (line[i + 1] == ':' || line[i + 1] == '=')) || (line[i] == '-' && line[i + 1] == '>') || (line[i] == '.' && line[i + 1] == '.')) {
+			i += 2
+			append(out_spans, Styled_Span{
+				text  = line[start:i],
+				fg    = kw_fg,
+				bg    = default_bg,
+				style = {.Bold},
+			})
+			continue
+		}
+		_, rw := utf8.decode_rune_in_string(line[i:])
+		i += max(1, rw)
+		append(out_spans, Styled_Span{
+			text = line[start:i],
+			fg   = op_fg if (line[start] < 128) else default_fg,
+			bg   = default_bg,
+		})
+	}
+}
+
+@(private)
+render_text_area_range_with_spans :: proc(
+	s: ^Screen,
+	cur_x: ^i32,
+	ty: i32,
+	line_str: string,
+	sub_lo, sub_hi: int,
+	spans: []Styled_Span,
+	default_fg, default_bg: Color,
+	base_style: Style_Flags,
+	line_clip: Rect,
+) {
+	if sub_hi <= sub_lo {
+		return
+	}
+	if len(spans) == 0 {
+		cur_x^ += put_text_clipped(s, cur_x^, ty, line_str[sub_lo:sub_hi], default_fg, default_bg, base_style, line_clip)
+		return
+	}
+	span_byte := 0
+	for sp in spans {
+		sp_lo := span_byte
+		sp_hi := span_byte + len(sp.text)
+		span_byte = sp_hi
+		if sp_hi <= sub_lo {
+			continue
+		}
+		if sp_lo >= sub_hi {
+			break
+		}
+		seg_lo := max(sub_lo, sp_lo)
+		seg_hi := min(sub_hi, sp_hi)
+		if seg_hi > seg_lo {
+			fg := sp.fg if sp.fg.kind != .Default else default_fg
+			bg := sp.bg if sp.bg.kind != .Default else default_bg
+			cur_x^ += put_text_clipped(s, cur_x^, ty, line_str[seg_lo:seg_hi], fg, bg, base_style + sp.style, line_clip)
+		}
+	}
+	if span_byte < sub_hi {
+		rem_lo := max(sub_lo, span_byte)
+		if sub_hi > rem_lo {
+			cur_x^ += put_text_clipped(s, cur_x^, ty, line_str[rem_lo:sub_hi], default_fg, default_bg, base_style, line_clip)
+		}
+	}
 }
 
 // Renders a multi-line `text_area` node inside `render_layout`:
@@ -629,7 +913,6 @@ render_text_area_node :: proc(s: ^Screen, node: Layout_Node, paint: Paint_Spec, 
 		line_start, line_end := text_area_line_range(slot, doc_row)
 		line_str := string(raw[line_start:line_end])
 		vis := slice_utf8_by_display_width(line_str, slot.scroll_col, text_w)
-		vis_str := vis.text
 		abs_vis_start := line_start + vis.start_byte
 		abs_vis_end   := line_start + vis.end_byte
 
@@ -639,18 +922,32 @@ render_text_area_node :: proc(s: ^Screen, node: Layout_Node, paint: Paint_Spec, 
 			cur_x += 1
 		}
 
+		// Optional syntax highlighting spans for the current line
+		var_line_spans: [dynamic]Styled_Span
+		if slot.highlighter != nil || slot.syntax_mode != .None {
+			var_line_spans = make([dynamic]Styled_Span, 0, 16, context.temp_allocator)
+			if slot.highlighter != nil {
+				slot.highlighter(line_str, doc_row, &var_line_spans, paint.fg, paint.bg, slot.highlight_data)
+			} else if slot.syntax_mode == .Odin {
+				highlight_odin_line(line_str, doc_row, &var_line_spans, paint.fg, paint.bg, slot.highlight_data)
+			}
+		}
+
+		vis_lo := vis.start_byte
+		vis_hi := vis.end_byte
+
 		if has_sel && sel_lo < line_end + 1 && sel_hi > line_start {
 			// Line has active selection overlap
-			ov_lo := clamp(sel_lo, abs_vis_start, abs_vis_end) - abs_vis_start
-			ov_hi := clamp(sel_hi, abs_vis_start, abs_vis_end) - abs_vis_start
-			if ov_lo > 0 {
-				cur_x += put_text_clipped(s, cur_x, ty, vis_str[:ov_lo], paint.fg, paint.bg, paint.style, line_clip)
+			ov_lo := clamp(sel_lo, abs_vis_start, abs_vis_end) - line_start
+			ov_hi := clamp(sel_hi, abs_vis_start, abs_vis_end) - line_start
+			if ov_lo > vis_lo {
+				render_text_area_range_with_spans(s, &cur_x, ty, line_str, vis_lo, ov_lo, var_line_spans[:], paint.fg, paint.bg, paint.style, line_clip)
 			}
 			if ov_hi > ov_lo {
-				cur_x += put_text_clipped(s, cur_x, ty, vis_str[ov_lo:ov_hi], paint.fg, paint.bg, paint.style + {.Reverse}, line_clip)
+				render_text_area_range_with_spans(s, &cur_x, ty, line_str, ov_lo, ov_hi, var_line_spans[:], paint.fg, paint.bg, paint.style + {.Reverse}, line_clip)
 			}
-			if ov_hi < len(vis_str) {
-				cur_x += put_text_clipped(s, cur_x, ty, vis_str[ov_hi:], paint.fg, paint.bg, paint.style, line_clip)
+			if ov_hi < vis_hi {
+				render_text_area_range_with_spans(s, &cur_x, ty, line_str, ov_hi, vis_hi, var_line_spans[:], paint.fg, paint.bg, paint.style, line_clip)
 			}
 			// Highlight trailing newline marker when selection spans past this line's `\n`
 			if int(doc_row) + 1 < slot.line_count && abs_vis_end == line_end && sel_lo <= line_end && sel_hi > line_end && cur_x < text_x + text_w {
@@ -662,8 +959,8 @@ render_text_area_node :: proc(s: ^Screen, node: Layout_Node, paint: Paint_Spec, 
 					width = 1,
 				}, line_clip)
 			}
-		} else if len(vis_str) > 0 {
-			put_text_clipped(s, cur_x, ty, vis_str, paint.fg, paint.bg, paint.style, line_clip)
+		} else if vis_hi > vis_lo {
+			render_text_area_range_with_spans(s, &cur_x, ty, line_str, vis_lo, vis_hi, var_line_spans[:], paint.fg, paint.bg, paint.style, line_clip)
 		}
 	}
 

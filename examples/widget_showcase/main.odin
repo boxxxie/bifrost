@@ -413,6 +413,7 @@ build_showcase_ui :: proc(app: ^Showcase_App, out_tree_slice: ^bifrost.Tree_Slic
 						two_stage         = true,
 						show_line_numbers = true,
 						tab_width         = 4,
+						syntax_mode       = .Odin,
 						focus_flags       = {.Default_Focus},
 					})
 
