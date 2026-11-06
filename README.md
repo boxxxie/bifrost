@@ -21,6 +21,11 @@ An immediate-mode, actor-driven Terminal User Interface (TUI) framework for [Odi
   - Virtualized `ui_virtual_list` and `ui_virtual_table` rendering 100,000+ `xitdb` rows in $O(1)$ layout nodes with vertical (`offset`) and horizontal (`offset_x`) scrolling, mouse click column selection, and z-aware mouse-wheel bubbling.
   - Byte-exact UTF-8 `ui_text_input` with visual selection (`Shift+Left/Right/Home/End`), zero-CGO OSC 52 terminal clipboard copy/cut (`Ctrl+C`/`Ctrl+X`), Telescope-style `linked_list_id` forwarding, and cached `Xitdb_Filter`.
   - Interactive 1-cell `ui_splitter` dividers and a reusable `Ctrl+P` / `M-x` fuzzy `ui_command_palette`.
+- **Multi-Line Editor, Collapsible Tree, Focus-Scoped Tabs & Braille/Sparkline Data-Viz (`text_area.odin`, `tree.odin`, `tabs.odin`, `canvas.odin`):**
+  - **Multi-Line UTF-8 Editor (`ui_text_area`):** 2D caret navigation with sticky `preferred_col`, optional dynamic line-number gutter, `Shift+Arrow`/`Ctrl+A` multi-line selection, `Ctrl+C`/`Ctrl+X`/`Ctrl+V` + bracketed paste + OSC 52 clipboard (`flush_osc52_clipboard`), and two-stage `.Navigation`/`.Editing` sub-modes.
+  - **Virtualized Collapsible Tree (`ui_tree`):** $O(\text{visible\_rows})$ layout node materialization over 10,000+ hierarchical nodes with box-drawing guides (`├─ `, `╰─ `, `│  `, `▾ `, `▸ `), `h`/`l` expand/collapse and parent-node jump, and `id_hash`-persistent branch state.
+  - **Focus-Scope-Integrated Tab Bar (`ui_tabs` / `ui_tab_bar`):** Per-tab `Focus_Scope` isolation (`<id>_body_<i>`) with automatic Deep History ($H^*$) restoration across `[` / `]`, `Alt+1..9`, header `h`/`l`, and mouse clicks.
+  - **Unicode Braille Canvas & Sparklines (`ui_canvas` / `ui_sparkline`):** ISO/TR 11548-1 $2 \times 4$ sub-cell Braille dot-matrix canvas (`U+2800..U+28FF`) with integer Bresenham lines, rects, and auto-scaled time-series polylines, plus 8-level vertical block sparklines (`▁▂▃▄▅▆▇█`).
 
 ---
 
@@ -33,8 +38,8 @@ odin test bifrost -vet -strict-style -vet-packages:bifrost
 # AST keymap code generator tests
 odin test bifrost/codegen -vet -strict-style
 
-# 4-layer ATDD executable specifications (76 total tests across unit + ATDD suites)
-odin test tests -vet -strict-style -vet-packages:bifrost,bifrost_tests
+# 4-layer ATDD executable specifications (51 scenario tests + 41 package unit tests)
+odin test tests -custom-attribute:scenario -vet -strict-style -vet-packages:bifrost,bifrost_tests
 
 # Standalone AST keymap code generator CLI
 odin run tools/bifrost_gen -- <target_dir>
@@ -66,6 +71,10 @@ odin run examples/xitdb_inspector -- --live-tty
 # 5. Interactive Keymap, Which-Key & Clipboard Workbench (Vim/Helix/Emacs modes, Which-Key popup, N-count prefix/suffix/C-u, 2D table scroll, OSC 52, live rebind + xitdb persistence)
 odin run examples/keymap_workbench -vet -strict-style -vet-packages:bifrost,main
 odin run examples/keymap_workbench -- --live-tty
+
+# 6. Core Widget Suite Showcase — Tracks 11-14 (Multi-line `ui_text_area`, virtualized `ui_tree`, `H*` focus-scoped `ui_tabs`, and 2x4 Braille `ui_canvas` + 8-level `ui_sparkline`)
+odin run examples/widget_showcase -vet -strict-style -vet-packages:bifrost,main
+odin run examples/widget_showcase -- --live-tty
 ```
 
 ---
@@ -73,5 +82,6 @@ odin run examples/keymap_workbench -- --live-tty
 ## Conductor Tracks & Documentation
 
 - **Master Track Index:** [`conductor/tracks.md`](conductor/tracks.md)
+- **Core Widget Suite Guide (Tracks 11–14: `ui_text_area`, `ui_tree`, `ui_tabs`, `ui_canvas`, `ui_sparkline`):** [`docs/WIDGETS_GUIDE.md`](docs/WIDGETS_GUIDE.md)
 - **Navigation, Focus Scopes & Key-Chord DSL Guide:** [`docs/NAVIGATION_AND_DSL_GUIDE.md`](docs/NAVIGATION_AND_DSL_GUIDE.md)
 - **Core Actor-Driven TUI Blueprint:** [`conductor/tracks/actor_xitdb_tui_20261103/building_an_actor_driven_odin_tui.md`](conductor/tracks/actor_xitdb_tui_20261103/building_an_actor_driven_odin_tui.md)

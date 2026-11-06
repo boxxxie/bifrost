@@ -42,3 +42,9 @@ An immediate-mode, actor-driven Terminal User Interface (TUI) engine for Odin th
 
 7. **Sleipnir Actor Runtime, Action Sinks & `xitdb` Workspace Persistence (`ui_coordinator.odin`, `ui_actions_effects.odin`, `workspace_persistence.odin`, `terminal.odin`, `ansi_parser.odin`):**
    - Single-writer UI coordinator actor integrated with `sleipnir` (`package actor`) and `xitdb` (`package xitdb`), typed actor command routing (`bind_action_actor_sink`), declarative `UI_Effect` side effects, and persistent workspace layout/split/focus/keymap serialization (`save_workspace_state` / `load_workspace_state`).
+
+8. **Core Widget Suite — Tracks 11–14 (`text_area.odin`, `tree.odin`, `tabs.odin`, `canvas.odin`):**
+   - **Multi-Line UTF-8 Text Editor (`ui_text_area`):** 2D caret navigation with sticky `preferred_col`, optional dynamic line-number gutter, `Shift+Arrow`/`Ctrl+A` multi-line selection, `Ctrl+C`/`Ctrl+X`/`Ctrl+V` + bracketed paste + OSC 52 clipboard (`flush_osc52_clipboard`), and two-stage `.Navigation`/`.Editing` sub-modes.
+   - **Virtualized Collapsible Tree (`ui_tree`):** $O(\text{visible\_rows})$ layout node materialization over 10,000+ hierarchical nodes with box-drawing guides (`├─ `, `╰─ `, `│  `, `▾ `, `▸ `), `h`/`l` expand/collapse and parent-node jump, and `id_hash`-persistent branch state.
+   - **Focus-Scope-Integrated Tab Bar (`ui_tabs` / `ui_tab_bar`):** Per-tab `Focus_Scope` isolation (`<id>_body_<i>`) with automatic Deep History ($H^*$) restoration across `[` / `]`, `Alt+1..9`, header `h`/`l`, and mouse clicks.
+   - **Unicode Braille Canvas & Sparklines (`ui_canvas` / `ui_sparkline`):** ISO/TR 11548-1 $2 \times 4$ sub-cell Braille dot-matrix canvas (`U+2800..U+28FF`) with integer Bresenham lines, rects, and auto-scaled time-series polylines, plus 8-level vertical block sparklines (`▁▂▃▄▅▆▇█`).

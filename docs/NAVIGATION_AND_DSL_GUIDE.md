@@ -465,3 +465,10 @@ odin run tools/bifrost_gen -- --atdd tests
 odin test tests -custom-attribute:scenario
 ```
 
+---
+
+## 10. Core Widget Suite Integration (`ui_text_area`, `ui_tree`, `ui_tabs`, `ui_canvas`)
+
+For full documentation on the four Track 11–14 widgets and how they integrate with `.Navigation` / `.Editing` sub-modes, `Focus_Scope` Deep History ($H^*$), and virtualized viewports, see [`docs/WIDGETS_GUIDE.md`](WIDGETS_GUIDE.md).
+
+
