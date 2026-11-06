@@ -1,31 +1,119 @@
 # Bifrost (`package bifrost`)
 
-An immediate-mode, actor-driven Terminal User Interface (TUI) framework for [Odin](https://odin-lang.org/), designed to bridge [**Sleipnir (`package actor`)**](deps/sleipnir) and [**xitdb (`package xitdb`)**](deps/xitdb).
+An immediate-mode, actor-driven Terminal User Interface (TUI) framework for [Odin](https://odin-lang.org/), engineered to bridge [**Sleipnir (`package actor`)**](deps/sleipnir) lock-free actors and [**xitdb (`package xitdb`)**](deps/xitdb) immutable persistent databases.
+
+Bifrost combines a Clay-inspired multi-pass topological Flexbox layout engine, Harel statechart focus scopes with Shallow ($H$) and Deep ($H^*$) history, 2D spatial cone navigation, multi-style modal keymaps (**Vim**, **Helix**, **Emacs**), and zero-allocation widget state slots into a single cohesive package.
 
 ---
 
-## Architectural Highlights
+## Key Features & Architecture
 
-- **Subsystem Actor Concurrency (`ui_coordinator.odin`, `ui_actions_effects.odin`, `terminal.odin`):** Dedicated input, timer, and background worker actors communicate via lock-free `sleipnir` mailboxes with a single-writer UI coordinator actor, typed actor command sinks (`bind_action_actor_sink`), and declarative one-shot side effects (`UI_Effect`).
-- **Zero-Copy Persistent State & Workspace Persistence (`xitdb_bridge.odin`, `workspace_persistence.odin`):** Worker actors commit transactions to `xitdb` and send lightweight $O(1)$ moment indices (`i64`) to the UI actor, which slices virtualized viewports (`Linked_Array_List`, `Sorted_Map`, `Array_List`) directly on `context.temp_allocator` and persists workspace layout, split ratios, focus history, and user keymap overrides (`save_workspace_state` / `load_workspace_state`).
-- **Clay-Style Two-Pass Topological Layout (`layout.odin`):** `Fit` (shrink-wrap), `Grow` (weighted flex with `min`/`max` freeze clamping and exact integer remainder distribution), `Fixed`, and out-of-flow `z_layer` overlays in two linear array passes with zero recursion.
-- **Notcurses-Inspired Z-Layers & 50% RGB Backdrop Dimming (`renderer.odin`):** Inline `ui_modal` and floating overlays with automatic in-place 50% RGB bit-shift dimming (`Dim_Screen`, `Dim_Rect`) and DEC Mode 2026 synchronized ANSI diff output (`\x1b[?2026h ... \x1b[?2026l`).
-- **Hierarchical Focus Scope Tree & 2D Spatial Navigation (`focus_scope.odin`, `spatial_nav.odin`, `input.odin`):**
-  - Reverse `z_order` mouse hit-testing, modal input capture, Harel statechart shallow/deep focus history (`H` / `H*`), and two-stage `.Navigation` vs. `.Editing` sub-modes (`Enter`/`i` to edit, `Esc` to exit to scope navigation).
-  - 2D directional navigation (`Left`/`Right`/`Up`/`Down`) using orthogonal projection-overlap cone scoring, bottom-up scope boundary bubbling, and explicit `nav_overrides` (`Node_Nav_Override`) for irregular HUDs.
-- **Declarative Key-Chord Engine, Multi-Style Modal Editing & AST Codegen (`keymap.odin`, `status_bars.odin`, `bifrost/codegen`):**
-  - 1- and 2-step key chords (`g g`, `C-x C-f`, `<leader> f`), transient sub-modes (`.Resize`), compile-time + runtime chord conflict detection, and zero-overhead FNV-1a dispatch tables generated via struct tags (`tools/bifrost_gen`).
-  - Live runtime switching (`set_keymap_style`, `<F2>` cycle or `<F3>`/`<F4>`/`<F5>`) between **Vim** (`h/j/k/l`, `gg`/`G`, `5j` prefix counts), **Helix** (`h/j/k/l`, `gg`/`ge`, `j5` post-fix repeat counts), and **Emacs** (`C-n`/`C-p`/`C-f`/`C-b`, `M-<`/`M->`, `C-v`/`M-v`, `C-u` universal argument $4^n$ multiplier, and `M-x` command palette).
-  - Auto-populating Which-Key floating popup (`ui_which_key_overlay`) on pending chord prefixes, plus contextual focus breadcrumb (`ui_focus_breadcrumb_bar`) and key hint bars (`ui_key_hint_bar`).
-- **Virtualized 2D Viewports, UTF-8 Selection, OSC 52 Clipboard & Command Palette (`scroll.odin`, `text_input.odin`, `splitter.odin`, `command_palette.odin`):**
-  - Virtualized `ui_virtual_list` and `ui_virtual_table` rendering 100,000+ `xitdb` rows in $O(1)$ layout nodes with vertical (`offset`) and horizontal (`offset_x`) scrolling, mouse click column selection, and z-aware mouse-wheel bubbling.
-  - Byte-exact UTF-8 `ui_text_input` with visual selection (`Shift+Left/Right/Home/End`), zero-CGO OSC 52 terminal clipboard copy/cut (`Ctrl+C`/`Ctrl+X`), Telescope-style `linked_list_id` forwarding, and cached `Xitdb_Filter`.
-  - Interactive 1-cell `ui_splitter` dividers and a reusable `Ctrl+P` / `M-x` fuzzy `ui_command_palette`.
-- **Multi-Line Editor, Collapsible Tree, Focus-Scoped Tabs & Braille/Sparkline Data-Viz (`text_area.odin`, `tree.odin`, `tabs.odin`, `canvas.odin`):**
-  - **Multi-Line UTF-8 Editor (`ui_text_area`):** 2D caret navigation with sticky `preferred_col`, optional dynamic line-number gutter, `Shift+Arrow`/`Ctrl+A` multi-line selection, `Ctrl+C`/`Ctrl+X`/`Ctrl+V` + bracketed paste + OSC 52 clipboard (`flush_osc52_clipboard`), and two-stage `.Navigation`/`.Editing` sub-modes.
-  - **Virtualized Collapsible Tree (`ui_tree`):** $O(\text{visible\_rows})$ layout node materialization over 10,000+ hierarchical nodes with box-drawing guides (`├─ `, `╰─ `, `│  `, `▾ `, `▸ `), `h`/`l` expand/collapse and parent-node jump, and `id_hash`-persistent branch state.
-  - **Focus-Scope-Integrated Tab Bar (`ui_tabs` / `ui_tab_bar`):** Per-tab `Focus_Scope` isolation (`<id>_body_<i>`) with automatic Deep History ($H^*$) restoration across `[` / `]`, `Alt+1..9`, header `h`/`l`, and mouse clicks.
-  - **Unicode Braille Canvas & Sparklines (`ui_canvas` / `ui_sparkline`):** ISO/TR 11548-1 $2 \times 4$ sub-cell Braille dot-matrix canvas (`U+2800..U+28FF`) with integer Bresenham lines, rects, and auto-scaled time-series polylines, plus 8-level vertical block sparklines (`▁▂▃▄▅▆▇█`).
+* **Single-Writer Actor Concurrency (`ui_coordinator.odin`, `ui_actions_effects.odin`, `terminal.odin`):**
+  * Dedicated terminal input, timer, and background worker actors communicate with a single-owner `UI_Coordinator_State` actor over lock-free Vyukov MPSC and sharded SPSC mailboxes.
+  * Burst coalescing drains up to `DEFAULT_MAX_COALESCE_BATCH` ($2048$) queued messages before executing a single layout + render pass.
+  * Declarative action sinks (`bind_actor_action`, `on_ui_action`, `bind_button_action`) and pure terminal side-effects (`UI_Side_Effect`: OSC 52 clipboard, OSC 2 window title, DECSCUSR cursor shape, focus requests, and Bubble-Tea-style quit filters).
+* **Zero-Copy Persistent State & Workspace Snapshots (`xitdb_bridge.odin`, `workspace_persistence.odin`):**
+  * Background `Xitdb_Worker_State` actors commit transactions to `xitdb` and send lightweight $O(1)$ `UI_Msg_Commit_Notification` messages containing the new `moment_idx`.
+  * The UI actor slices virtualized viewports (`Array_List`, `Linked_Array_List`, `Sorted_Map`, `Counted_Hash_Map`) in $O(\log_{16} N)$ time directly onto `context.temp_allocator`.
+  * Built-in `save_ui_workspace_to_xitdb` / `load_ui_workspace_from_xitdb` persists splitter sizes, $H$/$H^*$ scope memory, active keymap style, and custom keybinding overrides directly inside `xitdb`.
+* **Clay-Inspired Multi-Pass Topological Layout (`layout.odin`):**
+  * Supports `Fit` (`min`, `max`), `Grow` (water-filling and weighted flex with `min`/`max` freeze clamping and exact integer remainder distribution), `Fixed`, `Percent`, word/newline text wrapping, and out-of-flow 9-point anchored `z_layer` overlays in linear array passes with zero recursion.
+* **Double-Buffered Cell Renderer & 50% RGB Backdrop Dimming (`renderer.odin`):**
+  * Automatic wide-glyph (CJK / Emoji 2-column cell) split healing at clip and overwrite boundaries.
+  * 4-bit direction mask box-drawing junction merging (`surface_merge_box_cell`: `─` + `│` $\rightarrow$ `┼`, `┬`, `┴`, `├`, `┤`).
+  * In-place 50% RGB bit-shift and 3-band ANSI-256 backdrop dimming (`.Dim_Screen`, `.Dim_Rect`) and minimal run-length ANSI diffing wrapped in DEC Mode 2026 Synchronized Output (`\x1b[?2026h ... \x1b[?2026l`).
+* **Embedded Harel Statechart Focus & 2D Spatial Navigation (`focus_scope.odin`, `spatial_nav.odin`, `input.odin`):**
+  * Hierarchical `ui_scope` containers with automatic Shallow ($H$) and Deep ($H^*$) focus history, `.Trap_Focus` modal shields with LIFO focus restoration, and non-modal floating window MRU $z$-promotion.
+  * Integer-only 2D directional cone scoring (`Left`/`Right`/`Up`/`Down`) with sticky orthogonal lane memory (`preferred_nav_pos`), `.Loop_Spatial` ring wrapping, `.Wrap_Spatial` reading-order grid wrapping, explicit `nav_overrides` portals, and same-frame ($0$-lag) `scroll_node_into_view`.
+* **Declarative Key-Chord Engine, Multi-Style Modal Editing & AST Codegen (`keymap.odin`, `tools/bifrost_gen`):**
+  * 1- and 2-step key chords (`g g`, `<C-x> <C-f>`, `q|<C-q>`) with prefix timeout fallback, scope wildcards (`scope=col_*`), transient sub-modes (`Splitter_Submode.Resize`), and action guards (`.Enabled`, `.Disabled_Swallow`, `.Disabled_Bubble`).
+  * Live runtime switching (`set_keymap_style`, `cycle_keymap_style`) between **Vim** (prefix counts `5j`), **Helix** (postfix counts `j5`), and **Emacs** (`C-n`/`C-p`/`C-f`/`C-b`, `C-u` universal argument $4^n$, `<M-x>` palette).
+
+---
+
+## Widget Catalog (`docs/widget/`)
+
+Every widget is zero-allocation in steady state (backed by fixed-capacity LRU slots on `Input_State` and per-frame arenas on `context.temp_allocator`). Click any widget below for its full API reference, keyboard/mouse table, and examples:
+
+| Widget / Component | Source File | Description | Documentation |
+| :--- | :--- | :--- | :--- |
+| **`container`, `leaf`, `ui_scope`, `ui_label`, `ui_button`, `ui_modal`** | `layout.odin`, `focus_scope.odin`, `renderer.odin`, `input.odin` | Core layout containers, Harel focus scopes ($H$/$H^*$), labels, interactive buttons, and $z$-layered modals with 50% RGB backdrop dimming. | [`docs/widget/primitives_and_scopes.md`](docs/widget/primitives_and_scopes.md) |
+| **`ui_text_input`** | `text_input.odin` | Single-line UTF-8 grapheme-aware input with `.Auto_Edit`, `two_stage`, `.Scope_Text_Sink`, `linked_list_id` forwarding, OSC 52 copy/cut, and `Xitdb_Filter`. | [`docs/widget/text_input.md`](docs/widget/text_input.md) |
+| **`ui_text_area`** | `text_area.odin` | Multi-line UTF-8 editor with sticky `preferred_col`, dynamic line-number gutter, 2D selection, OSC 52 clipboard, and built-in **Odin** / **CUE** syntax highlighting. | [`docs/widget/text_area.md`](docs/widget/text_area.md) |
+| **`ui_virtual_list` & 2D Table Solver** | `scroll.odin`, `xitdb_bridge.odin` | $O(1)$ virtualized viewport for $100,000+$ rows, 2D `(row, col)` navigation, monotonic high-water-mark column solver (`resolve_table_columns`), and 64-bit proportional scrollbar. | [`docs/widget/virtual_list_and_table.md`](docs/widget/virtual_list_and_table.md) |
+| **`ui_tree`** | `tree.odin` | Virtualized collapsible tree over $10,000+$ nodes with box-drawing guides (`├─`, `╰─`, `│`, `▾`, `▸`), `h`/`l` expand/collapse & parent jump, and `id_hash`-persistent state. | [`docs/widget/tree.md`](docs/widget/tree.md) |
+| **`ui_tabs` & `ui_tab_bar`** | `tabs.odin` | Focus-scope-integrated tab bar and container with per-tab `<id>_body_<i>` Deep History ($H^*$) restoration, `[` / `]`, `Alt+1..9`, and mouse switching. | [`docs/widget/tabs.md`](docs/widget/tabs.md) |
+| **`ui_splitter`** | `splitter.odin` | Interactive 1-cell horizontal/vertical pane divider supporting mouse drag, middle-click reset, keyboard `[RESIZE]` sub-mode, and same-frame rect reflow. | [`docs/widget/splitter.md`](docs/widget/splitter.md) |
+| **`ui_command_palette`** | `command_palette.odin` | Floating `Ctrl+P` / `M-x` fuzzy command launcher (`z_layer = 30`) with multi-token subsequence scoring and automatic shortcut badge discovery. | [`docs/widget/command_palette.md`](docs/widget/command_palette.md) |
+| **`ui_focus_breadcrumb_bar`, `ui_key_hint_bar`, `ui_which_key_overlay`** | `status_bars.odin` | Zero-lag contextual status bars displaying the live focus path, mode badges (`[EDIT]`, `[RESIZE]`, `[COUNT]`, `[CHORD]`), active key hints, and floating Which-Key popup. | [`docs/widget/status_bars_and_which_key.md`](docs/widget/status_bars_and_which_key.md) |
+| **`ui_canvas` & `ui_sparkline`** | `canvas.odin` | ISO/TR 11548-1 $2 \times 4$ sub-cell Unicode Braille canvas (`U+2800..U+28FF`) with integer Bresenham lines/rects/polylines, plus 8-level vertical block sparklines (`▁▂▃▄▅▆▇█`). | [`docs/widget/canvas_and_sparkline.md`](docs/widget/canvas_and_sparkline.md) |
+
+---
+
+## Quick Start: Immediate-Mode Frame Lifecycle
+
+Bifrost can be driven either via the actor-based `UI_Coordinator_State` (`spawn_ui_coordinator`) or directly in a synchronous immediate-mode loop:
+
+```odin
+package main
+
+import "core:os"
+import "core:strings"
+import "bifrost"
+
+main :: proc() {
+	scr: bifrost.Screen
+	ctx: bifrost.Layout_Context
+	inp: bifrost.Input_State
+	store: bifrost.Widget_State_Store
+
+	_ = bifrost.screen_init(&scr, 80, 24)
+	defer bifrost.screen_destroy(&scr)
+	_ = bifrost.state_store_init(&store)
+	defer bifrost.state_store_destroy(&store)
+
+	ansi_out := strings.builder_make()
+	defer strings.builder_destroy(&ansi_out)
+
+	// 1. Begin Frame & Layout Pass
+	bifrost.state_store_begin_frame(&store)
+	bifrost.begin_frame(&scr, bifrost.rgb(22, 26, 34))
+	bifrost.begin_layout(&ctx, scr.width, scr.height)
+
+	if bifrost.ui_scope(&ctx, &scr, "root", {
+		dir     = .Column,
+		width   = bifrost.fixed(scr.width),
+		height  = bifrost.fixed(scr.height),
+		padding = bifrost.pad_all(1),
+		gap     = 1,
+		border  = .Rounded,
+		title   = "Bifrost Quick Start",
+	}) {
+		bifrost.ui_text_input(&ctx, &scr, &inp, "search", {
+			placeholder = "Type to search...",
+			border      = .Plain,
+		})
+		bifrost.ui_button(&ctx, &scr, "submit_btn", {
+			label       = "Run Query",
+			focus_flags = {.Default_Focus},
+		})
+		bifrost.ui_key_hint_bar(&ctx, &scr, &inp, "hints")
+	}
+
+	bifrost.end_layout(&ctx)
+
+	// 2. Resolve Input, Sync State & Rasterize to Cell Buffer
+	bifrost.resolve_input(&inp, &ctx)
+	bifrost.state_store_sync_from_layout(&store, &ctx, &inp)
+	bifrost.apply_input_highlights(&scr, &ctx, &inp)
+	bifrost.render_layout(&scr, &ctx)
+
+	// 3. Emit Minimal Synchronized ANSI Diff + OSC 52 Clipboard
+	_ = bifrost.screen_diff_ansi(&scr, &ansi_out)
+	_ = bifrost.flush_osc52_clipboard(&inp, &ansi_out)
+	_, _ = os.write_string(os.stdout, strings.to_string(ansi_out))
+}
+```
 
 ---
 
@@ -35,53 +123,65 @@ An immediate-mode, actor-driven Terminal User Interface (TUI) framework for [Odi
 # Unit & verification suites (layout, renderer, focus scopes, 2D spatial nav, keymaps, widgets, actors)
 odin test bifrost -vet -strict-style -vet-packages:bifrost
 
-# AST keymap code generator tests
+# AST keymap & ATDD code generator tests
 odin test bifrost/codegen -vet -strict-style
 
-# 4-layer ATDD executable specifications (51 scenario tests + 41 package unit tests)
+# 4-layer ATDD executable specifications (@(scenario) + in-memory VT verification)
 odin test tests -custom-attribute:scenario -vet -strict-style -vet-packages:bifrost,bifrost_tests
 
-# Standalone AST keymap code generator CLI
+# Standalone AST keymap & ATDD code generator CLI
 odin run tools/bifrost_gen -- <target_dir>
 ```
 
 ---
 
-## Example TUIs (`examples/`)
+## Example Applications (`examples/`)
 
-Each example runs a deterministic, zero-leak headless verification walkthrough by default (printing the rendered Unicode frame buffer) and supports `--live-tty` for interactive raw-terminal execution:
+Every example runs a deterministic, zero-leak headless verification walkthrough by default (printing the rendered Unicode frame buffer) and supports `--live-tty` for interactive raw-terminal execution:
 
 ```bash
 # 1. Widget & Layout Gallery (Flexbox sizing, splitters, UTF-8 selection + OSC 52, 2D virtual table, Which-Key, Vim/Helix/Emacs styles)
 odin run examples/widget_gallery -vet -strict-style -vet-packages:bifrost,main
 odin run examples/widget_gallery -- --live-tty
 
-# 2. Kanban & Task Tracker (4-column focus scopes, F6 cycling, word-wrapped cards, xitdb time-travel undo/redo)
+# 2. Core Widget Suite Showcase — Tracks 11-14 (Multi-line Odin/CUE `ui_text_area`, virtualized `ui_tree`, H* `ui_tabs`, 2x4 Braille `ui_canvas` + `ui_sparkline`)
+odin run examples/widget_showcase -vet -strict-style -vet-packages:bifrost,main
+odin run examples/widget_showcase -- --live-tty
+
+# 3. Kanban & Task Tracker (4-column focus scopes, F6 cycling, word-wrapped cards, xitdb time-travel undo/redo)
 odin run examples/kanban_board -vet -strict-style -vet-packages:bifrost,main
 odin run examples/kanban_board -- --live-tty
 
-# 3. Actor-Driven Log & Metrics Monitor (Sleipnir producer actors streaming into xitdb, Datalog & moment diffs)
+# 4. Actor-Driven Log & Metrics Monitor (Sleipnir producer actors streaming into xitdb, Datalog & moment diffs)
 odin run examples/log_monitor -vet -strict-style -vet-packages:bifrost,main
 odin run examples/log_monitor -- --live-tty
 
-# 4. Sleipnir + xitdb Inspector (Time-travel database inspector with 1,000-message burst coalescing)
+# 5. Sleipnir + xitdb Inspector (Time-travel database inspector with 1,000-message burst coalescing)
 odin run examples/xitdb_inspector -vet -strict-style -vet-packages:bifrost,main
 odin run examples/xitdb_inspector -- --live-tty
 
-# 5. Interactive Keymap, Which-Key & Clipboard Workbench (Vim/Helix/Emacs modes, Which-Key popup, N-count prefix/suffix/C-u, 2D table scroll, OSC 52, live rebind + xitdb persistence)
+# 6. Interactive Keymap, Which-Key & Clipboard Workbench (Vim/Helix/Emacs modes, Which-Key popup, N-count prefix/suffix/C-u, live rebind + xitdb persistence)
 odin run examples/keymap_workbench -vet -strict-style -vet-packages:bifrost,main
 odin run examples/keymap_workbench -- --live-tty
-
-# 6. Core Widget Suite Showcase — Tracks 11-14 (Multi-line `ui_text_area`, virtualized `ui_tree`, `H*` focus-scoped `ui_tabs`, and 2x4 Braille `ui_canvas` + 8-level `ui_sparkline`)
-odin run examples/widget_showcase -vet -strict-style -vet-packages:bifrost,main
-odin run examples/widget_showcase -- --live-tty
 ```
 
 ---
 
-## Conductor Tracks & Documentation
+## Documentation Hub (`docs/`) & Conductor Tracks
 
-- **Master Track Index:** [`conductor/tracks.md`](conductor/tracks.md)
-- **Core Widget Suite Guide (Tracks 11–14: `ui_text_area`, `ui_tree`, `ui_tabs`, `ui_canvas`, `ui_sparkline`):** [`docs/WIDGETS_GUIDE.md`](docs/WIDGETS_GUIDE.md)
-- **Navigation, Focus Scopes & Key-Chord DSL Guide:** [`docs/NAVIGATION_AND_DSL_GUIDE.md`](docs/NAVIGATION_AND_DSL_GUIDE.md)
-- **Core Actor-Driven TUI Blueprint:** [`conductor/tracks/actor_xitdb_tui_20261103/building_an_actor_driven_odin_tui.md`](conductor/tracks/actor_xitdb_tui_20261103/building_an_actor_driven_odin_tui.md)
+* **Master Track Index:** [`conductor/tracks.md`](conductor/tracks.md)
+* **Core Actor-Driven TUI Blueprint:** [`conductor/tracks/actor_xitdb_tui_20261103/building_an_actor_driven_odin_tui.md`](conductor/tracks/actor_xitdb_tui_20261103/building_an_actor_driven_odin_tui.md)
+* **Documentation Index & Architecture:** [`docs/README.md`](docs/README.md) / [`docs/INDEX.md`](docs/INDEX.md)
+* **Navigation, Focus Scopes & Key-Chord DSL Guide:** [`docs/NAVIGATION_AND_DSL_GUIDE.md`](docs/NAVIGATION_AND_DSL_GUIDE.md)
+* **Core Widget Suite Overview (Tracks 11–14):** [`docs/WIDGETS_GUIDE.md`](docs/WIDGETS_GUIDE.md)
+* **Per-Widget Reference Guides (`docs/widget/`):**
+  * [`docs/widget/primitives_and_scopes.md`](docs/widget/primitives_and_scopes.md) — `container`, `leaf`, `ui_scope`, `ui_label`, `ui_button`, `ui_modal`
+  * [`docs/widget/text_input.md`](docs/widget/text_input.md) — `ui_text_input` & `Xitdb_Filter`
+  * [`docs/widget/text_area.md`](docs/widget/text_area.md) — `ui_text_area` (Odin & CUE syntax highlighting)
+  * [`docs/widget/virtual_list_and_table.md`](docs/widget/virtual_list_and_table.md) — `ui_virtual_list`, `resolve_table_columns`, & `xitdb_slice_viewport`
+  * [`docs/widget/tree.md`](docs/widget/tree.md) — `ui_tree`
+  * [`docs/widget/tabs.md`](docs/widget/tabs.md) — `ui_tabs` & `ui_tab_bar`
+  * [`docs/widget/splitter.md`](docs/widget/splitter.md) — `ui_splitter`
+  * [`docs/widget/command_palette.md`](docs/widget/command_palette.md) — `ui_command_palette`
+  * [`docs/widget/status_bars_and_which_key.md`](docs/widget/status_bars_and_which_key.md) — `ui_focus_breadcrumb_bar`, `ui_key_hint_bar`, & `ui_which_key_overlay`
+  * [`docs/widget/canvas_and_sparkline.md`](docs/widget/canvas_and_sparkline.md) — `ui_canvas` & `ui_sparkline`
