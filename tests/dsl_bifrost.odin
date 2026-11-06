@@ -1366,6 +1366,45 @@ then_tab_changed_is :: proc(s: ^Suite_Ctx, id: string, expected: bool, loc := #c
 	testing.expect_value(s.t, bifrost.was_tab_changed(&s.input, id), expected, loc = loc)
 }
 
+// =============================================================================
+// Layer 2: Domain-Specific Language (Track 14: Braille & Sparkline Canvas)
+// =============================================================================
+
+then_braille_dot_bit_is :: proc(
+	s: ^Suite_Ctx,
+	sub_x, sub_y: i32,
+	expected_bit: u8,
+	loc := #caller_location,
+) {
+	actual := bifrost.braille_dot_bit(sub_x, sub_y)
+	testing.expect_value(s.t, actual, expected_bit, loc = loc)
+	testing.expect_value(s.t, bifrost.braille_rune_from_mask(actual), rune(0x2800 + u32(expected_bit)), loc = loc)
+}
+
+then_canvas_point_is :: proc(
+	s: ^Suite_Ctx,
+	canvas: ^bifrost.Braille_Canvas,
+	px, py: i32,
+	expected_set: bool,
+	loc := #caller_location,
+) {
+	testing.expect_value(s.t, bifrost.canvas_get_point(canvas, px, py), expected_set, loc = loc)
+}
+
+then_canvas_cell_mask_is :: proc(
+	s: ^Suite_Ctx,
+	canvas: ^bifrost.Braille_Canvas,
+	cx, cy: i32,
+	expected_mask: u8,
+	loc := #caller_location,
+) {
+	idx := int(cy * canvas.cell_w + cx)
+	testing.expect(s.t, idx >= 0 && idx < len(canvas.masks), "Expected canvas cell index in bounds", loc = loc)
+	if idx >= 0 && idx < len(canvas.masks) {
+		testing.expect_value(s.t, canvas.masks[idx], expected_mask, loc = loc)
+	}
+}
+
 then_cell_style_has :: proc(
 	s: ^Suite_Ctx,
 	x, y: i32,
@@ -1380,4 +1419,23 @@ then_cell_style_has :: proc(
 		testing.expect_value(s.t, actual, expected_present, loc = loc)
 	}
 }
+
+then_row_runes_at_are :: proc(
+	s: ^Suite_Ctx,
+	x, y: i32,
+	expected_text: string,
+	loc := #caller_location,
+) {
+	cur_x := x
+	for expected_ch in expected_text {
+		idx := int(y * s.screen.width + cur_x)
+		testing.expect(s.t, idx >= 0 && idx < len(s.screen.back), "Expected screen cell in bounds", loc = loc)
+		if idx >= 0 && idx < len(s.screen.back) {
+			testing.expect_value(s.t, s.screen.back[idx].ch, expected_ch, loc = loc)
+		}
+		cur_x += 1
+	}
+}
+
+
 

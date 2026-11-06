@@ -127,15 +127,16 @@ ANSI_16_DARK_TO_256 := [8]u8{
 }
 
 Screen :: struct {
-	width:        i32,
-	height:       i32,
-	front:        []Cell,
-	back:         []Cell,
-	paints:       map[u64]Paint_Spec,
-	text_areas:   map[u64]^Text_Area_State,
-	dynamic_bars: [dynamic]Dynamic_Bar_Entry,
-	first_frame:  bool,
-	allocator:    mem.Allocator,
+	width:          i32,
+	height:         i32,
+	front:          []Cell,
+	back:           []Cell,
+	paints:         map[u64]Paint_Spec,
+	text_areas:     map[u64]^Text_Area_State,
+	dynamic_bars:   [dynamic]Dynamic_Bar_Entry,
+	canvas_entries: map[u64]Canvas_Render_Entry,
+	first_frame:    bool,
+	allocator:      mem.Allocator,
 }
 
 // =============================================================================
@@ -253,9 +254,10 @@ begin_frame :: proc(s: ^Screen, default_bg: Color = {}, temp_alloc := context.te
 	for i in 0 ..< len(s.back) {
 		s.back[i] = clear_cell
 	}
-	s.paints       = make(map[u64]Paint_Spec, 128, temp_alloc)
-	s.text_areas   = make(map[u64]^Text_Area_State, 8, temp_alloc)
-	s.dynamic_bars = make([dynamic]Dynamic_Bar_Entry, 0, 8, temp_alloc)
+	s.paints         = make(map[u64]Paint_Spec, 128, temp_alloc)
+	s.text_areas     = make(map[u64]^Text_Area_State, 8, temp_alloc)
+	s.dynamic_bars   = make([dynamic]Dynamic_Bar_Entry, 0, 8, temp_alloc)
+	s.canvas_entries = make(map[u64]Canvas_Render_Entry, 16, temp_alloc)
 }
 
 set_paint :: proc(s: ^Screen, id: string, spec: Paint_Spec) {
@@ -823,6 +825,10 @@ render_layout :: proc(s: ^Screen, ctx: ^Layout_Context, temp_alloc := context.te
 					ty := node.inner_rect.y + align_offset(node.inner_rect.h, 1, v_align)
 					draw_string_clipped(s, tx, ty, inner_clip, text_str, paint.fg, paint.bg, paint.style)
 				}
+			}
+
+			if c_entry, has_canvas := s.canvas_entries[node.id_hash]; has_canvas {
+				render_canvas_entry(s, node, paint, c_entry, temp_alloc)
 			}
 		}
 

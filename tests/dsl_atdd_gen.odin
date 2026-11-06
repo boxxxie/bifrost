@@ -206,7 +206,11 @@ Suite_Ctx_VTable :: struct {
 	upon_clicking_tab: proc(s: ^Suite_Ctx, id: string, tab_idx: int, loc := #caller_location),
 	then_active_tab_is: proc(s: ^Suite_Ctx, id: string, expected_tab: int, loc := #caller_location),
 	then_tab_changed_is: proc(s: ^Suite_Ctx, id: string, expected: bool, loc := #caller_location),
+	then_braille_dot_bit_is: proc(s: ^Suite_Ctx, sub_x: i32, sub_y: i32, expected_bit: u8, loc := #caller_location),
+	then_canvas_point_is: proc(s: ^Suite_Ctx, canvas: ^bifrost.Braille_Canvas, px: i32, py: i32, expected_set: bool, loc := #caller_location),
+	then_canvas_cell_mask_is: proc(s: ^Suite_Ctx, canvas: ^bifrost.Braille_Canvas, cx: i32, cy: i32, expected_mask: u8, loc := #caller_location),
 	then_cell_style_has: proc(s: ^Suite_Ctx, x: i32, y: i32, expected_flag: bifrost.Style_Flag, expected_present: bool, loc := #caller_location),
+	then_row_runes_at_are: proc(s: ^Suite_Ctx, x: i32, y: i32, expected_text: string, loc := #caller_location),
 }
 
 @(private)
@@ -344,7 +348,11 @@ _suite_ctx_vtable := Suite_Ctx_VTable{
 	upon_clicking_tab = upon_clicking_tab,
 	then_active_tab_is = then_active_tab_is,
 	then_tab_changed_is = then_tab_changed_is,
+	then_braille_dot_bit_is = then_braille_dot_bit_is,
+	then_canvas_point_is = then_canvas_point_is,
+	then_canvas_cell_mask_is = then_canvas_cell_mask_is,
 	then_cell_style_has = then_cell_style_has,
+	then_row_runes_at_are = then_row_runes_at_are,
 }
 
 Given_DSL :: struct {
@@ -545,7 +553,11 @@ Then_DSL :: struct {
 	vt_row_contains_text: proc(row: i32, needle: string, expected: bool = true, loc := #caller_location),
 	active_tab_is: proc(id: string, expected_tab: int, loc := #caller_location),
 	tab_changed_is: proc(id: string, expected: bool, loc := #caller_location),
+	braille_dot_bit_is: proc(sub_x: i32, sub_y: i32, expected_bit: u8, loc := #caller_location),
+	canvas_point_is: proc(canvas: ^bifrost.Braille_Canvas, px: i32, py: i32, expected_set: bool, loc := #caller_location),
+	canvas_cell_mask_is: proc(canvas: ^bifrost.Braille_Canvas, cx: i32, cy: i32, expected_mask: u8, loc := #caller_location),
 	cell_style_has: proc(x: i32, y: i32, expected_flag: bifrost.Style_Flag, expected_present: bool, loc := #caller_location),
+	row_runes_at_are: proc(x: i32, y: i32, expected_text: string, loc := #caller_location),
 }
 
 @(rodata)
@@ -631,7 +643,11 @@ then := Then_DSL{
 	vt_row_contains_text = then_vt_row_contains_text_ambient,
 	active_tab_is = then_active_tab_is_ambient,
 	tab_changed_is = then_tab_changed_is_ambient,
+	braille_dot_bit_is = then_braille_dot_bit_is_ambient,
+	canvas_point_is = then_canvas_point_is_ambient,
+	canvas_cell_mask_is = then_canvas_cell_mask_is_ambient,
 	cell_style_has = then_cell_style_has_ambient,
+	row_runes_at_are = then_row_runes_at_are_ambient,
 }
 
 // =============================================================================
@@ -1184,7 +1200,23 @@ then_tab_changed_is_ambient :: #force_inline proc(id: string, expected: bool, lo
 	then_tab_changed_is(current_scenario(loc), id, expected, loc)
 }
 
+then_braille_dot_bit_is_ambient :: #force_inline proc(sub_x: i32, sub_y: i32, expected_bit: u8, loc := #caller_location) {
+	then_braille_dot_bit_is(current_scenario(loc), sub_x, sub_y, expected_bit, loc)
+}
+
+then_canvas_point_is_ambient :: #force_inline proc(canvas: ^bifrost.Braille_Canvas, px: i32, py: i32, expected_set: bool, loc := #caller_location) {
+	then_canvas_point_is(current_scenario(loc), canvas, px, py, expected_set, loc)
+}
+
+then_canvas_cell_mask_is_ambient :: #force_inline proc(canvas: ^bifrost.Braille_Canvas, cx: i32, cy: i32, expected_mask: u8, loc := #caller_location) {
+	then_canvas_cell_mask_is(current_scenario(loc), canvas, cx, cy, expected_mask, loc)
+}
+
 then_cell_style_has_ambient :: #force_inline proc(x: i32, y: i32, expected_flag: bifrost.Style_Flag, expected_present: bool, loc := #caller_location) {
 	then_cell_style_has(current_scenario(loc), x, y, expected_flag, expected_present, loc)
+}
+
+then_row_runes_at_are_ambient :: #force_inline proc(x: i32, y: i32, expected_text: string, loc := #caller_location) {
+	then_row_runes_at_are(current_scenario(loc), x, y, expected_text, loc)
 }
 

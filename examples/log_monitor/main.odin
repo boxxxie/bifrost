@@ -339,6 +339,36 @@ render_log_monitor_frame :: proc(coord: ^bifrost.UI_Coordinator_State) {
 					fg     = bifrost.rgb(130, 230, 165),
 					bg     = bar_bg,
 				})
+
+				// Track 14: Live Vertical Block Sparkline (`▁▂▃▄▅▆▇█`) + Unicode Braille Telemetry Canvas (`U+2800..U+28FF`)
+				m_off := int(coord.active_moment_idx)
+				rps_samples := [16]int{
+					320 + m_off * 20, 380 + m_off * 20, 440 + m_off * 20, 510 + m_off * 20,
+					490 + m_off * 20, 620 + m_off * 20, 710 + m_off * 20, 680 + m_off * 20,
+					790 + m_off * 20, 860 + m_off * 20, 810 + m_off * 20, 920 + m_off * 20,
+					880 + m_off * 20, 960 + m_off * 20, 910 + m_off * 20, 990 + m_off * 20,
+				}
+				bifrost.ui_sparkline(&coord.layout_ctx, &coord.screen, "sidebar_sparkline", rps_samples[:], bifrost.Sparkline_Config{
+					width  = bifrost.grow(1),
+					height = bifrost.fixed(1),
+					fg     = bifrost.rgb(130, 230, 165),
+					bg     = bar_bg,
+				})
+
+				bifrost.ui_canvas(&coord.layout_ctx, &coord.screen, "sidebar_braille_chart", bifrost.Canvas_Config{
+					title     = "Braille p99",
+					width     = bifrost.grow(1),
+					height    = bifrost.fixed(4),
+					border    = .Rounded,
+					fg        = accent,
+					bg        = bar_bg,
+					border_fg = bifrost.rgb(75, 95, 125),
+					title_fg  = accent,
+					draw_fn   = proc(c: ^bifrost.Braille_Canvas, _: rawptr) {
+						p99_series := [8]f32{2.1, 3.4, 2.8, 5.2, 4.1, 6.8, 3.9, 2.4}
+						bifrost.canvas_draw_series(c, p99_series[:], 1.0, 8.0, bifrost.rgb(115, 195, 255))
+					},
+				})
 			}
 
 			bifrost.ui_splitter(&coord.layout_ctx, &coord.screen, &coord.input, "monitor_split", bifrost.Splitter_Config{
