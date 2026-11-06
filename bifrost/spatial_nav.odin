@@ -462,9 +462,14 @@ handle_spatial_nav_at_level :: proc(
 	is_tip := path_level == inp.focus_node_path_len - 1
 	count := clamp(inp.repeat_count, 1, 9999) if inp.repeat_count > 0 else i32(1)
 
-	// 1. O(1) Virtualized List / 2D Virtual Table (`virtual_total_rows > 0`) cursor stepping
+	// 1. O(1) Virtualized List / 2D Virtual Table / Collapsible Tree (`virtual_total_rows > 0`) cursor stepping
 	if node.config.virtual_total_rows > 0 && is_node_allowed(ctx, node_idx, capture_idx) {
 		slot := get_scroll_slot(inp, node.id_hash)
+		if t_slot := find_tree_slot(inp, node.id_hash); t_slot != nil {
+			if handled, res := handle_tree_spatial_nav(inp, ctx, node_idx, t_slot, slot, dir, count); handled {
+				return res
+			}
+		}
 		switch dir {
 		case .Up, .Down:
 			delta: i32 = (-1 if dir == .Up else +1) * count
@@ -733,14 +738,18 @@ scroll_container_by_page :: proc "contextless" (
 		switch cmd {
 		case .Page_Up:
 			move_virtual_selection(slot, -page)
+			sync_tree_selection_from_scroll(inp, node.id_hash, slot.selected_row)
 		case .Page_Down:
 			move_virtual_selection(slot, +page)
+			sync_tree_selection_from_scroll(inp, node.id_hash, slot.selected_row)
 		case .Home:
 			slot.selected_row = 0
+			sync_tree_selection_from_scroll(inp, node.id_hash, slot.selected_row)
 			apply_scroll_delta(inp, ctx, scroll_idx, -slot.max_offset - 1, false)
 			return .Consumed
 		case .End:
 			slot.selected_row = max(0, slot.total_rows - 1)
+			sync_tree_selection_from_scroll(inp, node.id_hash, slot.selected_row)
 			apply_scroll_delta(inp, ctx, scroll_idx, slot.max_offset + 1, false)
 			return .Consumed
 		}

@@ -1283,5 +1283,82 @@ then_cell_style_has :: proc(
 	}
 }
 
+// =============================================================================
+// Layer 2: Domain-Specific Language (Track 12: Virtualized Collapsible Tree)
+// =============================================================================
+
+then_tree_selection_is :: proc(
+	s: ^Suite_Ctx,
+	id: string,
+	expected_node_idx: i32,
+	expected_vis_row: i32,
+	loc := #caller_location,
+) {
+	testing.expect_value(s.t, bifrost.get_tree_selected_node(&s.input, id), expected_node_idx, loc = loc)
+	testing.expect_value(s.t, bifrost.get_tree_selected_vis_row(&s.input, id), expected_vis_row, loc = loc)
+}
+
+then_tree_node_expanded_is :: proc(
+	s: ^Suite_Ctx,
+	id: string,
+	node_idx: i32,
+	expected: bool,
+	loc := #caller_location,
+) {
+	testing.expect_value(s.t, bifrost.is_tree_node_expanded(&s.input, id, node_idx), expected, loc = loc)
+}
+
+then_tree_visible_count_is :: proc(
+	s: ^Suite_Ctx,
+	id: string,
+	expected_visible_rows: i32,
+	loc := #caller_location,
+) {
+	testing.expect_value(s.t, bifrost.get_tree_visible_row_count(&s.input, id), expected_visible_rows, loc = loc)
+}
+
+then_tree_activated_node_is :: proc(
+	s: ^Suite_Ctx,
+	id: string,
+	expected_node_idx: i32,
+	loc := #caller_location,
+) {
+	testing.expect_value(s.t, bifrost.get_tree_activated_node(&s.input, id), expected_node_idx, loc = loc)
+}
+
+then_vt_row_contains_text :: proc(
+	s: ^Suite_Ctx,
+	row: i32,
+	needle: string,
+	expected: bool = true,
+	loc := #caller_location,
+) {
+	w := int(s.vt_w)
+	h := int(s.vt_h)
+	r := int(row)
+	if r < 0 || r >= h {
+		testing.expectf(s.t, false, "Row %d out of VT bounds [0 ..< %d]", row, h, loc = loc)
+		return
+	}
+	b := strings.builder_make(0, w, context.temp_allocator)
+	for x := 0; x < w; x += 1 {
+		ch := s.vt_cells[r * w + x].ch
+		if ch != 0 {
+			strings.write_rune(&b, ch)
+		}
+	}
+	row_str := strings.to_string(b)
+	testing.expectf(
+		s.t,
+		strings.contains(row_str, needle) == expected,
+		"Row %d: expected contains(%q) == %v, got %q",
+		row,
+		needle,
+		expected,
+		row_str,
+		loc = loc,
+	)
+}
+
 
 

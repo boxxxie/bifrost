@@ -64,7 +64,7 @@ This file tracks all major tracks for the `bifrost` project. Each track has its 
 
 ---
 
-- [x] **Track 11: Multi-Line Text Editor (`bifrost/text_area.odin`)**
+- [ ] **Track 11: Multi-Line Text Editor (`bifrost/text_area.odin`)**
   *Link: [./tracks/multiline_text_area_20261106/](./tracks/multiline_text_area_20261106/)*
 
 ---

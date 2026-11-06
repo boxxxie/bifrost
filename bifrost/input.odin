@@ -348,6 +348,9 @@ Input_State :: struct {
 	active_splitter_id:  u64,
 	splitter_slots:      [MAX_SPLITTER_SLOTS]Splitter_Slot,
 
+	// Fixed-capacity virtualized collapsible tree slots
+	tree_slots:          [MAX_TREE_SLOTS]Tree_Slot,
+
 	// 3-tier scoped/global keybinding table & per-frame action dispatch
 	keybindings:           [MAX_KEYBINDINGS]Keybinding,
 	keybinding_count:      int,
@@ -788,6 +791,7 @@ resolve_input :: proc(inp: ^Input_State, ctx: ^Layout_Context, events: ..Input_E
 	inp.has_triggered_enum    = false
 	inp.last_disabled_reason  = ""
 	inp.drag_delta            = {0, 0}
+	reset_tree_per_frame_flags(inp)
 
 	if len(ctx.nodes) == 0 {
 		inp.focused_id          = 0
@@ -1201,10 +1205,16 @@ handle_key_event :: proc(inp: ^Input_State, ctx: ^Layout_Context, capture_idx: i
 						return
 					}
 				}
+				if handle_tree_activate_key(inp, ctx, node_idx) {
+					return
+				}
 				inp.activated_id = node.id_hash
 				return
 			}
 			if ev.code == .Space && eff_mods == {} && inp.editing_id == 0 {
+				if handle_tree_activate_key(inp, ctx, node_idx) {
+					return
+				}
 				inp.activated_id = node.id_hash
 				return
 			}
@@ -1415,10 +1425,13 @@ handle_mouse_event :: proc(inp: ^Input_State, ctx: ^Layout_Context, capture_idx:
 						handle_text_input_click(inp, ctx, hit_idx, ev.x)
 					}
 				}
-				// Virtual list / 2D virtual table click row & column selection
+				// Virtual list / 2D virtual table / collapsible tree click row & column selection
 				for v_curr := hit_idx; v_curr >= 0; v_curr = ctx.nodes[v_curr].parent_idx {
 					v_node := ctx.nodes[v_curr]
 					if v_node.config.virtual_total_rows > 0 && is_node_allowed(ctx, v_curr, capture_idx) {
+						if handle_tree_mouse_click(inp, ctx, v_curr, capture_idx, ev.y) {
+							break
+						}
 						slot := get_scroll_slot(inp, v_node.id_hash)
 						rel_y := ev.y - v_node.inner_rect.y
 						if rel_y >= 0 && rel_y < v_node.inner_rect.h {

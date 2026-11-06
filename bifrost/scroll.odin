@@ -875,6 +875,7 @@ handle_key_scroll :: proc "contextless" (
 	case .Up:
 		if is_virtual {
 			move_virtual_selection(slot, -1)
+			sync_tree_selection_from_scroll(inp, node.id_hash, slot.selected_row)
 			node.config.scroll_offset = slot.offset
 			inp.scrolled_id = node.id_hash
 		} else {
@@ -884,6 +885,7 @@ handle_key_scroll :: proc "contextless" (
 	case .Down:
 		if is_virtual {
 			move_virtual_selection(slot, +1)
+			sync_tree_selection_from_scroll(inp, node.id_hash, slot.selected_row)
 			node.config.scroll_offset = slot.offset
 			inp.scrolled_id = node.id_hash
 		} else {
@@ -893,6 +895,7 @@ handle_key_scroll :: proc "contextless" (
 	case .Page_Up:
 		if is_virtual {
 			move_virtual_selection(slot, -page)
+			sync_tree_selection_from_scroll(inp, node.id_hash, slot.selected_row)
 			node.config.scroll_offset = slot.offset
 			inp.scrolled_id = node.id_hash
 		} else {
@@ -902,6 +905,7 @@ handle_key_scroll :: proc "contextless" (
 	case .Page_Down:
 		if is_virtual {
 			move_virtual_selection(slot, +page)
+			sync_tree_selection_from_scroll(inp, node.id_hash, slot.selected_row)
 			node.config.scroll_offset = slot.offset
 			inp.scrolled_id = node.id_hash
 		} else {
@@ -911,12 +915,14 @@ handle_key_scroll :: proc "contextless" (
 	case .Home:
 		if is_virtual {
 			slot.selected_row = 0
+			sync_tree_selection_from_scroll(inp, node.id_hash, slot.selected_row)
 		}
 		apply_scroll_delta(inp, ctx, scroll_idx, -slot.max_offset - 1, false)
 		return true
 	case .End:
 		if is_virtual {
 			slot.selected_row = max(0, slot.total_rows - 1)
+			sync_tree_selection_from_scroll(inp, node.id_hash, slot.selected_row)
 		}
 		apply_scroll_delta(inp, ctx, scroll_idx, slot.max_offset + 1, false)
 		return true

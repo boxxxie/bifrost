@@ -198,6 +198,11 @@ Suite_Ctx_VTable :: struct {
 	then_clipboard_text_is: proc(s: ^Suite_Ctx, expected: string, expected_osc52: bool = true, loc := #caller_location),
 	then_osc52_flushed_is: proc(s: ^Suite_Ctx, expected_substr: string, loc := #caller_location),
 	then_cell_style_has: proc(s: ^Suite_Ctx, x: i32, y: i32, expected_flag: bifrost.Style_Flag, expected_present: bool, loc := #caller_location),
+	then_tree_selection_is: proc(s: ^Suite_Ctx, id: string, expected_node_idx: i32, expected_vis_row: i32, loc := #caller_location),
+	then_tree_node_expanded_is: proc(s: ^Suite_Ctx, id: string, node_idx: i32, expected: bool, loc := #caller_location),
+	then_tree_visible_count_is: proc(s: ^Suite_Ctx, id: string, expected_visible_rows: i32, loc := #caller_location),
+	then_tree_activated_node_is: proc(s: ^Suite_Ctx, id: string, expected_node_idx: i32, loc := #caller_location),
+	then_vt_row_contains_text: proc(s: ^Suite_Ctx, row: i32, needle: string, expected: bool = true, loc := #caller_location),
 }
 
 @(private)
@@ -327,6 +332,11 @@ _suite_ctx_vtable := Suite_Ctx_VTable{
 	then_clipboard_text_is = then_clipboard_text_is,
 	then_osc52_flushed_is = then_osc52_flushed_is,
 	then_cell_style_has = then_cell_style_has,
+	then_tree_selection_is = then_tree_selection_is,
+	then_tree_node_expanded_is = then_tree_node_expanded_is,
+	then_tree_visible_count_is = then_tree_visible_count_is,
+	then_tree_activated_node_is = then_tree_activated_node_is,
+	then_vt_row_contains_text = then_vt_row_contains_text,
 }
 
 Given_DSL :: struct {
@@ -517,6 +527,11 @@ Then_DSL :: struct {
 	clipboard_text_is: proc(expected: string, expected_osc52: bool = true, loc := #caller_location),
 	osc52_flushed_is: proc(expected_substr: string, loc := #caller_location),
 	cell_style_has: proc(x: i32, y: i32, expected_flag: bifrost.Style_Flag, expected_present: bool, loc := #caller_location),
+	tree_selection_is: proc(id: string, expected_node_idx: i32, expected_vis_row: i32, loc := #caller_location),
+	tree_node_expanded_is: proc(id: string, node_idx: i32, expected: bool, loc := #caller_location),
+	tree_visible_count_is: proc(id: string, expected_visible_rows: i32, loc := #caller_location),
+	tree_activated_node_is: proc(id: string, expected_node_idx: i32, loc := #caller_location),
+	vt_row_contains_text: proc(row: i32, needle: string, expected: bool = true, loc := #caller_location),
 }
 
 @(rodata)
@@ -596,6 +611,11 @@ then := Then_DSL{
 	clipboard_text_is = then_clipboard_text_is_ambient,
 	osc52_flushed_is = then_osc52_flushed_is_ambient,
 	cell_style_has = then_cell_style_has_ambient,
+	tree_selection_is = then_tree_selection_is_ambient,
+	tree_node_expanded_is = then_tree_node_expanded_is_ambient,
+	tree_visible_count_is = then_tree_visible_count_is_ambient,
+	tree_activated_node_is = then_tree_activated_node_is_ambient,
+	vt_row_contains_text = then_vt_row_contains_text_ambient,
 }
 
 // =============================================================================
@@ -1114,5 +1134,25 @@ then_osc52_flushed_is_ambient :: #force_inline proc(expected_substr: string, loc
 
 then_cell_style_has_ambient :: #force_inline proc(x: i32, y: i32, expected_flag: bifrost.Style_Flag, expected_present: bool, loc := #caller_location) {
 	then_cell_style_has(current_scenario(loc), x, y, expected_flag, expected_present, loc)
+}
+
+then_tree_selection_is_ambient :: #force_inline proc(id: string, expected_node_idx: i32, expected_vis_row: i32, loc := #caller_location) {
+	then_tree_selection_is(current_scenario(loc), id, expected_node_idx, expected_vis_row, loc)
+}
+
+then_tree_node_expanded_is_ambient :: #force_inline proc(id: string, node_idx: i32, expected: bool, loc := #caller_location) {
+	then_tree_node_expanded_is(current_scenario(loc), id, node_idx, expected, loc)
+}
+
+then_tree_visible_count_is_ambient :: #force_inline proc(id: string, expected_visible_rows: i32, loc := #caller_location) {
+	then_tree_visible_count_is(current_scenario(loc), id, expected_visible_rows, loc)
+}
+
+then_tree_activated_node_is_ambient :: #force_inline proc(id: string, expected_node_idx: i32, loc := #caller_location) {
+	then_tree_activated_node_is(current_scenario(loc), id, expected_node_idx, loc)
+}
+
+then_vt_row_contains_text_ambient :: #force_inline proc(row: i32, needle: string, expected: bool = true, loc := #caller_location) {
+	then_vt_row_contains_text(current_scenario(loc), row, needle, expected, loc)
 }
 
