@@ -711,6 +711,12 @@ run_log_monitor :: proc(live_tty: bool) -> bool {
 		for r := 0; r < ui_actor.state.rows; r += 1 {
 			fmt.printf("  %s\n", extract_monitor_row(&ui_actor.state, r))
 		}
+
+		if dir := os.get_env("BIFROST_SCREENSHOT_DIR", context.temp_allocator); dir != "" {
+			b := strings.builder_make(context.temp_allocator)
+			bifrost.screen_export_html(&ui_actor.state.screen, "Bifrost Log & Metrics Monitor", &b)
+			_ = os.write_entire_file_from_string(fmt.tprintf("%s/log_monitor.html", dir), strings.to_string(b))
+		}
 	}
 
 	bifrost.ui_coordinator_destroy(&ui_actor.state)

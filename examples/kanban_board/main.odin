@@ -849,6 +849,12 @@ run_kanban :: proc(live_tty: bool) -> bool {
 		for r: i32 = 0; r < app.screen.height; r += 1 {
 			fmt.printf("  %s\n", extract_kanban_row(&app.screen, r))
 		}
+
+		if dir := os.get_env("BIFROST_SCREENSHOT_DIR", context.temp_allocator); dir != "" {
+			b := strings.builder_make(context.temp_allocator)
+			bifrost.screen_export_html(&app.screen, "Bifrost Kanban Board", &b)
+			_ = os.write_entire_file_from_string(fmt.tprintf("%s/kanban_board.html", dir), strings.to_string(b))
+		}
 	}
 
 	return true

@@ -45,7 +45,20 @@ Each file in `docs/widget/` documents a specific widget family in detail, includ
 
 ---
 
-## 3. Frame Pipeline & Execution Order
+## 3. Visual Gallery & Example Applications
+
+| Application | Key Components Showcased | Screenshot |
+| :--- | :--- | :--- |
+| **Widget Gallery** (`examples/widget_gallery`) | Flexbox sizing, splitters, 2D virtual table, Which-Key popup, Tokyo Night theme | [![Widget Gallery](assets/screenshots/widget_gallery.png)](assets/screenshots/widget_gallery.png) |
+| **Showcase — Tab 1** (`examples/widget_showcase`) | Multi-line syntax editor (`ui_text_area`), virtualized collapsible tree (`ui_tree`), tab bar (`ui_tabs`) | [![Showcase Tab 1](assets/screenshots/widget_showcase_editor_tree.png)](assets/screenshots/widget_showcase_editor_tree.png) |
+| **Showcase — Tab 2** (`examples/widget_showcase`) | 2x4 sub-cell Braille telemetry (`ui_canvas`), 8-level sparklines (`ui_sparkline`) | [![Showcase Tab 2](assets/screenshots/widget_showcase_braille_telemetry.png)](assets/screenshots/widget_showcase_braille_telemetry.png) |
+| **Kanban Board** (`examples/kanban_board`) | 4-column focus scopes with Harel $H/H^*$ memory, word-wrapped cards, xitdb time travel | [![Kanban Board](assets/screenshots/kanban_board.png)](assets/screenshots/kanban_board.png) |
+| **Log Monitor** (`examples/log_monitor`) | High-throughput Sleipnir actor streaming, structured log virtual table, Braille metrics | [![Log Monitor](assets/screenshots/log_monitor.png)](assets/screenshots/log_monitor.png) |
+| **Keymap Workbench** (`examples/keymap_workbench`) | Vim/Helix/Emacs modal styles, Which-Key card, zero-CGO OSC 52 clipboard | [![Keymap Workbench](assets/screenshots/keymap_workbench.png)](assets/screenshots/keymap_workbench.png) |
+
+---
+
+## 4. Frame Pipeline & Execution Order
 
 Whether you use `UI_Coordinator_State` (`ui_coordinator_flush_frame`) or manage your own loop, a Bifrost frame executes in six deterministic steps:
 

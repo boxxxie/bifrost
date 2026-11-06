@@ -1042,6 +1042,208 @@ emit_sgr_transition :: proc(
 	strings.write_byte(out, 'm')
 }
 
+color_to_rgb :: proc "contextless" (c: Color, is_bg: bool) -> (r, g, b: u8) {
+	switch c.kind {
+	case .RGB:
+		return c.r, c.g, c.b
+	case .ANSI_16:
+		ANSI_16_RGB := [16][3]u8{
+			0  = {30, 30, 30},
+			1  = {244, 71, 71},
+			2  = {106, 153, 85},
+			3  = {220, 220, 170},
+			4  = {86, 156, 214},
+			5  = {197, 134, 192},
+			6  = {78, 201, 176},
+			7  = {212, 212, 212},
+			8  = {128, 128, 128},
+			9  = {244, 71, 71},
+			10 = {106, 153, 85},
+			11 = {220, 220, 170},
+			12 = {86, 156, 214},
+			13 = {197, 134, 192},
+			14 = {78, 201, 176},
+			15 = {255, 255, 255},
+		}
+		idx := clamp(c.r, 0, 15)
+		return ANSI_16_RGB[idx][0], ANSI_16_RGB[idx][1], ANSI_16_RGB[idx][2]
+	case .ANSI_256:
+		if c.r < 16 {
+			return color_to_rgb(Color{kind = .ANSI_16, r = c.r}, is_bg)
+		} else if c.r < 232 {
+			idx := c.r - 16
+			r_val := CUBE_LEVELS[idx / 36]
+			g_val := CUBE_LEVELS[(idx / 6) % 6]
+			b_val := CUBE_LEVELS[idx % 6]
+			return r_val, g_val, b_val
+		} else {
+			gray := 8 + (c.r - 232) * 10
+			return gray, gray, gray
+		}
+	case .Default:
+		if is_bg {
+			return 22, 26, 34
+		} else {
+			return 216, 222, 233
+		}
+	}
+	return 0, 0, 0
+}
+
+write_html_escaped_rune :: proc(out: ^strings.Builder, r: rune) {
+	switch r {
+	case '&': strings.write_string(out, "&amp;")
+	case '<': strings.write_string(out, "&lt;")
+	case '>': strings.write_string(out, "&gt;")
+	case '"': strings.write_string(out, "&quot;")
+	case:     strings.write_rune(out, r)
+	}
+}
+
+write_html_escaped_string :: proc(out: ^strings.Builder, str: string) {
+	for r in str {
+		write_html_escaped_rune(out, r)
+	}
+}
+
+screen_export_html :: proc(s: ^Screen, title: string, out: ^strings.Builder) {
+	if s == nil || s.width <= 0 || s.height <= 0 || len(s.front) == 0 {
+		return
+	}
+
+	win_bg_r: u8 = 22
+	win_bg_g: u8 = 26
+	win_bg_b: u8 = 34
+	if s.front[0].bg.kind == .RGB {
+		win_bg_r = s.front[0].bg.r
+		win_bg_g = s.front[0].bg.g
+		win_bg_b = s.front[0].bg.b
+	}
+
+	strings.write_string(out, "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n<style>\n")
+	strings.write_string(out, "* { box-sizing: border-box; }\n")
+	strings.write_string(out, "body {\n  margin: 0;\n  padding: 32px;\n  background: #0b0f14;\n  display: inline-block;\n}\n")
+	strings.write_string(out, ".window {\n  background: rgb(")
+	strings.write_int(out, int(win_bg_r))
+	strings.write_string(out, ", ")
+	strings.write_int(out, int(win_bg_g))
+	strings.write_string(out, ", ")
+	strings.write_int(out, int(win_bg_b))
+	strings.write_string(out, ");\n  border-radius: 12px;\n  box-shadow: 0 25px 60px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.12);\n  overflow: hidden;\n  display: inline-block;\n}\n")
+	strings.write_string(out, ".titlebar {\n  background: #181d26;\n  padding: 12px 16px;\n  display: flex;\n  align-items: center;\n  border-bottom: 1px solid rgba(255, 255, 255, 0.08);\n  position: relative;\n}\n")
+	strings.write_string(out, ".dots { display: flex; gap: 8px; }\n")
+	strings.write_string(out, ".dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }\n")
+	strings.write_string(out, ".dot-red { background: #ff5f56; }\n")
+	strings.write_string(out, ".dot-yellow { background: #ffbd2e; }\n")
+	strings.write_string(out, ".dot-green { background: #27c93f; }\n")
+	strings.write_string(out, ".title {\n  position: absolute;\n  left: 0;\n  right: 0;\n  text-align: center;\n  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;\n  font-size: 13px;\n  font-weight: 600;\n  color: #9499a8;\n  letter-spacing: 0.2px;\n  pointer-events: none;\n}\n")
+	strings.write_string(out, ".screen {\n  padding: 16px 20px;\n  font-family: 'FiraCode Nerd Font', 'Fira Code', 'DejaVu Sans Mono', monospace;\n  font-size: 14px;\n  line-height: 1.22;\n  letter-spacing: 0;\n  white-space: pre;\n  color: #d8dee9;\n}\n")
+	strings.write_string(out, ".line { height: 1.22em; display: block; }\n")
+	strings.write_string(out, "</style>\n</head>\n<body>\n<div class=\"window\">\n  <div class=\"titlebar\">\n")
+	strings.write_string(out, "    <div class=\"dots\">\n      <span class=\"dot dot-red\"></span>\n      <span class=\"dot dot-yellow\"></span>\n      <span class=\"dot dot-green\"></span>\n    </div>\n")
+	strings.write_string(out, "    <div class=\"title\">")
+	write_html_escaped_string(out, title)
+	strings.write_string(out, "</div>\n  </div>\n  <div class=\"screen\">\n")
+
+	for y: i32 = 0; y < s.height; y += 1 {
+		strings.write_string(out, "<div class=\"line\">")
+		row_base := int(y * s.width)
+		x: i32 = 0
+		for x < s.width {
+			cell := s.front[row_base + int(x)]
+			if cell.width == 0 {
+				x += 1
+				continue
+			}
+
+			eff_fg := cell.fg
+			eff_bg := cell.bg
+			eff_style := cell.style
+			if .Reverse in eff_style {
+				eff_fg, eff_bg = eff_bg, eff_fg
+			}
+
+			run_len: i32 = 0
+			for x + run_len < s.width {
+				c2 := s.front[row_base + int(x + run_len)]
+				if c2.width == 0 {
+					run_len += 1
+					continue
+				}
+				c2_fg := c2.fg
+				c2_bg := c2.bg
+				c2_style := c2.style
+				if .Reverse in c2_style {
+					c2_fg, c2_bg = c2_bg, c2_fg
+				}
+				if !colors_equal(c2_fg, eff_fg) || !colors_equal(c2_bg, eff_bg) || (c2_style - {.Reverse}) != (eff_style - {.Reverse}) {
+					break
+				}
+				run_len += 1
+			}
+
+			has_custom_fg := eff_fg.kind != .Default
+			has_custom_bg := eff_bg.kind != .Default
+			has_styles := (eff_style - {.Reverse}) != {}
+
+			if has_custom_fg || has_custom_bg || has_styles {
+				strings.write_string(out, "<span style=\"")
+				if has_custom_fg {
+					r, g, b := color_to_rgb(eff_fg, false)
+					strings.write_string(out, "color: rgb(")
+					strings.write_int(out, int(r))
+					strings.write_string(out, ", ")
+					strings.write_int(out, int(g))
+					strings.write_string(out, ", ")
+					strings.write_int(out, int(b))
+					strings.write_string(out, ");")
+				}
+				if has_custom_bg {
+					r, g, b := color_to_rgb(eff_bg, true)
+					strings.write_string(out, "background-color: rgb(")
+					strings.write_int(out, int(r))
+					strings.write_string(out, ", ")
+					strings.write_int(out, int(g))
+					strings.write_string(out, ", ")
+					strings.write_int(out, int(b))
+					strings.write_string(out, ");")
+				}
+				if .Bold in eff_style {
+					strings.write_string(out, "font-weight: bold;")
+				}
+				if .Dim in eff_style {
+					strings.write_string(out, "opacity: 0.65;")
+				}
+				if .Italic in eff_style {
+					strings.write_string(out, "font-style: italic;")
+				}
+				if .Underline in eff_style {
+					strings.write_string(out, "text-decoration: underline;")
+				}
+				strings.write_string(out, "\">")
+			}
+
+			for i: i32 = 0; i < run_len; i += 1 {
+				rc := s.front[row_base + int(x + i)]
+				if rc.width == 0 {
+					continue
+				}
+				ch := rc.ch if rc.ch != 0 else ' '
+				write_html_escaped_rune(out, ch)
+			}
+
+			if has_custom_fg || has_custom_bg || has_styles {
+				strings.write_string(out, "</span>")
+			}
+
+			x += run_len
+		}
+		strings.write_string(out, "</div>\n")
+	}
+
+	strings.write_string(out, "  </div>\n</div>\n</body>\n</html>\n")
+}
+
 write_color_sgr :: proc(out: ^strings.Builder, c: Color, is_bg: bool) {
 	switch c.kind {
 	case .Default:

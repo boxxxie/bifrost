@@ -1050,6 +1050,12 @@ run_showcase :: proc(live_tty: bool) -> bool {
 			fmt.printf("  %s\n", extract_screen_row(&app.screen, r))
 		}
 
+		if dir := os.get_env("BIFROST_SCREENSHOT_DIR", context.temp_allocator); dir != "" {
+			b := strings.builder_make(context.temp_allocator)
+			bifrost.screen_export_html(&app.screen, "Bifrost Showcase — Tab 1: Editor & Tree", &b)
+			_ = os.write_entire_file_from_string(fmt.tprintf("%s/widget_showcase_tab1.html", dir), strings.to_string(b))
+		}
+
 		// Switch to Tab 2 (`Alt+2`) so the headless output also prints the rendered Braille & Sparkline view
 		step_showcase_frame(&app, bifrost.Key_Event{code = .Rune, ch = '2', mods = {.Alt}})
 		fmt.printf(
@@ -1060,6 +1066,12 @@ run_showcase :: proc(live_tty: bool) -> bool {
 		)
 		for r: i32 = 0; r < app.screen.height; r += 1 {
 			fmt.printf("  %s\n", extract_screen_row(&app.screen, r))
+		}
+
+		if dir := os.get_env("BIFROST_SCREENSHOT_DIR", context.temp_allocator); dir != "" {
+			b := strings.builder_make(context.temp_allocator)
+			bifrost.screen_export_html(&app.screen, "Bifrost Showcase — Tab 2: Braille Telemetry & Sparklines", &b)
+			_ = os.write_entire_file_from_string(fmt.tprintf("%s/widget_showcase_tab2.html", dir), strings.to_string(b))
 		}
 	}
 

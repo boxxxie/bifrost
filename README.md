@@ -139,31 +139,59 @@ odin run tools/bifrost_gen -- <target_dir>
 
 Every example runs a deterministic, zero-leak headless verification walkthrough by default (printing the rendered Unicode frame buffer) and supports `--live-tty` for interactive raw-terminal execution:
 
+### 1. Widget & Layout Gallery (`examples/widget_gallery`)
+Demonstrates Clay-style 2D flexbox sizing, splitters, auto-edit search, 2D virtualized tables, 4-bit junction box merging, and Which-Key popups across Tokyo Night, Nord, and Gruvbox themes.
+
 ```bash
-# 1. Widget & Layout Gallery (Flexbox sizing, splitters, UTF-8 selection + OSC 52, 2D virtual table, Which-Key, Vim/Helix/Emacs styles)
 odin run examples/widget_gallery -vet -strict-style -vet-packages:bifrost,main
 odin run examples/widget_gallery -- --live-tty
+```
 
-# 2. Core Widget Suite Showcase — Tracks 11-14 (Multi-line Odin/CUE `ui_text_area`, virtualized `ui_tree`, H* `ui_tabs`, 2x4 Braille `ui_canvas` + `ui_sparkline`)
+![Bifrost Widget Gallery](docs/assets/screenshots/widget_gallery.png)
+
+### 2. Core Widget Suite Showcase — Tracks 11–14 (`examples/widget_showcase`)
+Combines multi-line syntax-highlighted editing ([`ui_text_area`](docs/widget/text_area.md)), virtualized collapsible trees ([`ui_tree`](docs/widget/tree.md)), $H^*$ focus-scoped tab containers ([`ui_tabs`](docs/widget/tabs.md)), and high-density 2x4 sub-cell Braille telemetry + 8-level sparklines ([`ui_canvas`](docs/widget/canvas_and_sparkline.md)).
+
+```bash
 odin run examples/widget_showcase -vet -strict-style -vet-packages:bifrost,main
 odin run examples/widget_showcase -- --live-tty
+```
 
-# 3. Kanban & Task Tracker (4-column focus scopes, F6 cycling, word-wrapped cards, xitdb time-travel undo/redo)
+**Tab 1: Multi-Line Editor & Architecture Tree**
+![Bifrost Showcase Tab 1 — Editor & Tree](docs/assets/screenshots/widget_showcase_editor_tree.png)
+
+**Tab 2: 2x4 Sub-Cell Braille Telemetry & Sparklines**
+![Bifrost Showcase Tab 2 — Braille Telemetry](docs/assets/screenshots/widget_showcase_braille_telemetry.png)
+
+### 3. Kanban & Task Tracker (`examples/kanban_board`)
+4-column drillable Harel focus scopes with Shallow ($H$) and Deep ($H^*$) memory, word-wrapped cards, F6 pane cycling, priority sorting, and immutable `xitdb` time-travel undo/redo.
+
+```bash
 odin run examples/kanban_board -vet -strict-style -vet-packages:bifrost,main
 odin run examples/kanban_board -- --live-tty
+```
 
-# 4. Actor-Driven Log & Metrics Monitor (Sleipnir producer actors streaming into xitdb, Datalog & moment diffs)
+![Bifrost Kanban Board](docs/assets/screenshots/kanban_board.png)
+
+### 4. Actor-Driven Log & Metrics Monitor (`examples/log_monitor`)
+Sleipnir producer actors streaming events into `xitdb` moments with 1,000-message burst coalescing, structured log virtual viewport slicing, health cards, and live Braille sparkline telemetry.
+
+```bash
 odin run examples/log_monitor -vet -strict-style -vet-packages:bifrost,main
 odin run examples/log_monitor -- --live-tty
+```
 
-# 5. Sleipnir + xitdb Inspector (Time-travel database inspector with 1,000-message burst coalescing)
-odin run examples/xitdb_inspector -vet -strict-style -vet-packages:bifrost,main
-odin run examples/xitdb_inspector -- --live-tty
+![Bifrost Log & Metrics Monitor](docs/assets/screenshots/log_monitor.png)
 
-# 6. Interactive Keymap, Which-Key & Clipboard Workbench (Vim/Helix/Emacs modes, Which-Key popup, N-count prefix/suffix/C-u, live rebind + xitdb persistence)
+### 5. Interactive Keymap, Which-Key & Clipboard Workbench (`examples/keymap_workbench`)
+Live runtime switching between Vim, Helix, and Emacs modal styles, 2-step chord resolution, Which-Key floating cards, zero-CGO OSC 52 terminal clipboard synchronization, and live rebind persistence.
+
+```bash
 odin run examples/keymap_workbench -vet -strict-style -vet-packages:bifrost,main
 odin run examples/keymap_workbench -- --live-tty
 ```
+
+![Bifrost Keymap Workbench](docs/assets/screenshots/keymap_workbench.png)
 
 ---
 
