@@ -185,6 +185,19 @@ Suite_Ctx_VTable :: struct {
 	then_command_palette_open_is: proc(s: ^Suite_Ctx, palette: ^bifrost.Command_Palette, expected_open: bool, loc := #caller_location),
 	then_command_palette_match_count_is: proc(s: ^Suite_Ctx, palette: ^bifrost.Command_Palette, expected_count: int, loc := #caller_location),
 	then_command_palette_top_match_is: proc(s: ^Suite_Ctx, palette: ^bifrost.Command_Palette, expected_action: string, loc := #caller_location),
+	given_text_area_text: proc(s: ^Suite_Ctx, id: string, text: string),
+	upon_pasting_text: proc(s: ^Suite_Ctx, text: string),
+	then_text_area_value_is: proc(s: ^Suite_Ctx, id: string, expected: string, loc := #caller_location),
+	then_text_area_cursor_is: proc(s: ^Suite_Ctx, id: string, expected_row: i32, expected_col: i32, loc := #caller_location),
+	then_text_area_preferred_col_is: proc(s: ^Suite_Ctx, id: string, expected_preferred_col: i32, loc := #caller_location),
+	then_text_area_scroll_is: proc(s: ^Suite_Ctx, id: string, expected_scroll_row: i32, expected_scroll_col: i32, loc := #caller_location),
+	then_text_area_selection_is: proc(s: ^Suite_Ctx, id: string, expected: string, loc := #caller_location),
+	then_text_area_line_count_is: proc(s: ^Suite_Ctx, id: string, expected_lines: int, loc := #caller_location),
+	then_text_area_line_length_is: proc(s: ^Suite_Ctx, id: string, line_idx: int, expected_len: int, loc := #caller_location),
+	then_text_area_dynamic_state_is: proc(s: ^Suite_Ctx, st: ^bifrost.Text_Area_State, expected_text: string, loc := #caller_location),
+	then_clipboard_text_is: proc(s: ^Suite_Ctx, expected: string, expected_osc52: bool = true, loc := #caller_location),
+	then_osc52_flushed_is: proc(s: ^Suite_Ctx, expected_substr: string, loc := #caller_location),
+	then_cell_style_has: proc(s: ^Suite_Ctx, x: i32, y: i32, expected_flag: bifrost.Style_Flag, expected_present: bool, loc := #caller_location),
 }
 
 @(private)
@@ -301,6 +314,19 @@ _suite_ctx_vtable := Suite_Ctx_VTable{
 	then_command_palette_open_is = then_command_palette_open_is,
 	then_command_palette_match_count_is = then_command_palette_match_count_is,
 	then_command_palette_top_match_is = then_command_palette_top_match_is,
+	given_text_area_text = given_text_area_text,
+	upon_pasting_text = upon_pasting_text,
+	then_text_area_value_is = then_text_area_value_is,
+	then_text_area_cursor_is = then_text_area_cursor_is,
+	then_text_area_preferred_col_is = then_text_area_preferred_col_is,
+	then_text_area_scroll_is = then_text_area_scroll_is,
+	then_text_area_selection_is = then_text_area_selection_is,
+	then_text_area_line_count_is = then_text_area_line_count_is,
+	then_text_area_line_length_is = then_text_area_line_length_is,
+	then_text_area_dynamic_state_is = then_text_area_dynamic_state_is,
+	then_clipboard_text_is = then_clipboard_text_is,
+	then_osc52_flushed_is = then_osc52_flushed_is,
+	then_cell_style_has = then_cell_style_has,
 }
 
 Given_DSL :: struct {
@@ -317,6 +343,7 @@ Given_DSL :: struct {
 	ui_quit_filter: proc(filter_fn: bifrost.UI_Quit_Filter_Fn, user_ptr: rawptr = nil),
 	xitdb_array_list_populated: proc(list_name: string, count: int, step_multiplier: i64 = 10, expected_moment: i64 = 0, loc := #caller_location),
 	nonblocking_pipe_terminal: proc(loc := #caller_location),
+	text_area_text: proc(id: string, text: string),
 }
 
 @(rodata)
@@ -334,6 +361,7 @@ given := Given_DSL{
 	ui_quit_filter = given_ui_quit_filter_ambient,
 	xitdb_array_list_populated = given_xitdb_array_list_populated_ambient,
 	nonblocking_pipe_terminal = given_nonblocking_pipe_terminal_ambient,
+	text_area_text = given_text_area_text_ambient,
 }
 
 Upon_DSL :: struct {
@@ -371,6 +399,7 @@ Upon_DSL :: struct {
 	saving_ui_workspace: proc(workspace_id: string, loc := #caller_location),
 	writing_to_terminal_pipe: proc(data: string),
 	feeding_win32_console_record: proc(rec: bifrost.Win32_Console_Record),
+	pasting_text: proc(text: string),
 }
 
 @(rodata)
@@ -409,6 +438,7 @@ upon := Upon_DSL{
 	saving_ui_workspace = upon_saving_ui_workspace_ambient,
 	writing_to_terminal_pipe = upon_writing_to_terminal_pipe_ambient,
 	feeding_win32_console_record = upon_feeding_win32_console_record_ambient,
+	pasting_text = upon_pasting_text_ambient,
 }
 
 Then_DSL :: struct {
@@ -476,6 +506,17 @@ Then_DSL :: struct {
 	command_palette_open_is: proc(palette: ^bifrost.Command_Palette, expected_open: bool, loc := #caller_location),
 	command_palette_match_count_is: proc(palette: ^bifrost.Command_Palette, expected_count: int, loc := #caller_location),
 	command_palette_top_match_is: proc(palette: ^bifrost.Command_Palette, expected_action: string, loc := #caller_location),
+	text_area_value_is: proc(id: string, expected: string, loc := #caller_location),
+	text_area_cursor_is: proc(id: string, expected_row: i32, expected_col: i32, loc := #caller_location),
+	text_area_preferred_col_is: proc(id: string, expected_preferred_col: i32, loc := #caller_location),
+	text_area_scroll_is: proc(id: string, expected_scroll_row: i32, expected_scroll_col: i32, loc := #caller_location),
+	text_area_selection_is: proc(id: string, expected: string, loc := #caller_location),
+	text_area_line_count_is: proc(id: string, expected_lines: int, loc := #caller_location),
+	text_area_line_length_is: proc(id: string, line_idx: int, expected_len: int, loc := #caller_location),
+	text_area_dynamic_state_is: proc(st: ^bifrost.Text_Area_State, expected_text: string, loc := #caller_location),
+	clipboard_text_is: proc(expected: string, expected_osc52: bool = true, loc := #caller_location),
+	osc52_flushed_is: proc(expected_substr: string, loc := #caller_location),
+	cell_style_has: proc(x: i32, y: i32, expected_flag: bifrost.Style_Flag, expected_present: bool, loc := #caller_location),
 }
 
 @(rodata)
@@ -544,6 +585,17 @@ then := Then_DSL{
 	command_palette_open_is = then_command_palette_open_is_ambient,
 	command_palette_match_count_is = then_command_palette_match_count_is_ambient,
 	command_palette_top_match_is = then_command_palette_top_match_is_ambient,
+	text_area_value_is = then_text_area_value_is_ambient,
+	text_area_cursor_is = then_text_area_cursor_is_ambient,
+	text_area_preferred_col_is = then_text_area_preferred_col_is_ambient,
+	text_area_scroll_is = then_text_area_scroll_is_ambient,
+	text_area_selection_is = then_text_area_selection_is_ambient,
+	text_area_line_count_is = then_text_area_line_count_is_ambient,
+	text_area_line_length_is = then_text_area_line_length_is_ambient,
+	text_area_dynamic_state_is = then_text_area_dynamic_state_is_ambient,
+	clipboard_text_is = then_clipboard_text_is_ambient,
+	osc52_flushed_is = then_osc52_flushed_is_ambient,
+	cell_style_has = then_cell_style_has_ambient,
 }
 
 // =============================================================================
@@ -1010,5 +1062,57 @@ then_command_palette_match_count_is_ambient :: #force_inline proc(palette: ^bifr
 
 then_command_palette_top_match_is_ambient :: #force_inline proc(palette: ^bifrost.Command_Palette, expected_action: string, loc := #caller_location) {
 	then_command_palette_top_match_is(current_scenario(loc), palette, expected_action, loc)
+}
+
+given_text_area_text_ambient :: #force_inline proc(id: string, text: string) {
+	given_text_area_text(current_scenario(), id, text)
+}
+
+upon_pasting_text_ambient :: #force_inline proc(text: string) {
+	upon_pasting_text(current_scenario(), text)
+}
+
+then_text_area_value_is_ambient :: #force_inline proc(id: string, expected: string, loc := #caller_location) {
+	then_text_area_value_is(current_scenario(loc), id, expected, loc)
+}
+
+then_text_area_cursor_is_ambient :: #force_inline proc(id: string, expected_row: i32, expected_col: i32, loc := #caller_location) {
+	then_text_area_cursor_is(current_scenario(loc), id, expected_row, expected_col, loc)
+}
+
+then_text_area_preferred_col_is_ambient :: #force_inline proc(id: string, expected_preferred_col: i32, loc := #caller_location) {
+	then_text_area_preferred_col_is(current_scenario(loc), id, expected_preferred_col, loc)
+}
+
+then_text_area_scroll_is_ambient :: #force_inline proc(id: string, expected_scroll_row: i32, expected_scroll_col: i32, loc := #caller_location) {
+	then_text_area_scroll_is(current_scenario(loc), id, expected_scroll_row, expected_scroll_col, loc)
+}
+
+then_text_area_selection_is_ambient :: #force_inline proc(id: string, expected: string, loc := #caller_location) {
+	then_text_area_selection_is(current_scenario(loc), id, expected, loc)
+}
+
+then_text_area_line_count_is_ambient :: #force_inline proc(id: string, expected_lines: int, loc := #caller_location) {
+	then_text_area_line_count_is(current_scenario(loc), id, expected_lines, loc)
+}
+
+then_text_area_line_length_is_ambient :: #force_inline proc(id: string, line_idx: int, expected_len: int, loc := #caller_location) {
+	then_text_area_line_length_is(current_scenario(loc), id, line_idx, expected_len, loc)
+}
+
+then_text_area_dynamic_state_is_ambient :: #force_inline proc(st: ^bifrost.Text_Area_State, expected_text: string, loc := #caller_location) {
+	then_text_area_dynamic_state_is(current_scenario(loc), st, expected_text, loc)
+}
+
+then_clipboard_text_is_ambient :: #force_inline proc(expected: string, expected_osc52: bool = true, loc := #caller_location) {
+	then_clipboard_text_is(current_scenario(loc), expected, expected_osc52, loc)
+}
+
+then_osc52_flushed_is_ambient :: #force_inline proc(expected_substr: string, loc := #caller_location) {
+	then_osc52_flushed_is(current_scenario(loc), expected_substr, loc)
+}
+
+then_cell_style_has_ambient :: #force_inline proc(x: i32, y: i32, expected_flag: bifrost.Style_Flag, expected_present: bool, loc := #caller_location) {
+	then_cell_style_has(current_scenario(loc), x, y, expected_flag, expected_present, loc)
 }
 

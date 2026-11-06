@@ -157,6 +157,22 @@ write_base64_rfc4648 :: proc(out: ^strings.Builder, src: []u8) {
 	}
 }
 
+// If `inp.osc52_pending` is set, encodes `inp.clipboard_buf[:inp.clipboard_len]` as an OSC 52
+// clipboard escape sequence (`\x1b]52;c;<base64>\x07`) into `escape_out` and clears `inp.osc52_pending`.
+flush_osc52_clipboard :: proc(inp: ^Input_State, escape_out: ^strings.Builder) -> bool {
+	if inp == nil || !inp.osc52_pending {
+		return false
+	}
+	inp.osc52_pending = false
+	if escape_out == nil || inp.clipboard_len <= 0 {
+		return false
+	}
+	strings.write_string(escape_out, "\x1b]52;c;")
+	write_base64_rfc4648(escape_out, inp.clipboard_buf[:inp.clipboard_len])
+	strings.write_byte(escape_out, '\x07')
+	return true
+}
+
 @(private)
 ui_drain_side_effects :: proc(state: ^UI_Coordinator_State, escape_out: ^strings.Builder) -> (focus_requested: bool) {
 	if state.side_effect_cnt == 0 {

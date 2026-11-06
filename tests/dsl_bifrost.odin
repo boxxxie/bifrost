@@ -1152,4 +1152,136 @@ then_command_palette_top_match_is :: proc(
 	}
 }
 
+// =============================================================================
+// Layer 2: Domain-Specific Language (Track 11: Multi-Line Text Editor)
+// =============================================================================
+
+given_text_area_text :: proc(s: ^Suite_Ctx, id: string, text: string) {
+	bifrost.set_text_area(&s.input, id, text)
+}
+
+upon_pasting_text :: proc(s: ^Suite_Ctx, text: string) {
+	upon_input_events(s, bifrost.Paste_Event{text = text, kind = .Complete})
+}
+
+then_text_area_value_is :: proc(s: ^Suite_Ctx, id: string, expected: string, loc := #caller_location) {
+	testing.expect_value(s.t, bifrost.get_text_area(&s.input, id), expected, loc = loc)
+}
+
+then_text_area_cursor_is :: proc(
+	s: ^Suite_Ctx,
+	id: string,
+	expected_row: i32,
+	expected_col: i32,
+	loc := #caller_location,
+) {
+	row, col, _ := bifrost.get_text_area_cursor(&s.input, id)
+	testing.expect_value(s.t, row, expected_row, loc = loc)
+	testing.expect_value(s.t, col, expected_col, loc = loc)
+}
+
+then_text_area_preferred_col_is :: proc(
+	s: ^Suite_Ctx,
+	id: string,
+	expected_preferred_col: i32,
+	loc := #caller_location,
+) {
+	slot := bifrost.get_text_area_state(&s.input, id)
+	testing.expect_value(s.t, slot.preferred_col, expected_preferred_col, loc = loc)
+}
+
+then_text_area_scroll_is :: proc(
+	s: ^Suite_Ctx,
+	id: string,
+	expected_scroll_row: i32,
+	expected_scroll_col: i32,
+	loc := #caller_location,
+) {
+	scroll_row, scroll_col := bifrost.get_text_area_scroll(&s.input, id)
+	testing.expect_value(s.t, scroll_row, expected_scroll_row, loc = loc)
+	testing.expect_value(s.t, scroll_col, expected_scroll_col, loc = loc)
+}
+
+then_text_area_selection_is :: proc(
+	s: ^Suite_Ctx,
+	id: string,
+	expected: string,
+	loc := #caller_location,
+) {
+	testing.expect_value(s.t, bifrost.get_text_area_selected_text(&s.input, id), expected, loc = loc)
+}
+
+then_text_area_line_count_is :: proc(
+	s: ^Suite_Ctx,
+	id: string,
+	expected_lines: int,
+	loc := #caller_location,
+) {
+	testing.expect_value(s.t, bifrost.get_text_area_line_count(&s.input, id), expected_lines, loc = loc)
+}
+
+then_text_area_line_length_is :: proc(
+	s: ^Suite_Ctx,
+	id: string,
+	line_idx: int,
+	expected_len: int,
+	loc := #caller_location,
+) {
+	slot := bifrost.get_text_area_state(&s.input, id)
+	l_start, l_end := bifrost.text_area_line_range(slot, i32(line_idx))
+	testing.expect_value(s.t, l_end - l_start, expected_len, loc = loc)
+}
+
+then_text_area_dynamic_state_is :: proc(
+	s: ^Suite_Ctx,
+	st: ^bifrost.Text_Area_State,
+	expected_text: string,
+	loc := #caller_location,
+) {
+	testing.expect_value(s.t, st.use_dyn, true, loc = loc)
+	testing.expect(s.t, len(st.dyn_buf) > 0, "Expected dyn_buf to remain allocated", loc = loc)
+	if len(st.dyn_buf) >= st.len {
+		testing.expect_value(s.t, string(st.dyn_buf[:st.len]), expected_text, loc = loc)
+	}
+}
+
+then_clipboard_text_is :: proc(
+	s: ^Suite_Ctx,
+	expected: string,
+	expected_osc52: bool = true,
+	loc := #caller_location,
+) {
+	actual := string(s.input.clipboard_buf[:s.input.clipboard_len])
+	testing.expect_value(s.t, actual, expected, loc = loc)
+	testing.expect_value(s.t, s.input.osc52_pending, expected_osc52, loc = loc)
+}
+
+then_osc52_flushed_is :: proc(
+	s: ^Suite_Ctx,
+	expected_substr: string,
+	loc := #caller_location,
+) {
+	b := strings.builder_make(0, 128, context.temp_allocator)
+	flushed := bifrost.flush_osc52_clipboard(&s.input, &b)
+	testing.expect_value(s.t, flushed, true, loc = loc)
+	testing.expect_value(s.t, s.input.osc52_pending, false, loc = loc)
+	testing.expect(s.t, strings.contains(strings.to_string(b), expected_substr), "Expected OSC 52 sequence to contain base64 substring", loc = loc)
+}
+
+then_cell_style_has :: proc(
+	s: ^Suite_Ctx,
+	x, y: i32,
+	expected_flag: bifrost.Style_Flag,
+	expected_present: bool,
+	loc := #caller_location,
+) {
+	idx := int(y * s.screen.width + x)
+	testing.expect(s.t, idx >= 0 && idx < len(s.screen.back), "Expected screen cell in bounds", loc = loc)
+	if idx >= 0 && idx < len(s.screen.back) {
+		actual := expected_flag in s.screen.back[idx].style
+		testing.expect_value(s.t, actual, expected_present, loc = loc)
+	}
+}
+
+
 

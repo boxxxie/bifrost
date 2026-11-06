@@ -280,18 +280,21 @@ build_gallery_ui :: proc(app: ^Gallery_App, out_slice: ^bifrost.Virtual_Slice) {
 					title          = "Auto-Edit Search (/)",
 				})
 
-				// Two-stage text input (`Enter` enters edit mode, `Escape` returns to 2D nav)
-				bifrost.ui_text_input(&app.layout_ctx, &app.screen, &app.input, "notes_input", bifrost.Text_Input_Config{
-					placeholder    = "Enter edits, Esc navs...",
-					width          = bifrost.grow(1),
-					height         = bifrost.fixed(3),
-					border         = .Plain,
-					fg             = pal.text_fg,
-					bg             = pal.bg,
-					placeholder_fg = pal.muted_fg,
-					border_fg      = pal.border_fg,
-					title          = "Two-Stage Note (Enter)",
-					two_stage      = true,
+				// Two-stage multi-line text area (`Enter`/`i` enters edit mode, `Escape` returns to 2D nav)
+				bifrost.ui_text_area(&app.layout_ctx, &app.screen, &app.input, "notes_input", bifrost.Text_Area_Config{
+					placeholder       = "Enter/i edits, Esc navs...",
+					initial_text      = "todo: review\nship v1",
+					width             = bifrost.grow(1),
+					height            = bifrost.fixed(4),
+					border            = .Plain,
+					fg                = pal.text_fg,
+					bg                = pal.bg,
+					placeholder_fg    = pal.muted_fg,
+					border_fg         = pal.border_fg,
+					gutter_fg         = pal.muted_fg,
+					title             = "Multi-Line Note (Enter/i)",
+					two_stage         = true,
+					show_line_numbers = true,
 				})
 
 				bifrost.ui_button(&app.layout_ctx, &app.screen, "btn_theme", bifrost.Button_Spec{
@@ -961,10 +964,11 @@ run_gallery :: proc(live_tty: bool) -> bool {
 		step_gallery_frame(&app, bifrost.Key_Event{code = .Escape})         // exit splitter [RESIZE] submode
 		step_gallery_frame(&app, bifrost.Key_Event{code = .Rune, ch = 'h'}) // enter sidebar via H* (`filter_input`)
 
-		// 5. Tab from `.Auto_Edit` `filter_input` -> two-stage `notes_input` (sticky edit carry), Escape to nav, Enter to edit "ok", Escape, then scroll sidebar
+		// 5. Tab from `.Auto_Edit` `filter_input` -> two-stage multi-line `notes_input` (sticky edit carry), Escape to nav, Enter to edit, insert newline + "ok", Escape, then scroll sidebar
 		step_gallery_frame(&app, bifrost.Key_Event{code = .Tab})
 		step_gallery_frame(&app, bifrost.Key_Event{code = .Escape}) // exit carried edit mode -> navigation mode on `notes_input`
 		step_gallery_frame(&app, bifrost.Key_Event{code = .Enter})  // two-stage Enter -> edit mode on `notes_input`
+		step_gallery_frame(&app, bifrost.Key_Event{code = .Enter})  // insert newline in multi-line text area
 		step_gallery_frame(&app, bifrost.Key_Event{code = .Rune, ch = 'o'})
 		step_gallery_frame(&app, bifrost.Key_Event{code = .Rune, ch = 'k'})
 		step_gallery_frame(&app, bifrost.Key_Event{code = .Escape}) // exit edit mode -> resume 2D nav in `sidebar`

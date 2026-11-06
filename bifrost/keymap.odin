@@ -419,12 +419,17 @@ key_events_match :: proc "contextless" (kb_key: Key_Event, ev: Key_Event) -> boo
 }
 
 @(private)
-is_suppressed_in_text_input :: proc "contextless" (kb: Keybinding, ev: Key_Event, text_input_focused: bool) -> bool {
-	if !text_input_focused || (.Allow_In_Text_Input in kb.flags) {
+is_key_suppressed_while_editing :: #force_inline proc "contextless" (flags: Keybinding_Flags, ev: Key_Event, editing: bool) -> bool {
+	if !editing || (.Allow_In_Text_Input in flags) {
 		return false
 	}
 	ev_mods := ev.mods - {.Caps_Lock, .Num_Lock}
-	return (.Ctrl not_in ev_mods) && (ev.code == .Rune || ev.code == .Space || ev.code == .Backspace || ev.code == .Delete || ev.code == .Left || ev.code == .Right || ev.code == .Home || ev.code == .End)
+	return (.Ctrl not_in ev_mods) && (ev.code == .Rune || ev.code == .Space || ev.code == .Backspace || ev.code == .Delete || ev.code == .Left || ev.code == .Right || ev.code == .Up || ev.code == .Down || ev.code == .Page_Up || ev.code == .Page_Down || ev.code == .Home || ev.code == .End || ev.code == .Enter || ev.code == .Tab)
+}
+
+@(private)
+is_suppressed_in_text_input :: #force_inline proc "contextless" (kb: Keybinding, ev: Key_Event, text_input_focused: bool) -> bool {
+	return is_key_suppressed_while_editing(kb.flags, ev, text_input_focused)
 }
 
 @(private)

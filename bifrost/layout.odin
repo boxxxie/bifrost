@@ -151,6 +151,7 @@ Box_Config :: struct {
 	scroll_offset_x:    i32,
 	virtual_total_rows: i32,
 	text_input:         bool,
+	text_area:          bool,
 	splitter:           bool,
 	nav_overrides:      [Nav_Dir]u64, // Optional per-direction target node id_hash overrides
 }
@@ -384,7 +385,7 @@ push_node :: proc(ctx: ^Layout_Context, id: string, cfg: Box_Config, content_siz
 	if .Scope_Text_Sink in flags {
 		flags += {.Captures_Text}
 	}
-	if cfg.text_input {
+	if cfg.text_input || cfg.text_area {
 		flags += {.Captures_Text}
 		if cfg.focus_flags == {} {
 			flags += {.Auto_Edit}
@@ -410,7 +411,7 @@ push_node :: proc(ctx: ^Layout_Context, id: string, cfg: Box_Config, content_siz
 	if idx > 0 && (.Focus_Scope in flags) {
 		node_cfg.focus_scope = true
 	}
-	if .Captures_Text in flags {
+	if (.Captures_Text in flags) && !node_cfg.text_area {
 		node_cfg.text_input = true
 	}
 

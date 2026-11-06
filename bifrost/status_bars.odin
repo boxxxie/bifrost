@@ -604,12 +604,8 @@ try_append_spec_hint :: proc(
 	}
 	primary := chord.alts[0]
 
-	if editing && (.Allow_In_Text_Input not_in spec.flags) {
-		k0 := primary.steps[0]
-		eff_mods := k0.mods - {.Caps_Lock, .Num_Lock}
-		if (.Ctrl not_in eff_mods) && (k0.code == .Rune || k0.code == .Space || k0.code == .Backspace || k0.code == .Delete || k0.code == .Left || k0.code == .Right || k0.code == .Home || k0.code == .End) {
-			return cnt
-		}
+	if is_key_suppressed_while_editing(spec.flags, primary.steps[0], editing) {
+		return cnt
 	}
 
 	// Drop shadowed lower-priority binding if primary chord sequence was already claimed

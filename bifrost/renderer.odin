@@ -132,6 +132,7 @@ Screen :: struct {
 	front:        []Cell,
 	back:         []Cell,
 	paints:       map[u64]Paint_Spec,
+	text_areas:   map[u64]^Text_Area_State,
 	dynamic_bars: [dynamic]Dynamic_Bar_Entry,
 	first_frame:  bool,
 	allocator:    mem.Allocator,
@@ -253,6 +254,7 @@ begin_frame :: proc(s: ^Screen, default_bg: Color = {}, temp_alloc := context.te
 		s.back[i] = clear_cell
 	}
 	s.paints       = make(map[u64]Paint_Spec, 128, temp_alloc)
+	s.text_areas   = make(map[u64]^Text_Area_State, 8, temp_alloc)
 	s.dynamic_bars = make([dynamic]Dynamic_Bar_Entry, 0, 8, temp_alloc)
 }
 
@@ -778,6 +780,12 @@ render_layout :: proc(s: ^Screen, ctx: ^Layout_Context, temp_alloc := context.te
 				sb_fg,
 				paint.bg,
 			)
+		}
+
+		// 3b. Multi-line text_area custom line/gutter/selection/cursor renderer
+		if node.config.text_area {
+			render_text_area_node(s, node, paint, inner_clip, node_clip)
+			continue
 		}
 
 		// 4. Draw wrapped or single-line text inside inner_rect

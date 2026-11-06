@@ -339,9 +339,10 @@ Input_State :: struct {
 	// Fixed-capacity scroll slots for zero-allocation immediate-mode scrolling
 	scroll_slots:        [MAX_SCROLL_SLOTS]Scroll_Slot,
 
-	// Fixed-capacity single-line UTF-8 text input slots
+	// Fixed-capacity single-line UTF-8 text input slots & multi-line text area slots
 	text_changed_id:     u64,
 	text_slots:          [MAX_TEXT_SLOTS]Text_Input_Slot,
+	text_area_slots:     [MAX_TEXT_AREA_SLOTS]Text_Area_State,
 
 	// Fixed-capacity interactive pane splitter slots
 	active_splitter_id:  u64,
@@ -840,10 +841,15 @@ resolve_input :: proc(inp: ^Input_State, ctx: ^Layout_Context, events: ..Input_E
 				if t_idx, exists := ctx.id_map[target_id]; exists && is_node_allowed(ctx, t_idx, capture_idx) {
 					t_node := ctx.nodes[t_idx]
 					if (.Captures_Text in t_node.focus_flags) && (.Disabled not_in t_node.focus_flags) {
-						slot := get_text_slot(inp, target_id)
-						text_input_insert_string(inp, slot, e.text)
-						if inp.text_changed_id == t_node.id_hash && (.Scope_Text_Sink in t_node.focus_flags) {
-							reset_scope_selection_to_default(inp, ctx, t_node.parent_scope_idx, capture_idx)
+						if t_node.config.text_area {
+							ta_slot := get_text_area_slot(inp, target_id)
+							_ = text_area_insert_string(inp, ta_slot, e.text)
+						} else {
+							slot := get_text_slot(inp, target_id)
+							text_input_insert_string(inp, slot, e.text)
+							if inp.text_changed_id == t_node.id_hash && (.Scope_Text_Sink in t_node.focus_flags) {
+								reset_scope_selection_to_default(inp, ctx, t_node.parent_scope_idx, capture_idx)
+							}
 						}
 					}
 				}
@@ -879,6 +885,10 @@ apply_input_highlights :: proc(s: ^Screen, ctx: ^Layout_Context, inp: ^Input_Sta
 
 	for i := 0; i < len(ctx.nodes); i += 1 {
 		node := ctx.nodes[i]
+		if node.config.text_area {
+			sync_text_area_paint(s, inp, node)
+			continue
+		}
 		if node.config.text_input {
 			sync_text_input_paint(s, inp, node)
 			continue
@@ -929,7 +939,7 @@ apply_input_highlights :: proc(s: ^Screen, ctx: ^Layout_Context, inp: ^Input_Sta
 
 @(private)
 is_interactive_node :: #force_inline proc "contextless" (cfg: Box_Config) -> bool {
-	return cfg.focusable || cfg.clickable || cfg.hoverable || cfg.draggable || cfg.splitter || cfg.text_input
+	return cfg.focusable || cfg.clickable || cfg.hoverable || cfg.draggable || cfg.splitter || cfg.text_input || cfg.text_area
 }
 
 
@@ -968,12 +978,25 @@ handle_key_event :: proc(inp: ^Input_State, ctx: ^Layout_Context, capture_idx: i
 		return
 	}
 
-	// 0c. Active `editing_id` Text Input Routing (two-stage Escape / Emacs C-g exit, Allow_In_Text_Input chords, & UTF-8 editing)
+	// 0c. Active `editing_id` Text Input / Text Area Routing (two-stage Escape / Emacs C-g exit, Allow_In_Text_Input chords, & UTF-8 editing)
 	if inp.editing_id != 0 {
 		is_emacs_quit := inp.keymap_style == .Emacs && ev.code == .Rune && (ev.ch == 'g' || ev.ch == 'G') && (ev.mods - {.Caps_Lock, .Num_Lock}) == {.Ctrl}
 		if ev.code == .Escape || is_emacs_quit {
 			if e_idx, ok := ctx.id_map[inp.editing_id]; ok {
-				if .Auto_Edit not_in ctx.nodes[e_idx].focus_flags {
+				e_node := ctx.nodes[e_idx]
+				if e_node.config.text_area {
+					ta_slot := get_text_area_slot(inp, e_node.id_hash)
+					if ta_slot.has_selection {
+						ta_slot.has_selection = false
+						clear_repeat_count(inp)
+						return
+					}
+					ta_slot.exited_edit = true
+					inp.editing_id      = 0
+					clear_repeat_count(inp)
+					return
+				}
+				if .Auto_Edit not_in e_node.focus_flags {
 					inp.editing_id = 0
 					clear_repeat_count(inp)
 					return
@@ -989,7 +1012,11 @@ handle_key_event :: proc(inp: ^Input_State, ctx: ^Layout_Context, capture_idx: i
 		if e_idx, exists := ctx.id_map[inp.editing_id]; exists && is_node_allowed(ctx, e_idx, capture_idx) {
 			e_node := ctx.nodes[e_idx]
 			if (.Captures_Text in e_node.focus_flags) && (.Disabled not_in e_node.focus_flags) {
-				if handle_text_input_key(inp, ctx, e_idx, capture_idx, ev) {
+				if e_node.config.text_area {
+					if handle_text_area_key(inp, ctx, e_idx, capture_idx, ev) {
+						return
+					}
+				} else if handle_text_input_key(inp, ctx, e_idx, capture_idx, ev) {
 					if inp.text_changed_id == e_node.id_hash && (.Scope_Text_Sink in e_node.focus_flags) {
 						reset_scope_selection_to_default(inp, ctx, e_node.parent_scope_idx, capture_idx)
 					}
@@ -1149,8 +1176,17 @@ handle_key_event :: proc(inp: ^Input_State, ctx: ^Layout_Context, capture_idx: i
 		node := ctx.nodes[node_idx]
 		is_tip := p == inp.focus_node_path_len - 1
 
-		// 1. Tip Widget Specifics: Two-Stage Edit Entry, Scope Drill-Down (`Enter`), Leaf Activation (`Enter`/`Space`)
+		// 1. Tip Widget Specifics: Two-Stage Edit Entry (`Enter` or `i`), Scope Drill-Down (`Enter`), Leaf Activation (`Enter`/`Space`)
 		if is_tip && is_node_allowed(ctx, node_idx, capture_idx) {
+			if node.config.text_area && inp.editing_id != node.id_hash {
+				if (ev.code == .Enter || (ev.code == .Rune && ev.ch == 'i')) && eff_mods == {} {
+					ta_slot := get_text_area_slot(inp, node.id_hash)
+					ta_slot.exited_edit = false
+					inp.editing_id      = node.id_hash
+					inp.pending_chord   = {}
+					return
+				}
+			}
 			if ev.code == .Enter && eff_mods == {} {
 				if (.Captures_Text in node.focus_flags) && (.Auto_Edit not_in node.focus_flags) && inp.editing_id != node.id_hash {
 					inp.editing_id    = node.id_hash
@@ -1371,7 +1407,13 @@ handle_mouse_event :: proc(inp: ^Input_State, ctx: ^Layout_Context, capture_idx:
 				if (.Captures_Text in node.focus_flags) && (.Disabled not_in node.focus_flags) && is_node_allowed(ctx, hit_idx, capture_idx) {
 					inp.editing_id    = node.id_hash
 					inp.pending_chord = {}
-					handle_text_input_click(inp, ctx, hit_idx, ev.x)
+					if node.config.text_area {
+						ta_slot := get_text_area_slot(inp, node.id_hash)
+						ta_slot.exited_edit = false
+						handle_text_area_click(inp, ctx, hit_idx, ev.x, ev.y)
+					} else {
+						handle_text_input_click(inp, ctx, hit_idx, ev.x)
+					}
 				}
 				// Virtual list / 2D virtual table click row & column selection
 				for v_curr := hit_idx; v_curr >= 0; v_curr = ctx.nodes[v_curr].parent_idx {

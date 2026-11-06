@@ -792,7 +792,7 @@ hit_test_scrollable :: proc "contextless" (ctx: ^Layout_Context, capture_idx: i3
 			if !is_node_allowed(ctx, curr, capture_idx) {
 				break
 			}
-			if curr_node.config.scrollable {
+			if curr_node.config.scrollable || curr_node.config.text_area {
 				return curr
 			}
 			if curr_node.out_of_flow || curr_node.config.capture_input {
@@ -823,6 +823,14 @@ handle_mouse_scroll :: proc "contextless" (
 
 	node := &ctx.nodes[scroll_idx]
 	step := node.config.scroll_step if node.config.scroll_step > 0 else 3
+	if node.config.text_area {
+		ta_slot := get_text_area_slot(inp, node.id_hash)
+		viewport_h := max(1, node.inner_rect.h)
+		max_scroll := max(0, i32(ta_slot.line_count) - viewport_h)
+		ta_slot.scroll_row = clamp(ta_slot.scroll_row + dir * step, 0, max_scroll)
+		inp.scrolled_id    = node.id_hash
+		return true
+	}
 	apply_scroll_delta(inp, ctx, scroll_idx, dir * step, false)
 	return true
 }
