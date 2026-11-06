@@ -1,6 +1,5 @@
 package bifrost
 
-import "core:sys/posix"
 import "core:testing"
 
 @(test)
@@ -64,23 +63,18 @@ test_kitty_csi_u_and_sgr_mouse :: proc(t: ^testing.T) {
 
 @(test)
 test_terminal_sigwinch_self_pipe_coalescing :: proc(t: ^testing.T) {
-	in_pipe: [2]posix.FD
-	out_pipe: [2]posix.FD
-	testing.expect_value(t, posix.pipe(&in_pipe), posix.result.OK)
-	defer {
-		_ = posix.close(in_pipe[0])
-		_ = posix.close(in_pipe[1])
-	}
-	testing.expect_value(t, posix.pipe(&out_pipe), posix.result.OK)
-	defer {
-		_ = posix.close(out_pipe[0])
-		_ = posix.close(out_pipe[1])
-	}
+	in_pipe, in_err := terminal_pipe_open()
+	testing.expect_value(t, in_err, Terminal_Error.None)
+	defer terminal_pipe_close(&in_pipe)
+
+	out_pipe, out_err := terminal_pipe_open()
+	testing.expect_value(t, out_err, Terminal_Error.None)
+	defer terminal_pipe_close(&out_pipe)
 
 	term := Terminal{
 		in_fd            = in_pipe[0],
 		out_fd           = out_pipe[1],
-		resize_pipe      = {-1, -1},
+		resize_pipe      = {INVALID_TERMINAL_FD, INVALID_TERMINAL_FD},
 		fallback_winsize = Resize_Event{width = 120, height = 40},
 	}
 	err := terminal_init_sigwinch_pipe(&term)
@@ -89,7 +83,7 @@ test_terminal_sigwinch_self_pipe_coalescing :: proc(t: ^testing.T) {
 
 	// Fire 5 rapid SIGWINCH notifications -> coalesced into a single Resize_Event on poll_next_event
 	for _ in 0 ..< 5 {
-		terminal_notify_sigwinch()
+		terminal_notify_sigwinch(&term)
 	}
 
 	ev, has_ev, poll_err := poll_next_event(&term, 50)
@@ -98,4 +92,66 @@ test_terminal_sigwinch_self_pipe_coalescing :: proc(t: ^testing.T) {
 	rsz := ev.(Resize_Event)
 	testing.expect_value(t, rsz.width, 120)
 	testing.expect_value(t, rsz.height, 40)
+}
+
+@(test)
+test_win32_console_record_translation_vt_surrogates_vk_and_resize :: proc(t: ^testing.T) {
+	term := Terminal{
+		in_fd            = INVALID_TERMINAL_FD,
+		out_fd           = INVALID_TERMINAL_FD,
+		resize_pipe      = {INVALID_TERMINAL_FD, INVALID_TERMINAL_FD},
+		fallback_winsize = Resize_Event{width = 100, height = 30},
+	}
+
+	// 1. Window_Buffer_Size record emits Resize_Event from record cols/rows
+	rsz_ev, has_rsz := terminal_feed_win32_console_record(&term, Win32_Console_Record{
+		kind        = .Window_Buffer_Size,
+		window_cols = 132,
+		window_rows = 44,
+	})
+	testing.expect(t, has_rsz)
+	testing.expect_value(t, rsz_ev.width, 132)
+	testing.expect_value(t, rsz_ev.height, 44)
+
+	// 2. UTF-16 surrogate pair for '🚀' (U+1F680 -> 0xD83D, 0xDE80)
+	_, _ = terminal_feed_win32_console_record(&term, Win32_Console_Record{
+		kind         = .Key,
+		key_down     = true,
+		repeat_count = 1,
+		unicode_char = 0xD83D,
+	})
+	testing.expect_value(t, term.read_len, 0)
+	_, _ = terminal_feed_win32_console_record(&term, Win32_Console_Record{
+		kind         = .Key,
+		key_down     = true,
+		repeat_count = 1,
+		unicode_char = 0xDE80,
+	})
+	ev_rocket, consumed_rocket, stat_rocket := parse_ansi_input(term.read_buf[:term.read_len], false)
+	testing.expect_value(t, stat_rocket, Parse_Status.Ok)
+	testing.expect_value(t, ev_rocket.(Key_Event).ch, '🚀')
+	consume_buffer_prefix(&term, consumed_rocket)
+
+	// 3. Fallback VK_UP (0x26) when UnicodeChar == 0 and Focus record
+	_, _ = terminal_feed_win32_console_record(&term, Win32_Console_Record{
+		kind             = .Key,
+		key_down         = true,
+		repeat_count     = 1,
+		virtual_key_code = 0x26,
+	})
+	_, _ = terminal_feed_win32_console_record(&term, Win32_Console_Record{
+		kind    = .Focus,
+		focused = false,
+	})
+
+	ev_up, consumed_up, stat_up := parse_ansi_input(term.read_buf[:term.read_len], false)
+	testing.expect_value(t, stat_up, Parse_Status.Ok)
+	testing.expect_value(t, ev_up.(Key_Event).code, Key_Code.Up)
+	consume_buffer_prefix(&term, consumed_up)
+
+	ev_foc, consumed_foc, stat_foc := parse_ansi_input(term.read_buf[:term.read_len], false)
+	testing.expect_value(t, stat_foc, Parse_Status.Ok)
+	testing.expect_value(t, ev_foc.(Focus_Event).focused, false)
+	consume_buffer_prefix(&term, consumed_foc)
+	testing.expect_value(t, term.read_len, 0)
 }

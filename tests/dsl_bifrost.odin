@@ -4,6 +4,7 @@ import "core:strings"
 import "core:testing"
 import "../bifrost"
 import actor "../deps/sleipnir/actor"
+import xitdb "../deps/xitdb/xitdb"
 
 // =============================================================================
 // Layer 2: Domain-Specific Language (Composable BDD Steps for Layout & Render)
@@ -17,6 +18,20 @@ upon_rendering_frame :: proc(s: ^Suite_Ctx, build_ui: proc(ctx: ^bifrost.Layout_
 	driver_begin_frame(s, default_bg)
 	build_ui(&s.layout_ctx, &s.screen)
 	driver_end_frame(s)
+}
+
+upon_rendering_frame_with_events :: proc(
+	s: ^Suite_Ctx,
+	build_ui: proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen),
+	events: ..bifrost.Input_Event,
+) {
+	driver_begin_frame(s)
+	build_ui(&s.layout_ctx, &s.screen)
+	driver_end_frame(s, ..events)
+}
+
+upon_dimming_rect_backdrop :: proc(s: ^Suite_Ctx, rect: bifrost.Rect) {
+	bifrost.dim_rect_backdrop(&s.screen, rect)
 }
 
 then_node_rect_is :: proc(s: ^Suite_Ctx, id: string, expected: bifrost.Rect, loc := #caller_location) {
@@ -642,7 +657,7 @@ then_virtual_table_cell_is :: proc(
 	testing.expect_value(s.t, bifrost.get_selected_col(&s.input, id), expected_col, loc = loc)
 }
 
-given_actions_struct_registered :: proc(s: ^Suite_Ctx, cp: ^bifrost.Command_Palette, inst: $T, loc := #caller_location) {
+given_actions_struct_registered_ctx :: proc(s: ^Suite_Ctx, cp: ^bifrost.Command_Palette, inst: $T, loc := #caller_location) {
 	ok := bifrost.register_actions_struct(&s.input, cp, inst)
 	testing.expect(s.t, ok, "Expected register_actions_struct to succeed", loc = loc)
 }
@@ -682,7 +697,7 @@ then_disabled_action_reason_is :: proc(s: ^Suite_Ctx, expected_reason: string, l
 	testing.expect_value(s.t, s.input.last_disabled_reason, expected_reason, loc = loc)
 }
 
-then_typed_action_triggered_is :: proc(s: ^Suite_Ctx, expected_val: $E, loc := #caller_location) {
+then_typed_action_triggered_is_ctx :: proc(s: ^Suite_Ctx, expected_val: $E, loc := #caller_location) {
 	act, ok := bifrost.triggered_action(&s.input, E)
 	testing.expect(s.t, ok, "Expected typed action enum to be triggered", loc = loc)
 	testing.expect_value(s.t, act, expected_val, loc = loc)
@@ -930,4 +945,211 @@ then_ui_vlist_row_is :: proc(s: ^Suite_Ctx, expected_row: int, loc := #caller_lo
 then_ui_quit_requested_is :: proc(s: ^Suite_Ctx, expected: bool, loc := #caller_location) {
 	testing.expect_value(s.t, s.ui_actor.state.quit_requested, expected, loc = loc)
 }
+
+given_xitdb_array_list_populated :: proc(
+	s: ^Suite_Ctx,
+	list_name: string,
+	count: int,
+	step_multiplier: i64 = 10,
+	expected_moment: i64 = 0,
+	loc := #caller_location,
+) {
+	tx := xitdb.tx_init(&s.db, -1, false, context.temp_allocator)
+	step := [1]xitdb.Path_Step{xitdb.hm(list_name)}
+	for i := 0; i < count; i += 1 {
+		xitdb.tx_append_steps(&tx, step[:], i64(i) * step_multiplier)
+	}
+	report, err := xitdb.tx_commit(&tx)
+	testing.expect_value(s.t, err, nil, loc = loc)
+	testing.expect_value(s.t, report.moment_index, expected_moment, loc = loc)
+	free_all(context.temp_allocator)
+}
+
+then_xitdb_viewport_slice_is :: proc(
+	s: ^Suite_Ctx,
+	moment_idx: i64,
+	path: string,
+	start_row: i64,
+	max_rows: i64,
+	expected_total: i64,
+	expected_count: int,
+	expected_first_idx: i64,
+	expected_first_val: string,
+	expected_last_idx: i64,
+	loc := #caller_location,
+) {
+	slice, s_err := bifrost.xitdb_slice_viewport(
+		&s.db,
+		moment_idx,
+		path,
+		start_row,
+		max_rows,
+		{},
+		context.temp_allocator,
+	)
+	testing.expect_value(s.t, s_err, nil, loc = loc)
+	testing.expect_value(s.t, slice.total_rows, expected_total, loc = loc)
+	testing.expect_value(s.t, len(slice.rows), expected_count, loc = loc)
+	if len(slice.rows) > 0 {
+		testing.expect_value(s.t, slice.rows[0].logical_index, expected_first_idx, loc = loc)
+		testing.expect_value(s.t, slice.rows[0].val_text, expected_first_val, loc = loc)
+		testing.expect_value(s.t, slice.rows[len(slice.rows) - 1].logical_index, expected_last_idx, loc = loc)
+	}
+}
+
+given_nonblocking_pipe_terminal :: proc(s: ^Suite_Ctx, loc := #caller_location) {
+	in_pipe, in_err := bifrost.terminal_pipe_open()
+	testing.expect_value(s.t, in_err, bifrost.Terminal_Error.None, loc = loc)
+	out_pipe, out_err := bifrost.terminal_pipe_open()
+	testing.expect_value(s.t, out_err, bifrost.Terminal_Error.None, loc = loc)
+	s.in_pipe  = in_pipe
+	s.out_pipe = out_pipe
+	s.pipe_term = bifrost.Terminal{
+		in_fd       = s.in_pipe[0],
+		out_fd      = s.out_pipe[1],
+		resize_pipe = {bifrost.INVALID_TERMINAL_FD, bifrost.INVALID_TERMINAL_FD},
+	}
+	pipe_err := bifrost.terminal_init_sigwinch_pipe(&s.pipe_term)
+	testing.expect_value(s.t, pipe_err, bifrost.Terminal_Error.None, loc = loc)
+	s.pipe_term_active = true
+}
+
+upon_writing_to_terminal_pipe :: proc(s: ^Suite_Ctx, data: string) {
+	if len(data) > 0 {
+		_, _ = bifrost.terminal_fd_write(s.in_pipe[1], transmute([]byte)data)
+	}
+}
+
+then_polled_terminal_key_is :: proc(
+	s: ^Suite_Ctx,
+	timeout_ms: i32,
+	expected_code: bifrost.Key_Code,
+	expected_mods: bifrost.Mod_Flags = {},
+	loc := #caller_location,
+) {
+	ev, has_ev, err := bifrost.poll_next_event(&s.pipe_term, timeout_ms)
+	testing.expect_value(s.t, err, bifrost.Terminal_Error.None, loc = loc)
+	testing.expect(s.t, has_ev, "Expected event from poll_next_event", loc = loc)
+	if has_ev {
+		key, ok := ev.(bifrost.Key_Event)
+		testing.expect(s.t, ok, "Expected Key_Event from poll_next_event", loc = loc)
+		if ok {
+			testing.expect_value(s.t, key.code, expected_code, loc = loc)
+			testing.expect_value(s.t, key.mods, expected_mods, loc = loc)
+		}
+	}
+}
+
+then_terminal_deinit_emits_teardown :: proc(
+	s: ^Suite_Ctx,
+	expected_seq: string,
+	loc := #caller_location,
+) {
+	bifrost.terminal_deinit(&s.pipe_term)
+	out_buf: [256]byte
+	n_out, _ := bifrost.terminal_fd_read(s.out_pipe[0], out_buf[:])
+	testing.expect_value(s.t, string(out_buf[:max(0, n_out)]), expected_seq, loc = loc)
+}
+
+upon_feeding_win32_console_record :: proc(s: ^Suite_Ctx, rec: bifrost.Win32_Console_Record) {
+	rsz_ev, has_rsz := bifrost.terminal_feed_win32_console_record(&s.pipe_term, rec)
+	if has_rsz {
+		append(&s.parsed_events, rsz_ev)
+	}
+	for s.pipe_term.read_len > 0 {
+		ev, consumed, status := bifrost.parse_ansi_input(s.pipe_term.read_buf[:s.pipe_term.read_len], false)
+		s.last_parse_stat = status
+		s.last_consumed   = consumed
+		if status == .Ok {
+			append(&s.parsed_events, ev)
+			n := max(consumed, 1)
+			rem := s.pipe_term.read_len - n
+			if rem > 0 {
+				copy(s.pipe_term.read_buf[:rem], s.pipe_term.read_buf[n:s.pipe_term.read_len])
+			}
+			s.pipe_term.read_len = max(0, rem)
+			continue
+		}
+		break
+	}
+}
+
+then_virtual_slice_range_is :: proc(
+	s: ^Suite_Ctx,
+	slice: bifrost.Virtual_Slice,
+	expected_start: i32,
+	expected_end: i32,
+	loc := #caller_location,
+) {
+	testing.expect_value(s.t, slice.start_row, expected_start, loc = loc)
+	testing.expect_value(s.t, slice.end_row, expected_end, loc = loc)
+}
+
+then_filtered_row_count_is :: proc(
+	s: ^Suite_Ctx,
+	actual_count: i32,
+	expected_count: i32,
+	loc := #caller_location,
+) {
+	testing.expect_value(s.t, actual_count, expected_count, loc = loc)
+}
+
+then_filter_mapped_row_is :: proc(
+	s: ^Suite_Ctx,
+	filter: ^bifrost.Xitdb_Filter,
+	virtual_row: i32,
+	expected_db_row: i32,
+	loc := #caller_location,
+) {
+	testing.expect_value(s.t, bifrost.xitdb_filter_map_row(filter, virtual_row), expected_db_row, loc = loc)
+}
+
+then_table_column_width_is :: proc(
+	s: ^Suite_Ctx,
+	span: bifrost.Table_Column_Span,
+	expected_width: i32,
+	loc := #caller_location,
+) {
+	testing.expect_value(s.t, span.width, expected_width, loc = loc)
+}
+
+then_action_shortcut_is :: proc(
+	s: ^Suite_Ctx,
+	action: string,
+	expected_shortcut: string,
+	loc := #caller_location,
+) {
+	testing.expect_value(s.t, bifrost.lookup_action_shortcut(&s.input, action), expected_shortcut, loc = loc)
+}
+
+then_command_palette_open_is :: proc(
+	s: ^Suite_Ctx,
+	palette: ^bifrost.Command_Palette,
+	expected_open: bool,
+	loc := #caller_location,
+) {
+	testing.expect_value(s.t, palette.is_open, expected_open, loc = loc)
+}
+
+then_command_palette_match_count_is :: proc(
+	s: ^Suite_Ctx,
+	palette: ^bifrost.Command_Palette,
+	expected_count: int,
+	loc := #caller_location,
+) {
+	testing.expect_value(s.t, palette.match_count, expected_count, loc = loc)
+}
+
+then_command_palette_top_match_is :: proc(
+	s: ^Suite_Ctx,
+	palette: ^bifrost.Command_Palette,
+	expected_action: string,
+	loc := #caller_location,
+) {
+	testing.expect(s.t, palette.match_count > 0, "Expected command palette to have at least 1 match", loc = loc)
+	if palette.match_count > 0 {
+		testing.expect_value(s.t, palette.commands[palette.matches[0].item_idx].action, expected_action, loc = loc)
+	}
+}
+
 

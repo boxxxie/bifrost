@@ -76,6 +76,8 @@ scenario_scope_end :: proc(h: Scenario_Handle) {
 Suite_Ctx_VTable :: struct {
 	given_terminal: proc(s: ^Suite_Ctx, t: ^testing.T, w: i32 = 80, h: i32 = 24),
 	upon_rendering_frame: proc(s: ^Suite_Ctx, build_ui: proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen), default_bg: bifrost.Color = {}),
+	upon_rendering_frame_with_events: proc(s: ^Suite_Ctx, build_ui: proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen), events: ..bifrost.Input_Event),
+	upon_dimming_rect_backdrop: proc(s: ^Suite_Ctx, rect: bifrost.Rect),
 	then_node_rect_is: proc(s: ^Suite_Ctx, id: string, expected: bifrost.Rect, loc := #caller_location),
 	then_node_inner_rect_is: proc(s: ^Suite_Ctx, id: string, expected: bifrost.Rect, loc := #caller_location),
 	then_cell_at_is: proc(s: ^Suite_Ctx, x: i32, y: i32, expected_ch: rune, expected_width: u8 = 1, loc := #caller_location),
@@ -168,6 +170,21 @@ Suite_Ctx_VTable :: struct {
 	then_ui_text_value_is: proc(s: ^Suite_Ctx, id: string, expected: string, loc := #caller_location),
 	then_ui_vlist_row_is: proc(s: ^Suite_Ctx, expected_row: int, loc := #caller_location),
 	then_ui_quit_requested_is: proc(s: ^Suite_Ctx, expected: bool, loc := #caller_location),
+	given_xitdb_array_list_populated: proc(s: ^Suite_Ctx, list_name: string, count: int, step_multiplier: i64 = 10, expected_moment: i64 = 0, loc := #caller_location),
+	then_xitdb_viewport_slice_is: proc(s: ^Suite_Ctx, moment_idx: i64, path: string, start_row: i64, max_rows: i64, expected_total: i64, expected_count: int, expected_first_idx: i64, expected_first_val: string, expected_last_idx: i64, loc := #caller_location),
+	given_nonblocking_pipe_terminal: proc(s: ^Suite_Ctx, loc := #caller_location),
+	upon_writing_to_terminal_pipe: proc(s: ^Suite_Ctx, data: string),
+	then_polled_terminal_key_is: proc(s: ^Suite_Ctx, timeout_ms: i32, expected_code: bifrost.Key_Code, expected_mods: bifrost.Mod_Flags = {}, loc := #caller_location),
+	then_terminal_deinit_emits_teardown: proc(s: ^Suite_Ctx, expected_seq: string, loc := #caller_location),
+	upon_feeding_win32_console_record: proc(s: ^Suite_Ctx, rec: bifrost.Win32_Console_Record),
+	then_virtual_slice_range_is: proc(s: ^Suite_Ctx, slice: bifrost.Virtual_Slice, expected_start: i32, expected_end: i32, loc := #caller_location),
+	then_filtered_row_count_is: proc(s: ^Suite_Ctx, actual_count: i32, expected_count: i32, loc := #caller_location),
+	then_filter_mapped_row_is: proc(s: ^Suite_Ctx, filter: ^bifrost.Xitdb_Filter, virtual_row: i32, expected_db_row: i32, loc := #caller_location),
+	then_table_column_width_is: proc(s: ^Suite_Ctx, span: bifrost.Table_Column_Span, expected_width: i32, loc := #caller_location),
+	then_action_shortcut_is: proc(s: ^Suite_Ctx, action: string, expected_shortcut: string, loc := #caller_location),
+	then_command_palette_open_is: proc(s: ^Suite_Ctx, palette: ^bifrost.Command_Palette, expected_open: bool, loc := #caller_location),
+	then_command_palette_match_count_is: proc(s: ^Suite_Ctx, palette: ^bifrost.Command_Palette, expected_count: int, loc := #caller_location),
+	then_command_palette_top_match_is: proc(s: ^Suite_Ctx, palette: ^bifrost.Command_Palette, expected_action: string, loc := #caller_location),
 }
 
 @(private)
@@ -175,6 +192,8 @@ Suite_Ctx_VTable :: struct {
 _suite_ctx_vtable := Suite_Ctx_VTable{
 	given_terminal = given_terminal,
 	upon_rendering_frame = upon_rendering_frame,
+	upon_rendering_frame_with_events = upon_rendering_frame_with_events,
+	upon_dimming_rect_backdrop = upon_dimming_rect_backdrop,
 	then_node_rect_is = then_node_rect_is,
 	then_node_inner_rect_is = then_node_inner_rect_is,
 	then_cell_at_is = then_cell_at_is,
@@ -267,6 +286,21 @@ _suite_ctx_vtable := Suite_Ctx_VTable{
 	then_ui_text_value_is = then_ui_text_value_is,
 	then_ui_vlist_row_is = then_ui_vlist_row_is,
 	then_ui_quit_requested_is = then_ui_quit_requested_is,
+	given_xitdb_array_list_populated = given_xitdb_array_list_populated,
+	then_xitdb_viewport_slice_is = then_xitdb_viewport_slice_is,
+	given_nonblocking_pipe_terminal = given_nonblocking_pipe_terminal,
+	upon_writing_to_terminal_pipe = upon_writing_to_terminal_pipe,
+	then_polled_terminal_key_is = then_polled_terminal_key_is,
+	then_terminal_deinit_emits_teardown = then_terminal_deinit_emits_teardown,
+	upon_feeding_win32_console_record = upon_feeding_win32_console_record,
+	then_virtual_slice_range_is = then_virtual_slice_range_is,
+	then_filtered_row_count_is = then_filtered_row_count_is,
+	then_filter_mapped_row_is = then_filter_mapped_row_is,
+	then_table_column_width_is = then_table_column_width_is,
+	then_action_shortcut_is = then_action_shortcut_is,
+	then_command_palette_open_is = then_command_palette_open_is,
+	then_command_palette_match_count_is = then_command_palette_match_count_is,
+	then_command_palette_top_match_is = then_command_palette_top_match_is,
 }
 
 Given_DSL :: struct {
@@ -281,6 +315,8 @@ Given_DSL :: struct {
 	actor_action_bound_static: proc(action_name: string, payload: bifrost.Xitdb_Worker_Msg, loc := #caller_location),
 	actor_action_bound_dynamic: proc(action_name: string, builder_fn: proc(coord: ^bifrost.UI_Coordinator_State, userdata: rawptr) -> (bifrost.Xitdb_Worker_Msg, bool), userdata: rawptr = nil, loc := #caller_location),
 	ui_quit_filter: proc(filter_fn: bifrost.UI_Quit_Filter_Fn, user_ptr: rawptr = nil),
+	xitdb_array_list_populated: proc(list_name: string, count: int, step_multiplier: i64 = 10, expected_moment: i64 = 0, loc := #caller_location),
+	nonblocking_pipe_terminal: proc(loc := #caller_location),
 }
 
 @(rodata)
@@ -296,10 +332,14 @@ given := Given_DSL{
 	actor_action_bound_static = given_actor_action_bound_static_ambient,
 	actor_action_bound_dynamic = given_actor_action_bound_dynamic_ambient,
 	ui_quit_filter = given_ui_quit_filter_ambient,
+	xitdb_array_list_populated = given_xitdb_array_list_populated_ambient,
+	nonblocking_pipe_terminal = given_nonblocking_pipe_terminal_ambient,
 }
 
 Upon_DSL :: struct {
 	rendering_frame: proc(build_ui: proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen), default_bg: bifrost.Color = {}),
+	rendering_frame_with_events: proc(build_ui: proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen), events: ..bifrost.Input_Event),
+	dimming_rect_backdrop: proc(rect: bifrost.Rect),
 	input_events: proc(events: ..bifrost.Input_Event),
 	pressing_key: proc(code: bifrost.Key_Code, mods: bifrost.Mod_Flags = {}, ch: rune = 0),
 	pressing_key_rune: proc(ch: rune, mods: bifrost.Mod_Flags = {}),
@@ -329,11 +369,15 @@ Upon_DSL :: struct {
 	sending_ui_focus_event: proc(focused: bool),
 	customizing_ui_workspace: proc(splitter_id: string, split_size: i32, scope_id: string, child_id: string, leaf_id: string),
 	saving_ui_workspace: proc(workspace_id: string, loc := #caller_location),
+	writing_to_terminal_pipe: proc(data: string),
+	feeding_win32_console_record: proc(rec: bifrost.Win32_Console_Record),
 }
 
 @(rodata)
 upon := Upon_DSL{
 	rendering_frame = upon_rendering_frame_ambient,
+	rendering_frame_with_events = upon_rendering_frame_with_events_ambient,
+	dimming_rect_backdrop = upon_dimming_rect_backdrop_ambient,
 	input_events = upon_input_events_ambient,
 	pressing_key = upon_pressing_key_ambient,
 	pressing_key_rune = upon_pressing_key_rune_ambient,
@@ -363,6 +407,8 @@ upon := Upon_DSL{
 	sending_ui_focus_event = upon_sending_ui_focus_event_ambient,
 	customizing_ui_workspace = upon_customizing_ui_workspace_ambient,
 	saving_ui_workspace = upon_saving_ui_workspace_ambient,
+	writing_to_terminal_pipe = upon_writing_to_terminal_pipe_ambient,
+	feeding_win32_console_record = upon_feeding_win32_console_record_ambient,
 }
 
 Then_DSL :: struct {
@@ -419,6 +465,17 @@ Then_DSL :: struct {
 	ui_text_value_is: proc(id: string, expected: string, loc := #caller_location),
 	ui_vlist_row_is: proc(expected_row: int, loc := #caller_location),
 	ui_quit_requested_is: proc(expected: bool, loc := #caller_location),
+	xitdb_viewport_slice_is: proc(moment_idx: i64, path: string, start_row: i64, max_rows: i64, expected_total: i64, expected_count: int, expected_first_idx: i64, expected_first_val: string, expected_last_idx: i64, loc := #caller_location),
+	polled_terminal_key_is: proc(timeout_ms: i32, expected_code: bifrost.Key_Code, expected_mods: bifrost.Mod_Flags = {}, loc := #caller_location),
+	terminal_deinit_emits_teardown: proc(expected_seq: string, loc := #caller_location),
+	virtual_slice_range_is: proc(slice: bifrost.Virtual_Slice, expected_start: i32, expected_end: i32, loc := #caller_location),
+	filtered_row_count_is: proc(actual_count: i32, expected_count: i32, loc := #caller_location),
+	filter_mapped_row_is: proc(filter: ^bifrost.Xitdb_Filter, virtual_row: i32, expected_db_row: i32, loc := #caller_location),
+	table_column_width_is: proc(span: bifrost.Table_Column_Span, expected_width: i32, loc := #caller_location),
+	action_shortcut_is: proc(action: string, expected_shortcut: string, loc := #caller_location),
+	command_palette_open_is: proc(palette: ^bifrost.Command_Palette, expected_open: bool, loc := #caller_location),
+	command_palette_match_count_is: proc(palette: ^bifrost.Command_Palette, expected_count: int, loc := #caller_location),
+	command_palette_top_match_is: proc(palette: ^bifrost.Command_Palette, expected_action: string, loc := #caller_location),
 }
 
 @(rodata)
@@ -476,6 +533,17 @@ then := Then_DSL{
 	ui_text_value_is = then_ui_text_value_is_ambient,
 	ui_vlist_row_is = then_ui_vlist_row_is_ambient,
 	ui_quit_requested_is = then_ui_quit_requested_is_ambient,
+	xitdb_viewport_slice_is = then_xitdb_viewport_slice_is_ambient,
+	polled_terminal_key_is = then_polled_terminal_key_is_ambient,
+	terminal_deinit_emits_teardown = then_terminal_deinit_emits_teardown_ambient,
+	virtual_slice_range_is = then_virtual_slice_range_is_ambient,
+	filtered_row_count_is = then_filtered_row_count_is_ambient,
+	filter_mapped_row_is = then_filter_mapped_row_is_ambient,
+	table_column_width_is = then_table_column_width_is_ambient,
+	action_shortcut_is = then_action_shortcut_is_ambient,
+	command_palette_open_is = then_command_palette_open_is_ambient,
+	command_palette_match_count_is = then_command_palette_match_count_is_ambient,
+	command_palette_top_match_is = then_command_palette_top_match_is_ambient,
 }
 
 // =============================================================================
@@ -488,6 +556,14 @@ given_terminal_ambient :: #force_inline proc(t: ^testing.T, w: i32 = 80, h: i32 
 
 upon_rendering_frame_ambient :: #force_inline proc(build_ui: proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen), default_bg: bifrost.Color = {}) {
 	upon_rendering_frame(current_scenario(), build_ui, default_bg)
+}
+
+upon_rendering_frame_with_events_ambient :: #force_inline proc(build_ui: proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen), events: ..bifrost.Input_Event) {
+	upon_rendering_frame_with_events(current_scenario(), build_ui, ..events)
+}
+
+upon_dimming_rect_backdrop_ambient :: #force_inline proc(rect: bifrost.Rect) {
+	upon_dimming_rect_backdrop(current_scenario(), rect)
 }
 
 then_node_rect_is_ambient :: #force_inline proc(id: string, expected: bifrost.Rect, loc := #caller_location) {
@@ -755,7 +831,12 @@ then_virtual_table_cell_is_ambient :: #force_inline proc(id: string, expected_ro
 }
 
 given_actions_struct_registered_ambient :: #force_inline proc(cp: ^bifrost.Command_Palette, inst: $T, loc := #caller_location) {
-	given_actions_struct_registered(current_scenario(loc), cp, inst, loc)
+	given_actions_struct_registered_ctx(current_scenario(loc), cp, inst, loc)
+}
+
+given_actions_struct_registered :: proc {
+	given_actions_struct_registered_ctx,
+	given_actions_struct_registered_ambient,
 }
 
 given_chord_bound_ambient :: #force_inline proc(chord_spec: string, action_name: string, policy: bifrost.Key_Scope_Policy = .Root_And_Scopes, scope_id: string = "", loc := #caller_location) {
@@ -775,7 +856,12 @@ then_disabled_action_reason_is_ambient :: #force_inline proc(expected_reason: st
 }
 
 then_typed_action_triggered_is_ambient :: #force_inline proc(expected_val: $E, loc := #caller_location) {
-	then_typed_action_triggered_is(current_scenario(loc), expected_val, loc)
+	then_typed_action_triggered_is_ctx(current_scenario(loc), expected_val, loc)
+}
+
+then_typed_action_triggered_is :: proc {
+	then_typed_action_triggered_is_ctx,
+	then_typed_action_triggered_is_ambient,
 }
 
 then_paint_has_dimmed_span_ambient :: #force_inline proc(id: string, snippet: string, expected: bool, loc := #caller_location) {
@@ -864,5 +950,65 @@ then_ui_vlist_row_is_ambient :: #force_inline proc(expected_row: int, loc := #ca
 
 then_ui_quit_requested_is_ambient :: #force_inline proc(expected: bool, loc := #caller_location) {
 	then_ui_quit_requested_is(current_scenario(loc), expected, loc)
+}
+
+given_xitdb_array_list_populated_ambient :: #force_inline proc(list_name: string, count: int, step_multiplier: i64 = 10, expected_moment: i64 = 0, loc := #caller_location) {
+	given_xitdb_array_list_populated(current_scenario(loc), list_name, count, step_multiplier, expected_moment, loc)
+}
+
+then_xitdb_viewport_slice_is_ambient :: #force_inline proc(moment_idx: i64, path: string, start_row: i64, max_rows: i64, expected_total: i64, expected_count: int, expected_first_idx: i64, expected_first_val: string, expected_last_idx: i64, loc := #caller_location) {
+	then_xitdb_viewport_slice_is(current_scenario(loc), moment_idx, path, start_row, max_rows, expected_total, expected_count, expected_first_idx, expected_first_val, expected_last_idx, loc)
+}
+
+given_nonblocking_pipe_terminal_ambient :: #force_inline proc(loc := #caller_location) {
+	given_nonblocking_pipe_terminal(current_scenario(loc), loc)
+}
+
+upon_writing_to_terminal_pipe_ambient :: #force_inline proc(data: string) {
+	upon_writing_to_terminal_pipe(current_scenario(), data)
+}
+
+then_polled_terminal_key_is_ambient :: #force_inline proc(timeout_ms: i32, expected_code: bifrost.Key_Code, expected_mods: bifrost.Mod_Flags = {}, loc := #caller_location) {
+	then_polled_terminal_key_is(current_scenario(loc), timeout_ms, expected_code, expected_mods, loc)
+}
+
+then_terminal_deinit_emits_teardown_ambient :: #force_inline proc(expected_seq: string, loc := #caller_location) {
+	then_terminal_deinit_emits_teardown(current_scenario(loc), expected_seq, loc)
+}
+
+upon_feeding_win32_console_record_ambient :: #force_inline proc(rec: bifrost.Win32_Console_Record) {
+	upon_feeding_win32_console_record(current_scenario(), rec)
+}
+
+then_virtual_slice_range_is_ambient :: #force_inline proc(slice: bifrost.Virtual_Slice, expected_start: i32, expected_end: i32, loc := #caller_location) {
+	then_virtual_slice_range_is(current_scenario(loc), slice, expected_start, expected_end, loc)
+}
+
+then_filtered_row_count_is_ambient :: #force_inline proc(actual_count: i32, expected_count: i32, loc := #caller_location) {
+	then_filtered_row_count_is(current_scenario(loc), actual_count, expected_count, loc)
+}
+
+then_filter_mapped_row_is_ambient :: #force_inline proc(filter: ^bifrost.Xitdb_Filter, virtual_row: i32, expected_db_row: i32, loc := #caller_location) {
+	then_filter_mapped_row_is(current_scenario(loc), filter, virtual_row, expected_db_row, loc)
+}
+
+then_table_column_width_is_ambient :: #force_inline proc(span: bifrost.Table_Column_Span, expected_width: i32, loc := #caller_location) {
+	then_table_column_width_is(current_scenario(loc), span, expected_width, loc)
+}
+
+then_action_shortcut_is_ambient :: #force_inline proc(action: string, expected_shortcut: string, loc := #caller_location) {
+	then_action_shortcut_is(current_scenario(loc), action, expected_shortcut, loc)
+}
+
+then_command_palette_open_is_ambient :: #force_inline proc(palette: ^bifrost.Command_Palette, expected_open: bool, loc := #caller_location) {
+	then_command_palette_open_is(current_scenario(loc), palette, expected_open, loc)
+}
+
+then_command_palette_match_count_is_ambient :: #force_inline proc(palette: ^bifrost.Command_Palette, expected_count: int, loc := #caller_location) {
+	then_command_palette_match_count_is(current_scenario(loc), palette, expected_count, loc)
+}
+
+then_command_palette_top_match_is_ambient :: #force_inline proc(palette: ^bifrost.Command_Palette, expected_action: string, loc := #caller_location) {
+	then_command_palette_top_match_is(current_scenario(loc), palette, expected_action, loc)
 }
 

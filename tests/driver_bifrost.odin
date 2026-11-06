@@ -38,10 +38,14 @@ Suite_Ctx :: struct {
 	vt_h:            i32,
 
 	// Track 4: Headless ANSI/Kitty/Mouse SGR stream reader & decoded event queue
-	stream_reader:   bifrost.Input_Stream_Reader,
-	parsed_events:   [dynamic]bifrost.Input_Event,
-	last_parse_stat: bifrost.Parse_Status,
-	last_consumed:   int,
+	stream_reader:    bifrost.Input_Stream_Reader,
+	parsed_events:    [dynamic]bifrost.Input_Event,
+	last_parse_stat:  bifrost.Parse_Status,
+	last_consumed:    int,
+	pipe_term_active: bool,
+	in_pipe:          [2]bifrost.Terminal_FD,
+	out_pipe:         [2]bifrost.Terminal_FD,
+	pipe_term:        bifrost.Terminal,
 
 	// Track 5: Sleipnir Actor Runtime + xitdb Shared Database + UI Coordinator Actor
 	actor_active:    bool,
@@ -82,6 +86,12 @@ driver_init :: proc(s: ^Suite_Ctx, t: ^testing.T, w: i32 = 80, h: i32 = 24) {
 
 driver_destroy :: proc(s: ^Suite_Ctx) {
 	free_all(context.temp_allocator)
+	if s.pipe_term_active {
+		bifrost.terminal_deinit(&s.pipe_term)
+		bifrost.terminal_pipe_close(&s.in_pipe)
+		bifrost.terminal_pipe_close(&s.out_pipe)
+		s.pipe_term_active = false
+	}
 	if s.actor_active {
 		actor.scheduler_wait_idle(&s.sched)
 		if s.ui_actor != nil {

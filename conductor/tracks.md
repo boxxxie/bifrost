@@ -56,3 +56,13 @@ This file tracks all major tracks for the `bifrost` project. Each track has its 
 
 - [x] **Master Reference Blueprint: Layered Focus Trees, 2D Spatial Navigation, Chord DSL & Actor Command Routing (`docs/NAVIGATION_AND_DSL_GUIDE.md`)**
   *Link: [./tracks/ui_navigation_blueprint_20261104/](./tracks/ui_navigation_blueprint_20261104/)*
+
+---
+
+- [~] **Track 10: Windows ConPTY / Console VT Terminal Backend & Multi-OS GitHub Actions CI Matrix (`bifrost/terminal.odin`, `.github/workflows/ci.yml`)**
+  *Link: [./tracks/windows_terminal_and_github_actions_ci_20261106/](./tracks/windows_terminal_and_github_actions_ci_20261106/)*
+
+---
+
+- [ ] **Track 11: Multi-Line Text Editor (`ui_text_area`), Collapsible Tree (`ui_tree`), Tab Bar (`ui_tabs`) & Braille/Sparkline Data-Viz Canvas (`ui_canvas`)**
+  *Link: [./tracks/multiline_editor_and_dataviz_widgets_20261106/](./tracks/multiline_editor_and_dataviz_widgets_20261106/)*

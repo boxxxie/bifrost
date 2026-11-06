@@ -1,8 +1,7 @@
 package bifrost
 
-import "core:c"
 import "core:strings"
-import "core:sys/posix"
+import "core:unicode/utf8"
 
 // =============================================================================
 // Control Sequences (Ported from libvaxis ctlseqs.zig)
@@ -52,31 +51,7 @@ CTL_TEARDOWN_SEQUENCE ::
 	"\x1b[?1049l"
 
 // =============================================================================
-// POSIX ioctl(TIOCGWINSZ) Binding
-// =============================================================================
-
-when ODIN_OS == .Linux {
-	foreign import libc "system:c"
-	TIOCGWINSZ :: c.ulong(0x5413)
-} else when ODIN_OS == .Darwin || ODIN_OS == .FreeBSD || ODIN_OS == .OpenBSD || ODIN_OS == .NetBSD {
-	foreign import libc "system:System"
-	TIOCGWINSZ :: c.ulong(0x40087468)
-}
-
-POSIX_Winsize :: struct {
-	ws_row:    c.ushort,
-	ws_col:    c.ushort,
-	ws_xpixel: c.ushort,
-	ws_ypixel: c.ushort,
-}
-
-@(default_calling_convention = "c")
-foreign libc {
-	ioctl :: proc(fd: posix.FD, request: c.ulong, #c_vararg args: ..any) -> c.int ---
-}
-
-// =============================================================================
-// Terminal State & Errors
+// Terminal Options & Errors
 // =============================================================================
 
 Terminal_Error :: enum u8 {
@@ -110,216 +85,30 @@ DEFAULT_TERMINAL_OPTIONS :: Terminal_Options{
 	hide_cursor     = true,
 }
 
-Terminal :: struct {
-	in_fd:            posix.FD,
-	out_fd:           posix.FD,
-	orig_termios:     posix.termios,
-	resize_pipe:      [2]posix.FD, // [0] = read end (polled by sleipnir), [1] = write end (SIGWINCH)
-	opts:             Terminal_Options,
-	raw_active:       bool,
-	sigwinch_active:  bool,
-	fallback_winsize: Resize_Event,
-	read_buf:         [4096]byte,
-	read_len:         int,
-}
+ESC_DISAMBIGUATE_TIMEOUT_MS :: 25
 
-// Module-scoped write descriptor for the async-signal-safe SIGWINCH handler.
-@(private)
-g_sigwinch_write_fd: posix.FD = -1
-
-@(private)
-sigwinch_handler :: proc "c" (_: posix.Signal) {
-	fd := g_sigwinch_write_fd
-	if fd >= 0 {
-		b: [1]byte = {1}
-		_ = posix.write(fd, &b[0], 1)
-	}
-}
-
-// Triggers the SIGWINCH self-pipe notification (used by signal handler and deterministic tests).
-terminal_notify_sigwinch :: proc "contextless" (term: ^Terminal = nil) {
-	if term != nil && term.resize_pipe[1] >= 0 {
-		b: [1]byte = {1}
-		_ = posix.write(term.resize_pipe[1], &b[0], 1)
-		return
-	}
-	sigwinch_handler(posix.Signal(posix.SIGWINCH))
-}
-
-// =============================================================================
-// Terminal Lifecycle (Init, Raw Mode, SIGWINCH Pipe, Winsize, Teardown)
-// =============================================================================
-
-terminal_init :: proc(
-	term: ^Terminal,
-	opts := DEFAULT_TERMINAL_OPTIONS,
-	in_fd: posix.FD = posix.STDIN_FILENO,
-	out_fd: posix.FD = posix.STDOUT_FILENO,
-) -> Terminal_Error {
-	term^ = {
-		in_fd       = in_fd,
-		out_fd      = out_fd,
-		resize_pipe = {-1, -1},
-		opts        = opts,
-	}
-
-	// 1. Enter raw termios mode
-	orig, raw_err := terminal_make_raw(in_fd)
-	if raw_err != .None {
-		return raw_err
-	}
-	term.orig_termios = orig
-	term.raw_active = true
-
-	// 2. Initialize SIGWINCH self-pipe
-	if pipe_err := terminal_init_sigwinch_pipe(term); pipe_err != .None {
-		_ = posix.tcsetattr(in_fd, .TCSAFLUSH, &term.orig_termios)
-		term.raw_active = false
-		return pipe_err
-	}
-
-	// 3. Emit terminal mode activation sequences
-	if opts.alt_screen {
-		write_all_fd(out_fd, CTL_ENTER_ALT_SCREEN) or_return
-	}
-	if opts.hide_cursor {
-		write_all_fd(out_fd, CTL_HIDE_CURSOR) or_return
-	}
-	if opts.bracketed_paste {
-		write_all_fd(out_fd, CTL_BRACKETED_PASTE_SET) or_return
-	}
-	if opts.focus_events {
-		write_all_fd(out_fd, CTL_FOCUS_SET) or_return
-	}
-	if opts.mouse {
-		write_all_fd(out_fd, CTL_MOUSE_SET) or_return
-	}
-	if opts.kitty_keyboard {
-		write_all_fd(out_fd, CTL_KITTY_KBD_PUSH) or_return
-	}
-
-	return .None
-}
-
-terminal_deinit :: proc(term: ^Terminal) {
+// Unified window size query overload accepting either `^Terminal` or `Terminal_FD`.
+terminal_winsize_from_term :: proc(term: ^Terminal) -> (ev: Resize_Event, err: Terminal_Error) {
 	if term == nil {
-		return
-	}
-
-	// 1. Write full escape sequence teardown in a single atomic write
-	if term.out_fd >= 0 {
-		_ = write_all_fd(term.out_fd, CTL_TEARDOWN_SEQUENCE)
-		term.out_fd = -1
-	}
-
-	// 2. Restore default SIGWINCH handler and close self-pipe descriptors
-	if term.sigwinch_active {
-		g_sigwinch_write_fd = -1
-		act: posix.sigaction_t
-		act.sa_handler = cast(proc "c" (posix.Signal))posix.SIG_DFL
-		posix.sigemptyset(&act.sa_mask)
-		_ = posix.sigaction(posix.Signal(posix.SIGWINCH), &act, nil)
-		term.sigwinch_active = false
-	}
-
-	if term.resize_pipe[0] >= 0 {
-		_ = posix.close(term.resize_pipe[0])
-		term.resize_pipe[0] = -1
-	}
-	if term.resize_pipe[1] >= 0 {
-		_ = posix.close(term.resize_pipe[1])
-		term.resize_pipe[1] = -1
-	}
-
-	// 3. Restore original termios state with TCSAFLUSH
-	if term.raw_active && term.in_fd >= 0 {
-		_ = posix.tcsetattr(term.in_fd, .TCSAFLUSH, &term.orig_termios)
-		term.raw_active = false
-	}
-}
-
-terminal_make_raw :: proc(fd: posix.FD) -> (orig: posix.termios, err: Terminal_Error) {
-	if posix.tcgetattr(fd, &orig) != .OK {
-		return {}, .Termios_Get_Failed
-	}
-
-	raw := orig
-	// See termios(3) and libvaxis PosixTty.makeRaw
-	raw.c_iflag -= {.IGNBRK, .BRKINT, .PARMRK, .ISTRIP, .INLCR, .IGNCR, .ICRNL, .IXON}
-	raw.c_oflag -= {.OPOST}
-	raw.c_lflag -= {.ECHO, .ECHONL, .ICANON, .ISIG, .IEXTEN}
-	raw.c_cflag -= {.CS6, .CS7, .PARENB}
-	raw.c_cflag += {.CS8}
-	raw.c_cc[.VMIN] = 1
-	raw.c_cc[.VTIME] = 0
-
-	if posix.tcsetattr(fd, .TCSAFLUSH, &raw) != .OK {
-		return {}, .Termios_Set_Failed
-	}
-	return orig, .None
-}
-
-terminal_init_sigwinch_pipe :: proc(term: ^Terminal) -> Terminal_Error {
-	if posix.pipe(&term.resize_pipe) != .OK {
-		return .Pipe_Create_Failed
-	}
-
-	// Set FD_CLOEXEC and O_NONBLOCK on both pipe descriptors
-	for fd in term.resize_pipe {
-		if posix.fcntl(fd, .SETFD, c.int(posix.FD_CLOEXEC)) == -1 {
-			_ = posix.close(term.resize_pipe[0])
-			_ = posix.close(term.resize_pipe[1])
-			term.resize_pipe = {-1, -1}
-			return .Fcntl_Failed
-		}
-		flags := posix.fcntl(fd, .GETFL)
-		if flags == -1 || posix.fcntl(fd, .SETFL, flags | posix.O_NONBLOCK) == -1 {
-			_ = posix.close(term.resize_pipe[0])
-			_ = posix.close(term.resize_pipe[1])
-			term.resize_pipe = {-1, -1}
-			return .Fcntl_Failed
-		}
-	}
-
-	g_sigwinch_write_fd = term.resize_pipe[1]
-
-	act: posix.sigaction_t
-	act.sa_handler = sigwinch_handler
-	posix.sigemptyset(&act.sa_mask)
-	act.sa_flags = {.RESTART}
-
-	if posix.sigaction(posix.Signal(posix.SIGWINCH), &act, nil) != .OK {
-		g_sigwinch_write_fd = -1
-		_ = posix.close(term.resize_pipe[0])
-		_ = posix.close(term.resize_pipe[1])
-		term.resize_pipe = {-1, -1}
-		return .Sigaction_Failed
-	}
-
-	term.sigwinch_active = true
-	return .None
-}
-
-terminal_get_winsize :: proc(fd: posix.FD) -> (ev: Resize_Event, err: Terminal_Error) {
-	ws: POSIX_Winsize
-	if ioctl(fd, TIOCGWINSZ, &ws) != 0 {
 		return {}, .Ioctl_Winsize_Failed
 	}
-	return Resize_Event{
-		width   = i32(ws.ws_col),
-		height  = i32(ws.ws_row),
-		x_pixel = u16(ws.ws_xpixel),
-		y_pixel = u16(ws.ws_ypixel),
-	}, .None
+	ev, err = terminal_get_winsize(term.out_fd)
+	if err != .None && term.fallback_winsize.width > 0 && term.fallback_winsize.height > 0 {
+		return term.fallback_winsize, .None
+	}
+	return ev, err
+}
+
+terminal_winsize :: proc {
+	terminal_winsize_from_term,
+	terminal_get_winsize,
 }
 
 // =============================================================================
 // Sleipnir Input Actor Poll + Streaming Parse Loop
 // =============================================================================
 
-ESC_DISAMBIGUATE_TIMEOUT_MS :: 25
-
-// Polls both STDIN_FILENO and the SIGWINCH self-pipe without busy-waiting,
+// Polls both STDIN and the resize notification channel without busy-waiting,
 // feeding bytes into parse_ansi_input and handling bare ESC disambiguation.
 terminal_poll_event :: proc(
 	term: ^Terminal,
@@ -359,30 +148,25 @@ terminal_poll_event :: proc(
 					}
 					continue
 				}
+				read_err := read_tty_into_buffer(term)
+				if read_err != .None {
+					return nil, false, read_err
+				}
+				continue
 			}
 		}
 
-		// 2. Poll both STDIN and the SIGWINCH self-pipe
+		// 2. Poll both STDIN and the resize channel
 		stdin_ready, resize_ready, poll_err := poll_tty_and_sigwinch(term, timeout_ms)
 		if poll_err != .None {
 			return nil, false, poll_err
 		}
 
-		// 3. Drain coalesced SIGWINCH notifications first
+		// 3. Drain coalesced resize notifications first
 		if resize_ready {
-			drain_buf: [64]byte
-			for {
-				n := posix.read(term.resize_pipe[0], &drain_buf[0], len(drain_buf))
-				if n <= 0 {
-					break
-				}
-			}
-			ws_ev, ws_err := terminal_get_winsize(term.out_fd)
-			if ws_err == .None {
+			ws_ev, has_ws := drain_resize_notification(term)
+			if has_ws {
 				return ws_ev, true, .None
-			}
-			if term.fallback_winsize.width > 0 && term.fallback_winsize.height > 0 {
-				return term.fallback_winsize, true, .None
 			}
 		}
 
@@ -391,58 +175,162 @@ terminal_poll_event :: proc(
 		}
 
 		// 4. Read available bytes from TTY into the remaining tail of read_buf
-		space := len(term.read_buf) - term.read_len
-		if space == 0 {
-			// Buffer overflow guard on pathological unterminated sequence
-			term.read_len = 0
-			space = len(term.read_buf)
+		read_err := read_tty_into_buffer(term)
+		if read_err != .None {
+			return nil, false, read_err
 		}
-
-		n := posix.read(term.in_fd, &term.read_buf[term.read_len], uint(space))
-		if n < 0 {
-			errno := posix.errno()
-			if errno == .EINTR || errno == .EAGAIN {
-				continue
-			}
-			return nil, false, .Read_Failed
-		}
-		if n == 0 {
-			return nil, false, .Read_Failed
-		}
-		term.read_len += int(n)
 	}
 }
 
 poll_next_event :: terminal_poll_event
 
-@(private)
-poll_tty_and_sigwinch :: proc(
+// =============================================================================
+// Windows Console INPUT_RECORD Translation (Cross-Platform Testable)
+// =============================================================================
+
+Win32_Console_Event_Kind :: enum u16 {
+	None               = 0,
+	Key                = 0x0001,
+	Mouse              = 0x0002,
+	Window_Buffer_Size = 0x0004,
+	Menu               = 0x0008,
+	Focus              = 0x0010,
+}
+
+Win32_Console_Record :: struct {
+	kind:              Win32_Console_Event_Kind,
+	key_down:          bool,
+	repeat_count:      u16,
+	virtual_key_code:  u16,
+	unicode_char:      u16,
+	control_key_state: u32,
+	window_cols:       i16,
+	window_rows:       i16,
+	focused:           bool,
+}
+
+// Feeds a decoded Win32 Console INPUT_RECORD into `term.read_buf` or returns a `Resize_Event`.
+terminal_feed_win32_console_record :: proc(
 	term: ^Terminal,
-	timeout_ms: i32,
+	rec: Win32_Console_Record,
 ) -> (
-	stdin_ready: bool,
-	resize_ready: bool,
-	err: Terminal_Error,
+	resize_ev: Resize_Event,
+	has_resize: bool,
 ) {
-	pfds := [2]posix.pollfd{
-		{fd = term.in_fd, events = {.IN}},
-		{fd = term.resize_pipe[0], events = {.IN}},
+	if term == nil {
+		return {}, false
 	}
 
-	rc := posix.poll(&pfds[0], 2, c.int(timeout_ms))
-	if rc < 0 {
-		if posix.errno() == .EINTR {
-			return false, false, .None
+	#partial switch rec.kind {
+	case .Window_Buffer_Size:
+		ws_ev, ws_err := terminal_get_winsize(term.out_fd)
+		if ws_err == .None {
+			return ws_ev, true
 		}
-		return false, false, .Poll_Failed
-	}
-	if rc == 0 {
-		return false, false, .None
+		if rec.window_cols > 0 && rec.window_rows > 0 {
+			return Resize_Event{
+				width  = i32(rec.window_cols),
+				height = i32(rec.window_rows),
+			}, true
+		}
+		if term.fallback_winsize.width > 0 && term.fallback_winsize.height > 0 {
+			return term.fallback_winsize, true
+		}
+		return {}, false
+
+	case .Focus:
+		seq := "\x1b[I" if rec.focused else "\x1b[O"
+		append_bytes_to_read_buf(term, transmute([]byte)seq)
+		return {}, false
+
+	case .Key:
+		if !rec.key_down {
+			return {}, false
+		}
+		u := rec.unicode_char
+		// UTF-16 high surrogate (0xD800..0xDBFF)
+		if u >= 0xD800 && u <= 0xDBFF {
+			term.utf16_high_surrogate = u
+			return {}, false
+		}
+		// UTF-16 low surrogate (0xDC00..0xDFFF)
+		if u >= 0xDC00 && u <= 0xDFFF {
+			high := term.utf16_high_surrogate
+			term.utf16_high_surrogate = 0
+			if high >= 0xD800 && high <= 0xDBFF {
+				cp := rune(0x10000 + ((u32(high) - 0xD800) << 10) + (u32(u) - 0xDC00))
+				encoded, n := utf8.encode_rune(cp)
+				append_bytes_to_read_buf(term, encoded[:n])
+			}
+			return {}, false
+		}
+
+		term.utf16_high_surrogate = 0
+		if u != 0 {
+			encoded, n := utf8.encode_rune(rune(u))
+			reps := max(1, int(rec.repeat_count))
+			if u == 0x1b {
+				reps = 1
+			}
+			for _ in 0 ..< reps {
+				append_bytes_to_read_buf(term, encoded[:n])
+			}
+			return {}, false
+		}
+
+		// Fallback Win32 Virtual-Key translation when UnicodeChar == 0
+		vk_seq := win32_vk_to_ansi(rec.virtual_key_code)
+		if len(vk_seq) > 0 {
+			append_bytes_to_read_buf(term, transmute([]byte)vk_seq)
+		}
+		return {}, false
 	}
 
-	stdin_ready = (.IN in pfds[0].revents)
-	resize_ready = (.IN in pfds[1].revents)
-	return stdin_ready, resize_ready, .None
+	return {}, false
+}
+
+@(private)
+win32_vk_to_ansi :: proc "contextless" (vk: u16) -> string {
+	switch vk {
+	case 0x26: return "\x1b[A"  // VK_UP
+	case 0x28: return "\x1b[B"  // VK_DOWN
+	case 0x27: return "\x1b[C"  // VK_RIGHT
+	case 0x25: return "\x1b[D"  // VK_LEFT
+	case 0x24: return "\x1b[H"  // VK_HOME
+	case 0x23: return "\x1b[F"  // VK_END
+	case 0x21: return "\x1b[5~" // VK_PRIOR (Page Up)
+	case 0x22: return "\x1b[6~" // VK_NEXT (Page Down)
+	case 0x2D: return "\x1b[2~" // VK_INSERT
+	case 0x2E: return "\x1b[3~" // VK_DELETE
+	case 0x70: return "\x1bOP"  // VK_F1
+	case 0x71: return "\x1bOQ"  // VK_F2
+	case 0x72: return "\x1bOR"  // VK_F3
+	case 0x73: return "\x1bOS"  // VK_F4
+	case 0x74: return "\x1b[15~" // VK_F5
+	case 0x75: return "\x1b[17~" // VK_F6
+	case 0x76: return "\x1b[18~" // VK_F7
+	case 0x77: return "\x1b[19~" // VK_F8
+	case 0x78: return "\x1b[20~" // VK_F9
+	case 0x79: return "\x1b[21~" // VK_F10
+	case 0x7A: return "\x1b[23~" // VK_F11
+	case 0x7B: return "\x1b[24~" // VK_F12
+	}
+	return ""
+}
+
+@(private)
+append_bytes_to_read_buf :: proc "contextless" (term: ^Terminal, data: []byte) {
+	if len(data) == 0 {
+		return
+	}
+	space := len(term.read_buf) - term.read_len
+	if len(data) > space {
+		term.read_len = 0
+		space = len(term.read_buf)
+	}
+	n := min(len(data), space)
+	copy(term.read_buf[term.read_len:term.read_len + n], data[:n])
+	term.read_len += n
 }
 
 @(private)
@@ -457,19 +345,24 @@ consume_buffer_prefix :: proc "contextless" (term: ^Terminal, count: int) {
 }
 
 @(private)
-write_all_fd :: proc(fd: posix.FD, data: string) -> Terminal_Error {
-	bytes := transmute([]byte)data
-	written := 0
-	for written < len(bytes) {
-		rem := len(bytes) - written
-		n := posix.write(fd, &bytes[written], uint(rem))
-		if n < 0 {
-			if posix.errno() == .EINTR {
-				continue
-			}
-			return .Write_Failed
-		}
-		written += int(n)
+emit_terminal_setup_sequences :: proc(out_fd: Terminal_FD, opts: Terminal_Options) -> Terminal_Error {
+	if opts.alt_screen {
+		write_all_fd(out_fd, CTL_ENTER_ALT_SCREEN) or_return
+	}
+	if opts.hide_cursor {
+		write_all_fd(out_fd, CTL_HIDE_CURSOR) or_return
+	}
+	if opts.bracketed_paste {
+		write_all_fd(out_fd, CTL_BRACKETED_PASTE_SET) or_return
+	}
+	if opts.focus_events {
+		write_all_fd(out_fd, CTL_FOCUS_SET) or_return
+	}
+	if opts.mouse {
+		write_all_fd(out_fd, CTL_MOUSE_SET) or_return
+	}
+	if opts.kitty_keyboard {
+		write_all_fd(out_fd, CTL_KITTY_KBD_PUSH) or_return
 	}
 	return .None
 }
