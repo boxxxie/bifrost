@@ -193,6 +193,23 @@ odin run examples/keymap_workbench -- --live-tty
 
 ![Bifrost Keymap Workbench](docs/assets/screenshots/keymap_workbench.png)
 
+### 6. Interactive `xitdb` Structural Explorer & Datalog Workbench (`examples/xitdb_explorer`)
+Full-featured terminal database explorer and time-travel inspector for `xitdb` (supports either an in-memory multi-moment demo database or any `.xit` file path passed on the CLI). Features a live recursive `ui_tree` over `@m` moments (`Hash_Map`, `Counted_Hash_Map`, `Sorted_Map`, `Array_List`, `Linked_Array_List`, `Hash_Set`), a zero-copy `xitdb_slice_viewport` 2D slot inspector with prefix/substring filtering and `xitdb.history_of` temporal lineage, an interactive Layer 5 Datalog & Layer 2 `transact_script` workbench (`ui_text_area`) with 5 presets, and a `xitdb.diff_moments` structural diff viewer paired with a 2x4 sub-cell Braille root-slot offset curve (`ui_canvas`) and per-moment mutation sparkline (`ui_sparkline`).
+
+```bash
+odin run examples/xitdb_explorer -vet -strict-style -vet-packages:bifrost,main
+odin run examples/xitdb_explorer -- --live-tty [optional/path/to/db.xit]
+```
+
+**Tab 1: Zero-Copy Slot Inspector & Temporal Lineage (`history_of`)**
+![Bifrost xitdb Explorer Tab 1 — Slot & Lineage Inspector](docs/assets/screenshots/xitdb_explorer_slots.png)
+
+**Tab 2: Layer 5 Datalog Query & Layer 2 Transaction Script Workbench**
+![Bifrost xitdb Explorer Tab 2 — Datalog & Tx Workbench](docs/assets/screenshots/xitdb_explorer_datalog.png)
+
+**Tab 3: Structural Moment Diff (`diff_moments`) & Braille Storage Telemetry**
+![Bifrost xitdb Explorer Tab 3 — Structural Diff & Storage](docs/assets/screenshots/xitdb_explorer_diff.png)
+
 ---
 
 ## Documentation Hub (`docs/`) & Conductor Tracks

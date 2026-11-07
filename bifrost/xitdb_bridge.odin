@@ -453,12 +453,12 @@ xitdb_format_cursor_preview :: proc(
 		return "{map}"
 	case .Counted_Hash_Map, .Sorted_Map:
 		cnt, _ := xitdb.cursor_count(cur)
-		return fmt.aprintf("{%d entries}", cnt, allocator = alloc)
+		return fmt.aprintf("{{%d entries}}", cnt, allocator = alloc)
 	case .Hash_Set:
 		return "#{set}"
 	case .Counted_Hash_Set, .Sorted_Set:
 		cnt, _ := xitdb.cursor_count(cur)
-		return fmt.aprintf("#{%d members}", cnt, allocator = alloc)
+		return fmt.aprintf("#{{%d members}}", cnt, allocator = alloc)
 	}
 	return "<slot>"
 }
@@ -502,6 +502,29 @@ xitdb_slice_viewport :: proc(
 	rows := make([dynamic]Xitdb_Row_View, 0, int(max_fetch), alloc)
 
 	#partial switch coll_tag {
+	case .None, .Bytes, .Short_Bytes, .Uint, .Int, .Float:
+		val_str := xitdb_format_cursor_preview(target_cur, alloc)
+		key_str := collection_name if len(collection_name) > 0 else "<scalar>"
+		passes_filter := true
+		if filter.kind == .Substring && len(filter.needle) > 0 {
+			passes_filter = strings.contains(val_str, filter.needle) || strings.contains(key_str, filter.needle)
+		} else if filter.kind == .Key_Prefix && len(filter.prefix) > 0 {
+			passes_filter = strings.has_prefix(key_str, filter.prefix)
+		}
+		if passes_filter {
+			if clamped_start == 0 && max_fetch > 0 {
+				append(&rows, Xitdb_Row_View{
+					view_index    = 0,
+					logical_index = 0,
+					key_text      = strings.clone(key_str, alloc),
+					val_text      = val_str,
+					tag           = coll_tag,
+					slot_offset   = target_slot.value,
+				})
+			}
+			total_count = 1
+		}
+
 	case .Array_List, .Linked_Array_List:
 		seek_start := i64(0) if has_active_filter else clamped_start
 		it: xitdb.Cursor_Iterator
@@ -598,7 +621,8 @@ xitdb_slice_viewport :: proc(
 				}
 			}
 
-			val_str := xitdb_format_cursor_preview(kv_pair.value_cursor, alloc)
+			is_set_coll := coll_tag == .Sorted_Set
+			val_str := "∈ set" if is_set_coll else xitdb_format_cursor_preview(kv_pair.value_cursor, alloc)
 			if filter.kind == .Substring && len(filter.needle) > 0 {
 				if !strings.contains(k_str, filter.needle) && !strings.contains(val_str, filter.needle) {
 					row_idx += 1
@@ -607,7 +631,7 @@ xitdb_slice_viewport :: proc(
 			}
 
 			if matched_idx >= clamped_start && i64(len(rows)) < max_fetch {
-				val_slot, _ := xitdb.cursor_slot(kv_pair.value_cursor)
+				val_slot, _ := xitdb.cursor_slot(kv_pair.key_cursor if is_set_coll else kv_pair.value_cursor)
 				append(&rows, Xitdb_Row_View{
 					view_index    = matched_idx,
 					logical_index = row_idx,
@@ -629,6 +653,7 @@ xitdb_slice_viewport :: proc(
 		row_idx: i64 = 0
 		matched_idx: i64 = 0
 		key_buf: [256]u8
+		is_set_coll := coll_tag == .Hash_Set || coll_tag == .Counted_Hash_Set
 		for {
 			kv_maybe := xitdb.cursor_iterator_next(&it) or_return
 			kv_cur, has_kv := kv_maybe.?
@@ -650,7 +675,7 @@ xitdb_slice_viewport :: proc(
 					continue
 				}
 			}
-			val_str := xitdb_format_cursor_preview(kv_pair.value_cursor, alloc)
+			val_str := "∈ set" if is_set_coll else xitdb_format_cursor_preview(kv_pair.value_cursor, alloc)
 			if filter.kind == .Substring && len(filter.needle) > 0 {
 				if !strings.contains(k_str, filter.needle) && !strings.contains(val_str, filter.needle) {
 					row_idx += 1
@@ -658,7 +683,7 @@ xitdb_slice_viewport :: proc(
 				}
 			}
 			if matched_idx >= clamped_start && i64(len(rows)) < max_fetch {
-				val_slot, _ := xitdb.cursor_slot(kv_pair.value_cursor)
+				val_slot, _ := xitdb.cursor_slot(kv_pair.key_cursor if is_set_coll else kv_pair.value_cursor)
 				append(&rows, Xitdb_Row_View{
 					view_index    = matched_idx,
 					logical_index = row_idx,

@@ -55,6 +55,9 @@ Each file in `docs/widget/` documents a specific widget family in detail, includ
 | **Kanban Board** (`examples/kanban_board`) | 4-column focus scopes with Harel H/H* memory, word-wrapped cards, xitdb time travel | [![Kanban Board](assets/screenshots/kanban_board.png)](assets/screenshots/kanban_board.png) |
 | **Log Monitor** (`examples/log_monitor`) | High-throughput Sleipnir actor streaming, structured log virtual table, Braille metrics | [![Log Monitor](assets/screenshots/log_monitor.png)](assets/screenshots/log_monitor.png) |
 | **Keymap Workbench** (`examples/keymap_workbench`) | Vim/Helix/Emacs modal styles, Which-Key card, zero-CGO OSC 52 clipboard | [![Keymap Workbench](assets/screenshots/keymap_workbench.png)](assets/screenshots/keymap_workbench.png) |
+| **xitdb Explorer — Tab 1** (`examples/xitdb_explorer`) | Recursive `ui_tree` over `@m` moments, zero-copy `xitdb_slice_viewport` 2D slot table, `history_of` lineage | [![xitdb Explorer Tab 1](assets/screenshots/xitdb_explorer_slots.png)](assets/screenshots/xitdb_explorer_slots.png) |
+| **xitdb Explorer — Tab 2** (`examples/xitdb_explorer`) | Layer 5 Datalog query & Layer 2 `transact_script` workbench (`ui_text_area`) with live commits | [![xitdb Explorer Tab 2](assets/screenshots/xitdb_explorer_datalog.png)](assets/screenshots/xitdb_explorer_datalog.png) |
+| **xitdb Explorer — Tab 3** (`examples/xitdb_explorer`) | `xitdb.diff_moments` structural diff table, 2x4 Braille slot offset curve (`ui_canvas`), mutation sparkline | [![xitdb Explorer Tab 3](assets/screenshots/xitdb_explorer_diff.png)](assets/screenshots/xitdb_explorer_diff.png) |
 
 ---
 
