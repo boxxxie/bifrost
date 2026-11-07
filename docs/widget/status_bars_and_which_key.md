@@ -13,7 +13,7 @@ Bifrost provides three self-populating contextual HUD components that inspect `I
 
 Because `resolve_input` runs *after* `end_layout`, a naive immediate-mode status bar would display stale focus or mode state from the previous frame. Bifrost eliminates this lag by recording `Dynamic_Bar_Entry` descriptors on `Screen.dynamic_bars` during layout and re-evaluating their `Paint_Spec` inside `apply_input_highlights` (`refresh_dynamic_bars`) *after* `resolve_input` has completed.
 
-As a result, pressing `Enter` to enter `[EDIT]` or `[RESIZE]` mode, typing a prefix key like `g` (`[CHORD: g…]`), or jumping focus across scopes updates `ui_focus_breadcrumb_bar` and `ui_key_hint_bar` on the **exact same frame** ($0$ frame lag).
+As a result, pressing `Enter` to enter `[EDIT]` or `[RESIZE]` mode, typing a prefix key like `g` (`[CHORD: g…]`), or jumping focus across scopes updates `ui_focus_breadcrumb_bar` and `ui_key_hint_bar` on the **exact same frame** (0 frame lag).
 
 ---
 

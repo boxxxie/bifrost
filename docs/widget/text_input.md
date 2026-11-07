@@ -8,7 +8,7 @@
 
 ## 1. Configuration & State Slot (`Text_Input_Config`, `Text_Input_Slot`)
 
-`Input_State` manages up to `MAX_TEXT_SLOTS` ($16$) concurrent text inputs, each backed by a fixed `[MAX_TEXT_BYTES]byte` ($256$-byte) inline buffer.
+`Input_State` manages up to `MAX_TEXT_SLOTS` (16) concurrent text inputs, each backed by a fixed `[MAX_TEXT_BYTES]byte` (256-byte) inline buffer.
 
 ```odin
 Text_Input_Config :: struct {

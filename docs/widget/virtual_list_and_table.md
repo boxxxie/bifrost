@@ -2,7 +2,7 @@
 
 **Source Files:** [`bifrost/scroll.odin`](../../bifrost/scroll.odin), [`bifrost/xitdb_bridge.odin`](../../bifrost/xitdb_bridge.odin)
 
-`ui_virtual_list` renders scrollable lists and 2D tables backed by $100,000+$ rows while materializing only the $O(\text{viewport\_rows})$ visible `Layout_Node`s each frame. It pairs with Bifrost's Ratatui-inspired monotonic high-water-mark column constraint solver (`resolve_table_columns`), 64-bit interior-detent scrollbar (`compute_scrollbar_metrics`), and zero-copy `xitdb_slice_viewport`.
+`ui_virtual_list` renders scrollable lists and 2D tables backed by 100,000+ rows while materializing only the O(viewport_rows) visible `Layout_Node`s each frame. It pairs with Bifrost's Ratatui-inspired monotonic high-water-mark column constraint solver (`resolve_table_columns`), 64-bit interior-detent scrollbar (`compute_scrollbar_metrics`), and zero-copy `xitdb_slice_viewport`.
 
 ---
 
@@ -41,7 +41,7 @@ Virtual_Slice :: struct {
 ```
 
 ### Keyboard & Mouse Navigation in `ui_virtual_list`
-* **Vertical Row Stepping (`j`/`k`, `Down`/`Up`, `Ctrl+N`/`Ctrl+P`):** Moves `selected_row` by $\pm \text{repeat\_count}$ (`5j` jumps 5 rows), maintaining `scroll_padding` lookahead rows at the top and bottom of the viewport.
+* **Vertical Row Stepping (`j`/`k`, `Down`/`Up`, `Ctrl+N`/`Ctrl+P`):** Moves `selected_row` by `±repeat_count` (`5j` jumps 5 rows), maintaining `scroll_padding` lookahead rows at the top and bottom of the viewport.
 * **Paging (`Page_Up`, `Page_Down`, `Home`, `End`, Emacs `C-v`/`M-v`):** Pages by `max(1, viewport_rows - 1)` or jumps to row `0` / `total_rows - 1`.
 * **2D Horizontal Column Stepping (`h`/`l`, `Left`/`Right`, Emacs `C-b`/`C-f`):**
   * When `total_cols > 1`, `l` and `h` step `selected_col` across `0 ..< total_cols`.

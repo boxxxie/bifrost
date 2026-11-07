@@ -24,8 +24,8 @@ For an interactive walkthrough combining all four widgets inside a split-pane ID
   - Moving `Up`, `Down`, `Page_Up`, or `Page_Down` preserves `slot.preferred_col` across shorter or empty intermediate lines (including 2-column CJK/emoji codepoints) and only updates `preferred_col` on horizontal cursor movement, text insertion/deletion, or mouse click.
 - **Two-Stage Modal Editing (`two_stage = true`):**
   - When `two_stage = true`, focusing the editor leaves `inp.editing_id == 0` (`.Navigation` mode) so `h`/`j`/`k`/`l` and single-key global shortcuts navigate between panes. Pressing `Enter` or `i` (or left-clicking inside the editor) enters `.Editing` mode (`inp.editing_id == node.id_hash`), suppressing non-`allow_in_edit` single-key bindings (`q`, `[`/`]`, `j`/`k`) while keeping `<F2>`..`<F6>` and `<C-p>` active. Pressing `Escape` clears `has_selection` and returns to `.Navigation` mode while keeping `inp.focused_id` on the editor.
-- **$O(N + M)$ Single-Pass Bulk Paste:**
-  - `text_area_insert_string` (invoked by bracketed `Paste_Event` and `Ctrl+V`) normalizes `\r\n` $\rightarrow$ `\n`, `\r` $\rightarrow$ `\n`, and `\t` $\rightarrow$ `tab_width` spaces, halts cleanly at `MAX_TEXT_AREA_LINES`, shifts the buffer tail once, and rebuilds line starts in a single pass.
+- **O(N + M) Single-Pass Bulk Paste:**
+  - `text_area_insert_string` (invoked by bracketed `Paste_Event` and `Ctrl+V`) normalizes `\r\n` → `\n`, `\r` → `\n`, and `\t` → `tab_width` spaces, halts cleanly at `MAX_TEXT_AREA_LINES`, shifts the buffer tail once, and rebuilds line starts in a single pass.
 - **Built-In Odin, CUE & Custom Per-Line Syntax Highlighting:**
   - Setting `syntax_mode = .Odin` or `syntax_mode = .Cue` in `Text_Area_Config` activates the zero-heap-allocation lexical highlighters (`highlight_odin_line` / `highlight_cue_line`), coloring keywords, built-in types/constraints, `::` / `:=` declarations, CUE `#Schema` / `_#Hidden` definitions, field keys (`field?:` / `field!:`), strings/runes, numbers, `@(...)` attributes, `#...` directives, and `//` comments while preserving horizontal scrolling, cursor rendering, and selection range inversion.
   - Custom languages can supply `highlighter: Text_Area_Highlighter_Proc` (`proc(line: string, line_idx: i32, out_spans: ^[dynamic]Styled_Span, default_fg: Color, default_bg: Color, userdata: rawptr)`) along with `highlighter_userdata`.
@@ -105,10 +105,10 @@ render_notes_editor :: proc(
 
 ## 2. Virtualized Collapsible Tree (`ui_tree`)
 
-[`ui_tree`](../bifrost/tree.odin) renders hierarchical data structures (file explorers, AST inspectors, module outlines) with automatic box-drawing indentation guides (`│  `, `   `, `├─ `, `╰─ `, `▾ `, `▸ `), keyboard/mouse expand/collapse, parent-node jump navigation, and **$O(\text{visible\_rows})$ layout node materialization** over 10,000+ node trees.
+[`ui_tree`](../bifrost/tree.odin) renders hierarchical data structures (file explorers, AST inspectors, module outlines) with automatic box-drawing indentation guides (`│  `, `   `, `├─ `, `╰─ `, `▾ `, `▸ `), keyboard/mouse expand/collapse, parent-node jump navigation, and **O(visible_rows) layout node materialization** over 10,000+ node trees.
 
 ### Key Architectural Invariants
-- **Single-Pass $O(N)$ Hierarchy Resolution + $O(\text{visible\_rows})$ Layout Budget:**
+- **Single-Pass O(N) Hierarchy Resolution + O(visible_rows) Layout Budget:**
   - Callers pass a flat pre-order `[]Tree_Node` slice specifying either `depth` (`0, 1, 2, ...`) or `parent_idx`.
   - `ui_tree` resolves `parent_idx`, `first_child`, `next_sibling`, and `has_children` in a single linear pass (clamping skipped depths to `prev_depth + 1`), builds `vis_to_node` skipping descendants of collapsed branches, and only pushes `Layout_Node`s for rows inside `[start_row ..< end_row]`. A 10,000-node tree in a 12-row viewport materializes only **14 `Layout_Node`s** total.
 - **`id_hash`-Keyed Expand/Collapse & Selection Persistence:**
@@ -122,8 +122,8 @@ render_notes_editor :: proc(
 | --- | --- |
 | `j` / `Down`, `k` / `Up`, `Ctrl+N` / `Ctrl+P` | Move selection through visible rows (respects Vim/Helix/Emacs repeat counts) |
 | `Page_Up` / `Page_Down`, `Home` / `End` | Page or jump to first / last visible row |
-| `l` / `Right` | On collapsed branch: expand in-place (`▸` $\rightarrow$ `▾`). On expanded branch: step into `first_child` |
-| `h` / `Left` | On expanded branch: collapse in-place (`▾` $\rightarrow$ `▸`). On collapsed branch or leaf: **jump directly to `parent_idx`** and auto-scroll viewport |
+| `l` / `Right` | On collapsed branch: expand in-place (`▸` → `▾`). On expanded branch: step into `first_child` |
+| `h` / `Left` | On expanded branch: collapse in-place (`▾` → `▸`). On collapsed branch or leaf: **jump directly to `parent_idx`** and auto-scroll viewport |
 | `Space` | Toggle expand/collapse on a branch node |
 | `Enter` | Toggle expand/collapse on a branch node, or fire `activated_node_idx` (`was_activated`) on a leaf node |
 | `Mouse Left Click` | Focus tree, select clicked visible row, and toggle branch or activate leaf (clicks in empty space below short trees only focus without toggling) |
@@ -181,13 +181,13 @@ render_file_tree :: proc(
 
 ## 3. Focus-Scope-Integrated Tab Bar (`ui_tabs` / `ui_tab_bar`)
 
-[`ui_tabs`](../bifrost/tabs.odin) and [`ui_tab_bar`](../bifrost/tabs.odin) provide a declarative horizontal tab header bar and scoped tab container integrated with Bifrost's Harel statechart Shallow ($H$) and Deep ($H^*$) focus history (`Scope_Memory_Entry`).
+[`ui_tabs`](../bifrost/tabs.odin) and [`ui_tab_bar`](../bifrost/tabs.odin) provide a declarative horizontal tab header bar and scoped tab container integrated with Bifrost's Harel statechart Shallow (H) and Deep (H*) focus history (`Scope_Memory_Entry`).
 
 ### Key Architectural Invariants
-- **Per-Tab Focus Scope Isolation & Deep History ($H^*$):**
-  - Each tab index $i$ owns a dedicated body scope ID (`<id>_body_<i>`). While the user navigates inside Tab $i$, `set_focused_node` records the focused descendant leaf in `Scope_Memory_Entry` under `<id>_body_<i>`.
-  - When switching from Tab $i$ to Tab $j$ (via `[` / `]`, `Alt+1..9`, clicking a tab header pill, or pressing `Down`/`Enter` from the header bar), `select_tab_in_slot` sets `inp.wants_focus_id = body_scope_hash[j]`. On the next layout pass, `reconcile_focus` resolves `<id>_body_<j>` via `resolve_scope_target(..., prefer_history = true)`, restoring the exact leaf widget previously focused in Tab $j$!
-  - Furthermore, `begin_ui_tabs_internal` keeps the outer `ui_tabs` scope's Shallow History ($H$) pointed at the active tab's body scope (unless focus is currently directly on the header bar), so `F6` scope cycling or modal dismissal always returns into the active tab's $H^*$ leaf.
+- **Per-Tab Focus Scope Isolation & Deep History (H*):**
+  - Each tab index `i` owns a dedicated body scope ID (`<id>_body_<i>`). While the user navigates inside Tab `i`, `set_focused_node` records the focused descendant leaf in `Scope_Memory_Entry` under `<id>_body_<i>`.
+  - When switching from Tab `i` to Tab `j` (via `[` / `]`, `Alt+1..9`, clicking a tab header pill, or pressing `Down`/`Enter` from the header bar), `select_tab_in_slot` sets `inp.wants_focus_id = body_scope_hash[j]`. On the next layout pass, `reconcile_focus` resolves `<id>_body_<j>` via `resolve_scope_target(..., prefer_history = true)`, restoring the exact leaf widget previously focused in Tab `j`!
+  - Furthermore, `begin_ui_tabs_internal` keeps the outer `ui_tabs` scope's Shallow History (H) pointed at the active tab's body scope (unless focus is currently directly on the header bar), so `F6` scope cycling or modal dismissal always returns into the active tab's H* leaf.
 - **Scoped `[` / `]` & `Alt+1..9` Bubbling:**
   - `handle_tabs_key` walks `inp.focus_node_path` innermost-first (halting at `.Trap_Focus` modal boundaries) so `[` / `]` and `Alt+1..9` only switch the enclosing `ui_tabs` container and never hijack sibling panes in split layouts.
 - **Disabled Tab Skipping & Wrap Navigation:**
@@ -197,11 +197,11 @@ render_file_tree :: proc(
 
 | Context | Key / Event | Action |
 | --- | --- | --- |
-| Inside `ui_tabs` (when `editing_id == 0`) | `[` / `]` | Step to previous / next enabled tab and restore target tab's $H^*$ body focus |
-| Inside `ui_tabs` (when `editing_id == 0`) | `Alt+1` .. `Alt+9` | Jump directly to tab $0..8$ and restore target tab's $H^*$ body focus |
+| Inside `ui_tabs` (when `editing_id == 0`) | `[` / `]` | Step to previous / next enabled tab and restore target tab's H* body focus |
+| Inside `ui_tabs` (when `editing_id == 0`) | `Alt+1` .. `Alt+9` | Jump directly to tab `0..8` and restore target tab's H* body focus |
 | Focused on `<id>_header` or `<id>_tab_<i>` | `h` / `l`, `Left` / `Right` | Step active tab relative to focused tab item while keeping focus on the header bar |
-| Focused on `<id>_header` or `<id>_tab_<i>` | `j` / `Down`, `Enter`, `Space` | Enter active tab body scope and restore its $H^*$ leaf focus |
-| Anywhere (unoccluded by modal) | `Mouse Left Click` on `<id>_tab_<i>` | Switch to tab $i$ (if enabled) and restore its $H^*$ body focus |
+| Focused on `<id>_header` or `<id>_tab_<i>` | `j` / `Down`, `Enter`, `Space` | Enter active tab body scope and restore its H* leaf focus |
+| Anywhere (unoccluded by modal) | `Mouse Left Click` on `<id>_tab_<i>` | Switch to tab `i` (if enabled) and restore its H* body focus |
 
 ### Usage Example
 
@@ -255,10 +255,10 @@ render_workspace_tabs :: proc(
 ## 4. Unicode Braille Sub-Cell Canvas (`ui_canvas`) & Sparkline (`ui_sparkline`)
 
 [`ui_canvas`](../bifrost/canvas.odin) and [`ui_sparkline`](../bifrost/canvas.odin) provide high-density terminal data visualization:
-- **`ui_canvas` (`Braille_Canvas`):** Maps each terminal cell `(cx, cy)` to a **$2 \times 4$ sub-cell pixel grid** using ISO/TR 11548-1 Unicode Braille patterns (`U+2800..U+28FF`), yielding $(2 \cdot W) \times (4 \cdot H)$ virtual pixel resolution with per-cell RGB foreground tinting.
+- **`ui_canvas` (`Braille_Canvas`):** Maps each terminal cell `(cx, cy)` to a **2×4 sub-cell pixel grid** using ISO/TR 11548-1 Unicode Braille patterns (`U+2800..U+28FF`), yielding `(2 × W) × (4 × H)` virtual pixel resolution with per-cell RGB foreground tinting.
 - **`ui_sparkline`:** Quantizes `[]f32` or `[]int` time-series samples into the 8 Unicode vertical block elements (`▁▂▃▄▅▆▇█`, `U+2581..U+2588`) across single-row or multi-row (`8 * inner.h` vertical sub-levels) viewports.
 
-### ISO/TR 11548-1 $2 \times 4$ Sub-Cell Bitmask Layout
+### ISO/TR 11548-1 2×4 Sub-Cell Bitmask Layout
 
 | Sub-Row (`sub_y`) | Left Column (`sub_x == 0`) | Right Column (`sub_x == 1`) |
 | --- | --- | --- |

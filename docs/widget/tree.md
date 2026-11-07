@@ -2,7 +2,7 @@
 
 **Source File:** [`bifrost/tree.odin`](../../bifrost/tree.odin)
 
-`ui_tree` renders hierarchical data structures (file explorers, AST inspectors, configuration outlines) with automatic box-drawing indentation guides (`│  `, `   `, `├─ `, `╰─ `, `▾ `, `▸ `), keyboard and mouse expand/collapse, parent-node jump navigation, and **$O(\text{visible\_rows})$ layout node materialization** capable of handling $10,000+$ nodes with zero heap allocations outside the frame arena.
+`ui_tree` renders hierarchical data structures (file explorers, AST inspectors, configuration outlines) with automatic box-drawing indentation guides (`│  `, `   `, `├─ `, `╰─ `, `▾ `, `▸ `), keyboard and mouse expand/collapse, parent-node jump navigation, and **O(visible_rows) layout node materialization** capable of handling 10,000+ nodes with zero heap allocations outside the frame arena.
 
 ---
 
@@ -65,10 +65,10 @@ Tree_Slice :: struct {
 
 ## 2. Architectural Invariants
 
-1. **$O(\text{visible\_rows})$ Layout Node Budget:**
+1. **O(visible_rows) Layout Node Budget:**
    * `ui_tree` resolves `parent_idx`, `first_child`, `next_sibling`, and `has_children` in a single linear pre-order pass over `nodes`, builds `vis_to_node` skipping descendants of collapsed branches, and pushes `Layout_Node`s **only** for `[start_row ..< end_row]`.
 2. **`id_hash`-Persistent Expand/Collapse & Selection State:**
-   * Each `Tree_Slot` (`MAX_TREE_SLOTS = 8`) stores an inline open-addressed hash table (`hash_keys: [512]u64`, `hash_expanded: [8]u64`) alongside a $16,384$-node bitset (`expanded_bits: [256]u64`) and `selected_node_hash`. Inserting or filtering nodes above a branch preserves both its expanded/collapsed state and the active selection across frames.
+   * Each `Tree_Slot` (`MAX_TREE_SLOTS = 8`) stores an inline open-addressed hash table (`hash_keys: [512]u64`, `hash_expanded: [8]u64`) alongside a 16,384-node bitset (`expanded_bits: [256]u64`) and `selected_node_hash`. Inserting or filtering nodes above a branch preserves both its expanded/collapsed state and the active selection across frames.
 3. **Collapse-Safe Ancestor Reconciliation:**
    * If a branch is collapsed programmatically while one of its descendants is selected, `rebuild_tree_visible_rows` walks up `parent_idx` to snap selection to the nearest visible ancestor.
 
@@ -80,8 +80,8 @@ Tree_Slice :: struct {
 | :--- | :--- |
 | `j` / `Down`, `k` / `Up`, `Ctrl+N` / `Ctrl+P` | Step selection through visible rows (supports Vim `5j`, Helix `j5`, and Emacs `C-u` repeat counts) |
 | `Page_Up` / `Page_Down`, `Home` / `End` | Page by `max(1, viewport_rows - 1)` or jump to first / last visible row |
-| `l` / `Right`, `Ctrl+F` (Emacs) | **On collapsed branch:** expand in-place (`▸` $\rightarrow$ `▾`). **On expanded branch:** step into `first_child`. **On leaf:** bubbles out to right sibling pane (unless `.Strict_Spatial` is set). |
-| `h` / `Left`, `Ctrl+B` (Emacs) | **On expanded branch:** collapse in-place (`▾` $\rightarrow$ `▸`). **On collapsed branch or leaf with `parent_idx >= 0`:** jump directly to parent node and auto-scroll viewport. **At root (`depth == 0`) collapsed/leaf:** bubbles out to left sibling pane. |
+| `l` / `Right`, `Ctrl+F` (Emacs) | **On collapsed branch:** expand in-place (`▸` → `▾`). **On expanded branch:** step into `first_child`. **On leaf:** bubbles out to right sibling pane (unless `.Strict_Spatial` is set). |
+| `h` / `Left`, `Ctrl+B` (Emacs) | **On expanded branch:** collapse in-place (`▾` → `▸`). **On collapsed branch or leaf with `parent_idx >= 0`:** jump directly to parent node and auto-scroll viewport. **At root (`depth == 0`) collapsed/leaf:** bubbles out to left sibling pane. |
 | `Space` | Toggle expand/collapse on a branch node, or activate a leaf node |
 | `Enter` | Toggle expand/collapse on a branch node, or fire `activated_node_idx` (`get_tree_activated_node`) on a leaf node |
 | `Mouse Left Click` | Focus tree, select clicked visible row, and toggle branch or activate leaf |

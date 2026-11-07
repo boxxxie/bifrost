@@ -2,7 +2,7 @@
 
 **Source File:** [`bifrost/text_area.odin`](../../bifrost/text_area.odin)
 
-`ui_text_area` is a multi-line, grapheme- and East Asian display-width-aware text and code editor featuring 2D caret navigation with sticky `preferred_col`, an optional dynamic line-number gutter, multi-line `Shift+Arrow` / `Ctrl+A` selection, $O(N + M)$ bulk bracketed paste, zero-CGO OSC 52 clipboard integration, proportional vertical scrollbar rendering, and built-in zero-allocation **Odin** and **CUE** syntax highlighters.
+`ui_text_area` is a multi-line, grapheme- and East Asian display-width-aware text and code editor featuring 2D caret navigation with sticky `preferred_col`, an optional dynamic line-number gutter, multi-line `Shift+Arrow` / `Ctrl+A` selection, O(N + M) bulk bracketed paste, zero-CGO OSC 52 clipboard integration, proportional vertical scrollbar rendering, and built-in zero-allocation **Odin** and **CUE** syntax highlighters.
 
 ---
 
@@ -48,7 +48,7 @@ Text_Area_Config :: struct {
 ```
 
 ### Fixed Zero-Allocation Slots vs. Caller-Owned Dynamic State
-* **Default Zero-Allocation Mode (`cfg.state == nil`):** `Input_State` provides `MAX_TEXT_AREA_SLOTS` ($8$) fixed-capacity slots (`[4096]u8` buffer, `256` lines max) evicted via `last_layout_gen` LRU with zero heap allocations.
+* **Default Zero-Allocation Mode (`cfg.state == nil`):** `Input_State` provides `MAX_TEXT_AREA_SLOTS` (8) fixed-capacity slots (`[4096]u8` buffer, `256` lines max) evicted via `last_layout_gen` LRU with zero heap allocations.
 * **Caller-Owned Dynamic Buffer (`cfg.state != nil`):** For larger documents, initialize a `Text_Area_State` with `text_area_init(&my_state, allocator, initial_text)` (`defer text_area_destroy(&my_state)`) and pass `state = &my_state` in `Text_Area_Config`.
 
 ---
@@ -86,7 +86,7 @@ Text_Area_Config :: struct {
 | `Alt+D`, `Ctrl+Delete` | Delete next word on current line |
 | `Ctrl+U` / `Ctrl+K` | Kill to start / end of line (or join next line at EOL) and copy to OSC 52 clipboard |
 | `Ctrl+C` / `Ctrl+X` | Copy / Cut active multi-line selection to internal + OSC 52 clipboard (`osc52_pending = true`) |
-| `Ctrl+V` / `Ctrl+Y` / `Paste_Event` | Single-pass $O(N + M)$ bulk insert with `\r\n` $\rightarrow$ `\n` and `\t` $\rightarrow$ spaces normalization |
+| `Ctrl+V` / `Ctrl+Y` / `Paste_Event` | Single-pass O(N + M) bulk insert with `\r\n` → `\n` and `\t` → spaces normalization |
 | `Mouse Left Click` | Focus editor, enter `.Editing` mode, and place caret at clicked `(row, display_col)` |
 | `Mouse Wheel Up / Down` | Scroll viewport vertically (`scroll_row`) without moving the caret |
 | `Escape` / `Ctrl+G` (Emacs) | Clear active selection if present; otherwise exit `.Editing` mode to `.Navigation` mode |

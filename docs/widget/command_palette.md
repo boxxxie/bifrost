@@ -8,7 +8,7 @@
 
 ## 1. Data Structures (`Command_Palette`, `Command_Item`)
 
-`Command_Palette` is a zero-allocation struct holding up to `MAX_PALETTE_COMMANDS` ($64$) commands.
+`Command_Palette` is a zero-allocation struct holding up to `MAX_PALETTE_COMMANDS` (64) commands.
 
 ```odin
 Command_Item :: struct {
@@ -41,8 +41,8 @@ Command_Palette :: struct {
 
 1. **Multi-Token Subsequence Matching (`fuzzy_score`):**
    * Every space-separated token in the user's query must match either `cmd.label` or `cmd.category` (case-insensitive).
-   * Matches on `cmd.label` receive a $+20$ priority bonus over category-only matches.
-   * Character matches earn bonuses for start-of-string ($+25$), word boundaries (` `, `_`, `-`, `/`, `:`, `.`: $+20$), `camelCase` transitions ($+15$), and consecutive character runs ($+12 \times \text{run}$), with a $-1$ gap penalty.
+   * Matches on `cmd.label` receive a `+20` priority bonus over category-only matches.
+   * Character matches earn bonuses for start-of-string (`+25`), word boundaries (` `, `_`, `-`, `/`, `:`, `.`: `+20`), `camelCase` transitions (`+15`), and consecutive character runs (`+12 × run`), with a `-1` gap penalty.
    * Matched commands are stably sorted in descending score order.
 2. **Automatic Shortcut Badge Discovery (`lookup_action_shortcut_by_id`):**
    * If `cmd.shortcut` is empty, `ui_command_palette` inspects `inp.keybindings` for `cmd.action_id` and formats 1-step (`Ctrl+T`, `F2`) or 2-step (`g g`, `Ctrl+X [`) chords right-aligned on each command row.

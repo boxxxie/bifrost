@@ -3,15 +3,15 @@
 **Source File:** [`bifrost/canvas.odin`](../../bifrost/canvas.odin)
 
 Bifrost includes two high-density terminal data-visualization widgets:
-1. **`ui_canvas` (`Braille_Canvas`):** Maps each terminal cell `(cx, cy)` to a **$2 \times 4$ sub-cell dot matrix** using ISO/TR 11548-1 Unicode Braille patterns (`U+2800..U+28FF`), providing $(2 \cdot W) \times (4 \cdot H)$ virtual pixel resolution with per-cell RGB foreground tinting.
-2. **`ui_sparkline`:** Quantizes `[]f32` or `[]int` time-series arrays into the 8 Unicode vertical block elements (`▁▂▃▄▅▆▇█`, `U+2581..U+2588`) across single-row ($8$ levels) or multi-row ($8 \cdot H$ sub-levels) viewports.
+1. **`ui_canvas` (`Braille_Canvas`):** Maps each terminal cell `(cx, cy)` to a **2×4 sub-cell dot matrix** using ISO/TR 11548-1 Unicode Braille patterns (`U+2800..U+28FF`), providing `(2 × W) × (4 × H)` virtual pixel resolution with per-cell RGB foreground tinting.
+2. **`ui_sparkline`:** Quantizes `[]f32` or `[]int` time-series arrays into the 8 Unicode vertical block elements (`▁▂▃▄▅▆▇█`, `U+2581..U+2588`) across single-row (8 levels) or multi-row (`8 × H` sub-levels) viewports.
 
 ---
 
 ## 1. Unicode Braille Sub-Cell Canvas (`ui_canvas`, `Braille_Canvas`)
 
-### ISO/TR 11548-1 $2 \times 4$ Sub-Cell Bitmask Mapping
-Each terminal character cell covers $2$ horizontal sub-pixels (`sub_x` $\in \{0, 1\}$) by $4$ vertical sub-pixels (`sub_y` $\in \{0, 1, 2, 3\}$). The Unicode Braille rune is computed as `rune(0x2800 + u32(mask))`:
+### ISO/TR 11548-1 2×4 Sub-Cell Bitmask Mapping
+Each terminal character cell covers 2 horizontal sub-pixels (`sub_x` ∈ {0, 1}) by 4 vertical sub-pixels (`sub_y` ∈ {0, 1, 2, 3}). The Unicode Braille rune is computed as `rune(0x2800 + u32(mask))`:
 
 | Sub-Row (`sub_y`) | Left Column (`sub_x == 0`) | Right Column (`sub_x == 1`) |
 | :---: | :---: | :---: |
@@ -69,8 +69,8 @@ Canvas_Config :: struct {
 ## 2. Vertical Block Sparklines (`ui_sparkline`)
 
 `ui_sparkline` accepts `[]f32` or `[]int` samples and renders them as vertical bar glyphs (`▁▂▃▄▅▆▇█`):
-* **Single-Row Sparkline (`inner.h == 1`):** Quantizes each sample into $8$ levels via `sparkline_level_rune(norm)`.
-* **Multi-Row Sparkline (`inner.h > 1`):** Quantizes each sample across $8 \times \text{inner.h}$ vertical sub-levels, filling full blocks (`█`) from the bottom row upward and capping the top partial cell with `▁..▇`.
+* **Single-Row Sparkline (`inner.h == 1`):** Quantizes each sample into 8 levels via `sparkline_level_rune(norm)`.
+* **Multi-Row Sparkline (`inner.h > 1`):** Quantizes each sample across `8 × inner.h` vertical sub-levels, filling full blocks (`█`) from the bottom row upward and capping the top partial cell with `▁..▇`.
 * **Trailing Window Slicing:** When `len(samples) > inner.w`, `ui_sparkline` automatically displays the latest `inner.w` trailing samples (`samples[len(samples) - int(inner.w):]`).
 * **Auto-Scaling:** When `cfg.min_val == cfg.max_val`, automatically scales to the `[min, max]` of the visible finite samples.
 

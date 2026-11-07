@@ -8,7 +8,7 @@
 
 ## 1. Configuration & State Slot (`Splitter_Config`, `Splitter_Slot`)
 
-`Input_State` manages up to `MAX_SPLITTER_SLOTS` ($16$) splitters, which can also be persisted to `xitdb` via `save_ui_workspace_to_xitdb`.
+`Input_State` manages up to `MAX_SPLITTER_SLOTS` (16) splitters, which can also be persisted to `xitdb` via `save_ui_workspace_to_xitdb`.
 
 ```odin
 Splitter_Submode :: enum u8 {
@@ -43,8 +43,8 @@ Splitter_Config :: struct {
 | :--- | :--- | :--- |
 | Focused in `.Navigate` sub-mode | `h` / `j` / `k` / `l` or Arrows | Passes through via 2D spatial navigation to adjacent panes |
 | Focused in `.Navigate` sub-mode | `Enter` | Enters `Splitter_Submode.Resize` (`[RESIZE]`) |
-| Focused in `.Resize` sub-mode | `h` / `l`, `Left` / `Right`, `C-b` / `C-f` (on `.Row`) | Resizes preceding pane width by $\pm (\text{step} \times \text{repeat\_count})$ (supports Vim `3l`, Helix `l3`, Emacs `C-u`) |
-| Focused in `.Resize` sub-mode | `k` / `j`, `Up` / `Down`, `C-p` / `C-n` (on `.Column`) | Resizes preceding pane height by $\pm (\text{step} \times \text{repeat\_count})$ |
+| Focused in `.Resize` sub-mode | `h` / `l`, `Left` / `Right`, `C-b` / `C-f` (on `.Row`) | Resizes preceding pane width by `±(step × repeat_count)` (supports Vim `3l`, Helix `l3`, Emacs `C-u`) |
+| Focused in `.Resize` sub-mode | `k` / `j`, `Up` / `Down`, `C-p` / `C-n` (on `.Column`) | Resizes preceding pane height by `±(step × repeat_count)` |
 | Focused in `.Resize` sub-mode | `=`, `0`, or `Home` | Resets splitter to `default_size` |
 | Focused in `.Resize` sub-mode | `Enter`, `Escape`, or `Ctrl+G` (Emacs) | Exits `[RESIZE]` sub-mode back to `.Navigate` (blurring the splitter also auto-exits `.Resize`) |
 | Mouse over splitter | `Left Press + Drag` | Continuously resizes the split to match cursor position within `[min_first, max_first]` |

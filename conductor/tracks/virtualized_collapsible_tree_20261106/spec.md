@@ -11,7 +11,7 @@ Add a virtualized hierarchical tree / outline widget (`ui_tree`, `Tree_State`, `
 
 1. **Virtualized Flattened Visible Row Window (`bifrost/tree.odin`):**
    - Represent hierarchical nodes with stable IDs, labels, depth/parent links, and expand/collapse state.
-   - Materialize only the visible slice (`[first_visible .. last_visible]`) inside the scroll viewport so trees with thousands of nodes allocate $O(\text{visible\_rows})$ `UI_Node`s per frame.
+   - Materialize only the visible slice (`[first_visible .. last_visible]`) inside the scroll viewport so trees with thousands of nodes allocate O(visible_rows) `UI_Node`s per frame.
 
 2. **Tree Guide Glyphs & Indentation Rendering:**
    - Render ancestor continuation pipes (`│  ` or `   `), branch connectors (`├─ ` for intermediate siblings, `╰─ ` for the last sibling), and expand/collapse indicators (`▾ ` expanded, `▸ ` collapsed, or leaf prefix).

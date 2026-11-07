@@ -9,7 +9,7 @@ This reference guide covers Bifrost's embedded statechart focus model, 2D spatia
 Bifrost embeds Harel statechart invariants directly into the immediate-mode layout and input pipeline so applications never maintain a parallel state tree alongside dynamic widgets:
 
 * **OR-States & Hierarchy (`ui_scope`):** Nested `.Focus_Scope` containers build an explicit scope tree (`parent_scope_idx`, `subtree_end_idx`) during `begin_layout` .. `end_layout`.
-* **Shallow ($H$) & Deep ($H^*$) History (`Scope_Memory_Entry`):** Fixed-capacity LRU memory on `Input_State` records `last_child_hash` and `last_leaf_hash` per scope, halting upward writes at `.Trap_Focus` boundaries.
+* **Shallow (H) & Deep (H*) History (`Scope_Memory_Entry`):** Fixed-capacity LRU memory on `Input_State` records `last_child_hash` and `last_leaf_hash` per scope, halting upward writes at `.Trap_Focus` boundaries.
 * **Bottom-Up Event Bubbling (`focus_node_path`):** Key events walk from the focused tip up through enclosing scopes to the root (`0`), halting at the topmost `effective_z` `.Trap_Focus` modal.
 * **Orthogonal Text Delegation (`.Scope_Text_Sink`):** A search bar captures printable runes and horizontal caret motion while sibling list items simultaneously hold focus for vertical navigation and `Enter` activation.
 * **Transient Widget Sub-Modes (`scope_submodes`):** Scopes and widgets (such as `ui_splitter`) switch between `.Navigate` and `.Resize` sub-modes without global boolean flags.
@@ -22,10 +22,10 @@ Combine `Focus_Flags` on `Box_Config`, `Scope_Config`, `Button_Spec`, `Text_Inpu
 
 | Flag | Role | Typical Widget | Esc Behavior | History Impact |
 | --- | --- | --- | --- | --- |
-| `.Focusable` | Holds `focused_id` | Button, Card, Row | Bubbles to parent | Recorded as $H^*$ leaf |
-| `.Focus_Scope` | Scope region | Pane, Column, Form | Drills up if focusable | Stores $H$ and $H^*$ |
+| `.Focusable` | Holds `focused_id` | Button, Card, Row | Bubbles to parent | Recorded as H* leaf |
+| `.Focus_Scope` | Scope region | Pane, Column, Form | Drills up if focusable | Stores H and H* |
 | `.Trap_Focus` | Modal shield | `ui_modal`, Palette | Sets `escape_modal_id` | Freezes outer scopes |
-| `.Default_Focus` | Initial mount target | Primary Button, Row 0 | Standard leaf | Used before $H^*$ exists |
+| `.Default_Focus` | Initial mount target | Primary Button, Row 0 | Standard leaf | Used before H* exists |
 | `.Captures_Text` | Consumes text keys | `ui_text_input` | Exits 2-stage edit | Standard leaf |
 | `.Auto_Edit` | Immediate edit mode | Search bar, Palette | Bubbles in 1 press | Standard leaf |
 | `.Scope_Text_Sink` | Scope text delegate | Command Palette input | Bubbles to modal | Resets scope on edit |
@@ -36,8 +36,8 @@ Combine `Focus_Flags` on `Box_Config`, `Scope_Config`, `Button_Spec`, `Text_Inpu
 
 When focus enters a `.Focus_Scope` (via `F6`, cross-scope spatial movement, `Enter` drill-down, or modal close), `resolve_scope_target` evaluates four stages in order:
 
-1. **Deep History ($H^*$):** Restores `last_leaf_hash` if the node is still mounted, `.Focusable`, and allowed by the active modal shield.
-2. **Shallow History ($H$):** If the prior leaf was deleted or filtered out, descends into `last_child_hash` (e.g., the remembered Kanban column) to pick its surviving default or first focusable item.
+1. **Deep History (H*):** Restores `last_leaf_hash` if the node is still mounted, `.Focusable`, and allowed by the active modal shield.
+2. **Shallow History (H):** If the prior leaf was deleted or filtered out, descends into `last_child_hash` (e.g., the remembered Kanban column) to pick its surviving default or first focusable item.
 3. **Fresh Mount:** Selects the first direct child with `.Default_Focus`, or the first focusable descendant.
 4. **Empty Scope / Zero-Match Fallback:** Focuses the scope container itself if `.Focusable` is set (such as an empty Kanban column), or falls back to `text_sink_idx` so `Backspace` still works when a filter matches zero rows.
 
@@ -95,7 +95,7 @@ render_board :: proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen, inp: ^b
 }
 ```
 
-* **Active vs. Inactive Selection Query:** Call `bifrost.is_focused(inp, id)` for the active cursor tip and `bifrost.is_scope_selected(inp, id)` to check if an item is the remembered $H^*$ selection inside an inactive column or background pane.
+* **Active vs. Inactive Selection Query:** Call `bifrost.is_focused(inp, id)` for the active cursor tip and `bifrost.is_scope_selected(inp, id)` to check if an item is the remembered H* selection inside an inactive column or background pane.
 
 ---
 
@@ -276,9 +276,9 @@ setup_board_bindings :: proc(inp: ^bifrost.Input_State, cp: ^bifrost.Command_Pal
 
 Switch keymap styles at runtime with `bifrost.set_keymap_style(&inp, .Helix)` or `bifrost.cycle_keymap_style(&inp)`:
 
-* **`.Vim` (Default):** `h/j/k/l` navigation and **prefix repeat counts** (`5j` jumps 5 rows down; `3l` steps 3 columns or nudges a splitter in `[RESIZE]` sub-mode by $3 \times \text{step}$).
+* **`.Vim` (Default):** `h/j/k/l` navigation and **prefix repeat counts** (`5j` jumps 5 rows down; `3l` steps 3 columns or nudges a splitter in `[RESIZE]` sub-mode by `3 × step`).
 * **`.Helix`:** Selection/motion-first navigation with **postfix repeat counts** (`j` moves 1 row, then typing `5` immediately advances the remaining 4 rows to complete `j5`).
-* **`.Emacs`:** Chordal navigation (`Ctrl+N`/`Ctrl+P`/`Ctrl+F`/`Ctrl+B`, `Ctrl+V`/`Alt+V` paging, `Ctrl+A`/`Ctrl+E` home/end, `Ctrl+G` `keyboard-quit`, `<M-x>` command palette) and **`Ctrl+U` universal argument** (`Ctrl+U` = $4\times$, `Ctrl+U Ctrl+U` = $16\times$, `Ctrl+U 7` = $7\times$).
+* **`.Emacs`:** Chordal navigation (`Ctrl+N`/`Ctrl+P`/`Ctrl+F`/`Ctrl+B`, `Ctrl+V`/`Alt+V` paging, `Ctrl+A`/`Ctrl+E` home/end, `Ctrl+G` `keyboard-quit`, `<M-x>` command palette) and **`Ctrl+U` universal argument** (`Ctrl+U` = 4×, `Ctrl+U Ctrl+U` = 16×, `Ctrl+U 7` = 7×).
 
 ### Tier 2: Compile-Time AST Code Generator (`tools/bifrost_gen`)
 
@@ -469,6 +469,6 @@ odin test tests -custom-attribute:scenario
 
 ## 10. Core Widget Suite Integration (`ui_text_area`, `ui_tree`, `ui_tabs`, `ui_canvas`)
 
-For full documentation on the four Track 11–14 widgets and how they integrate with `.Navigation` / `.Editing` sub-modes, `Focus_Scope` Deep History ($H^*$), and virtualized viewports, see [`docs/WIDGETS_GUIDE.md`](WIDGETS_GUIDE.md).
+For full documentation on the four Track 11–14 widgets and how they integrate with `.Navigation` / `.Editing` sub-modes, `Focus_Scope` Deep History (H*), and virtualized viewports, see [`docs/WIDGETS_GUIDE.md`](WIDGETS_GUIDE.md).
 
 

@@ -2,7 +2,7 @@
 
 **Source Files:** [`bifrost/layout.odin`](../../bifrost/layout.odin), [`bifrost/focus_scope.odin`](../../bifrost/focus_scope.odin), [`bifrost/renderer.odin`](../../bifrost/renderer.odin), [`bifrost/input.odin`](../../bifrost/input.odin)
 
-Bifrost's foundational building blocks construct the topological layout tree, define hierarchical Harel focus scopes (`ui_scope`), render styled text (`ui_label`), handle button activations (`ui_button`), and mount $z$-layered modal overlays (`ui_modal`) with 50% RGB backdrop dimming.
+Bifrost's foundational building blocks construct the topological layout tree, define hierarchical Harel focus scopes (`ui_scope`), render styled text (`ui_label`), handle button activations (`ui_button`), and mount z-layered modal overlays (`ui_modal`) with 50% RGB backdrop dimming.
 
 ---
 
@@ -59,7 +59,7 @@ if bifrost.container(ctx, "toolbar", {
 ```
 
 ### `ui_scope` (`Scope_Config`)
-`ui_scope` is a `@(deferred_in = defer_end_ui_scope)` container builder that automatically sets `.Focus_Scope`, registers border/title/background `Paint_Spec` on `Screen`, and establishes an OR-state in Bifrost's focus scope tree with Shallow ($H$) and Deep ($H^*$) focus memory (`Scope_Memory_Entry`).
+`ui_scope` is a `@(deferred_in = defer_end_ui_scope)` container builder that automatically sets `.Focus_Scope`, registers border/title/background `Paint_Spec` on `Screen`, and establishes an OR-state in Bifrost's focus scope tree with Shallow (H) and Deep (H*) focus memory (`Scope_Memory_Entry`).
 
 ```odin
 Scope_Config :: struct {
@@ -92,8 +92,8 @@ Scope_Config :: struct {
 ```
 
 #### Focus Scope Navigation & Drill-Down / Drill-Up Rules
-* **Scope Ring Cycling (`F6` / `Shift+F6` / `Ctrl+Tab`):** Cycles between sibling `ui_scope` containers and restores the target scope's remembered $H^*$ leaf.
-* **Drill-Up (`Escape`) & Drill-Down (`Enter`):** If a `ui_scope` includes `.Focusable` in its `focus_flags` (e.g., a Kanban column), pressing `Escape` from a child card drills focus up to the column container itself; pressing `Enter` on the focused column drills back down into its remembered $H^*$ card.
+* **Scope Ring Cycling (`F6` / `Shift+F6` / `Ctrl+Tab`):** Cycles between sibling `ui_scope` containers and restores the target scope's remembered H* leaf.
+* **Drill-Up (`Escape`) & Drill-Down (`Enter`):** If a `ui_scope` includes `.Focusable` in its `focus_flags` (e.g., a Kanban column), pressing `Escape` from a child card drills focus up to the column container itself; pressing `Enter` on the focused column drills back down into its remembered H* card.
 * **Non-Modal Floating Window MRU Promotion:** Focusing any widget inside a non-modal floating `ui_scope` (`floating = true`, without `.Trap_Focus`) automatically promotes that floating scope to the front of its `effective_z` tier (`promote_floating_scope`).
 
 ---
