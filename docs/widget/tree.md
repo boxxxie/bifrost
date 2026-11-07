@@ -29,23 +29,26 @@ Tree_Node :: struct {
 }
 
 Tree_Config :: struct {
-	title:          string,
-	width:          Axis_Size,   // Defaults to grow(1)
-	height:         Axis_Size,   // Defaults to grow(1)
-	border:         Border_Kind,
-	fg:             Color,
-	bg:             Color,
-	border_fg:      Color,
-	title_fg:       Color,
-	guide_fg:       Color,       // Color for │, ├─, ╰─ connectors
-	toggle_fg:      Color,       // Color for ▾ / ▸ branch indicators
-	sel_fg:         Color,       // Highlighted selected row foreground
-	sel_bg:         Color,       // Highlighted selected row background
-	leaf_prefix:    string,      // Optional prefix for leaf nodes (e.g. "  " or "• ")
-	scroll_step:    i32,
-	scroll_padding: i32,
-	fallback_rows:  i32,
-	focus_flags:    Focus_Flags,
+	title:            string,
+	width:            Axis_Size,   // Defaults to smart p95 content width when nil (or grow(1) when width_percentile < 0)
+	height:           Axis_Size,   // Defaults to grow(1)
+	border:           Border_Kind,
+	fg:               Color,
+	bg:               Color,
+	border_fg:        Color,
+	title_fg:         Color,
+	guide_fg:         Color,       // Color for │, ├─, ╰─ connectors
+	toggle_fg:        Color,       // Color for ▾ / ▸ branch indicators
+	sel_fg:           Color,       // Highlighted selected row foreground
+	sel_bg:           Color,       // Highlighted selected row background
+	leaf_prefix:      string,      // Optional prefix for leaf nodes (e.g. "  " or "• ")
+	scroll_step:      i32,
+	scroll_padding:   i32,
+	fallback_rows:    i32,
+	width_percentile: i32,         // Target item-width percentile (1..100, default 95 when 0; < 0 disables auto p95 sizing)
+	min_auto_width:   i32,         // Minimum auto-computed outer box width in cells (defaults to 20)
+	max_auto_width:   i32,         // Maximum auto-computed outer box width in cells (defaults to 56 when 0)
+	focus_flags:      Focus_Flags,
 }
 
 Tree_Slice :: struct {
@@ -58,6 +61,7 @@ Tree_Slice :: struct {
 	viewport_rows:      i32,
 	total_visible_rows: i32,
 	total_nodes:        i32,
+	recommended_width:  i32, // Auto-computed p95 outer box width (including borders + scrollbar gutter)
 }
 ```
 
@@ -78,8 +82,9 @@ Tree_Slice :: struct {
 
 | Key / Event | Action |
 | :--- | :--- |
-| `j` / `Down`, `k` / `Up`, `Ctrl+N` / `Ctrl+P` | Step selection through visible rows (supports Vim `5j`, Helix `j5`, and Emacs `C-u` repeat counts) |
-| `Page_Up` / `Page_Down`, `Home` / `End` | Page by `max(1, viewport_rows - 1)` or jump to first / last visible row |
+| `j` / `Down`, `k` / `Up`, `Ctrl+N` / `Ctrl+P` | Step selection through visible rows (supports Vim `5j`, Helix `j5`, and Emacs `C-u` repeat counts, plus lookahead `scroll_padding` / `scrolloff`) |
+| `Ctrl+D` / `Ctrl+U` (Vim/Helix) | Half-page scroll down / up (`max(1, viewport_rows / 2)`) while keeping selection synchronized |
+| `Page_Up` / `Page_Down`, `Home` / `End`, `G` | Page by `max(1, viewport_rows - 1)` or jump to first / last visible row |
 | `l` / `Right`, `Ctrl+F` (Emacs) | **On collapsed branch:** expand in-place (`▸` → `▾`). **On expanded branch:** step into `first_child`. **On leaf:** bubbles out to right sibling pane (unless `.Strict_Spatial` is set). |
 | `h` / `Left`, `Ctrl+B` (Emacs) | **On expanded branch:** collapse in-place (`▾` → `▸`). **On collapsed branch or leaf with `parent_idx >= 0`:** jump directly to parent node and auto-scroll viewport. **At root (`depth == 0`) collapsed/leaf:** bubbles out to left sibling pane. |
 | `Space` | Toggle expand/collapse on a branch node, or activate a leaf node |
@@ -97,6 +102,8 @@ Tree_Slice :: struct {
 * `get_tree_selected_vis_row(inp: ^Input_State, id: string) -> i32`
 * `get_tree_activated_node(inp: ^Input_State, id: string) -> i32`
 * `get_tree_visible_row_count(inp: ^Input_State, id: string) -> i32`
+* `get_tree_recommended_width(inp: ^Input_State, id: string) -> i32`
+* `compute_tree_auto_width(nodes: []Tree_Node, border: Border_Kind = .Rounded, leaf_prefix: string = "", percentile: i32 = 95, min_width: i32 = 20, max_width: i32 = 56) -> i32`
 * `is_tree_node_expanded(inp: ^Input_State, id: string, node_idx: i32) -> bool`
 * `set_tree_node_expanded(inp: ^Input_State, id: string, node_idx: i32, expanded: bool)`
 * `format_tree_guide_prefix(meta: []Tree_Node_Meta, node_idx: i32, allocator := context.temp_allocator) -> string`

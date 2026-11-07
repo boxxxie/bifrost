@@ -388,7 +388,7 @@ ui_tab_bar_specs :: proc(
 
 			leaf(ctx, item_id, disp_w, 1, Box_Config{
 				dir         = .Row,
-				width       = fixed(disp_w),
+				width       = fit(min = 1),
 				height      = fixed(1),
 				main_align  = .Center,
 				cross_align = .Center,
@@ -396,7 +396,6 @@ ui_tab_bar_specs :: proc(
 				focusable   = enabled,
 				clickable   = enabled,
 				hoverable   = enabled,
-				text        = full_text,
 			})
 		}
 	}

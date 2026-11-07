@@ -355,3 +355,144 @@ spec_tree_collapse_clears_unicode_icon_rows_cleanly :: proc(t: ^testing.T) {
 	then.vt_row_contains_text(4, "scheduler.odin", false)
 	then.diff_ansi_contains("                    ")
 }
+
+@(test)
+@(scenario)
+spec_tree_smooth_scroll_padding_half_page_and_mouse_wheel_sync :: proc(t: ^testing.T) {
+	_ = scenario(t, w = 50, h = 10) // inner_rect.h = 8 visible rows
+
+	build_smooth_tree :: proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen) {
+		s := current_scenario()
+		nodes := make([]bifrost.Tree_Node, 20, context.temp_allocator)
+		nodes[0] = bifrost.Tree_Node{
+			id           = "root",
+			label        = "root",
+			depth        = 0,
+			parent_idx   = -1,
+			expanded     = true,
+			has_children = true,
+		}
+		for i := 1; i < 20; i += 1 {
+			nodes[i] = bifrost.Tree_Node{
+				id           = fmt.aprintf("leaf_%02d", i, allocator = context.temp_allocator),
+				label        = fmt.aprintf("leaf_%02d", i, allocator = context.temp_allocator),
+				depth        = 1,
+				parent_idx   = 0,
+				expanded     = false,
+				has_children = false,
+			}
+		}
+		if bifrost.container(ctx, "root", {dir = .Column, width = bifrost.grow(1), height = bifrost.grow(1)}) {
+			bifrost.ui_tree(ctx, scr, &s.input, "smooth_tree", nodes, {
+				title          = "Smooth Tree",
+				width          = bifrost.grow(1),
+				height         = bifrost.grow(1),
+				border         = .Rounded,
+				scroll_step    = 1,
+				scroll_padding = 2,
+				fallback_rows  = 8,
+				focus_flags    = {.Loop_Spatial},
+			})
+		}
+	}
+
+	// Frame 0: 20 visible rows in an 8-row viewport with `scroll_padding = 2` (`pad = 2`).
+	// Safe interior cursor window is `[offset + 2 .. offset + 5]`.
+	upon.rendering_frame(build_smooth_tree)
+	then.virtual_scroll_is("smooth_tree", 0, 0)
+	then.tree_selection_is("smooth_tree", 0, 0)
+
+	// Step down 6 times to vis_row 6 -> because `scroll_padding = 2`, viewport glides forward to `offset = 1`
+	// while cursor is still 2 rows above the bottom border!
+	for _ in 0 ..< 6 {
+		upon.pressing_key_rune('j')
+	}
+	then.virtual_scroll_is("smooth_tree", 1, 6)
+	then.tree_selection_is("smooth_tree", 6, 6)
+
+	// Half-page down (`Ctrl+D`) advances by `viewport_rows / 2 = 4` rows (vis_row 6 -> 10, offset -> 5)
+	upon.pressing_key_rune('d', {.Ctrl})
+	then.virtual_scroll_is("smooth_tree", 5, 10)
+	then.tree_selection_is("smooth_tree", 10, 10)
+
+	// Half-page up (`Ctrl+U`) steps back by 4 rows (vis_row 10 -> 6, offset -> 4)
+	upon.pressing_key_rune('u', {.Ctrl})
+	then.virtual_scroll_is("smooth_tree", 4, 6)
+	then.tree_selection_is("smooth_tree", 6, 6)
+
+	// Mouse wheel scrolling down 5 ticks (`scroll_step = 1`) glides `offset` from 4 -> 9,
+	// preserves `selected_row = 6`, and persists on the next `rendering_frame` without snapping back!
+	upon.rendering_frame(build_smooth_tree)
+	for _ in 0 ..< 5 {
+		upon.mouse_scroll(5, 4, .Scroll_Down)
+	}
+	then.virtual_scroll_is("smooth_tree", 9, 6)
+	then.tree_selection_is("smooth_tree", 6, 6)
+
+	upon.rendering_frame(build_smooth_tree)
+	then.virtual_scroll_is("smooth_tree", 9, 6)
+	then.tree_selection_is("smooth_tree", 6, 6)
+
+	// Vim `G` jumps to the last visible row (vis_row 19, offset 12)
+	upon.pressing_key_rune('G')
+	then.virtual_scroll_is("smooth_tree", 12, 19)
+	then.tree_selection_is("smooth_tree", 19, 19)
+}
+
+@(test)
+@(scenario)
+spec_tree_default_p95_smart_width_accommodates_items_and_ignores_single_outlier :: proc(t: ^testing.T) {
+	_ = scenario(t, w = 100, h = 12)
+
+	build_auto_width_tree :: proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen) {
+		s := current_scenario()
+		nodes := make([]bifrost.Tree_Node, 20, context.temp_allocator)
+		// Node 0: root branch (`"▾ root"` = 6 cells + 4 border/gutter = 10)
+		nodes[0] = bifrost.Tree_Node{
+			id           = "root",
+			label        = "root",
+			depth        = 0,
+			parent_idx   = -1,
+			expanded     = true,
+			has_children = true,
+		}
+		// Nodes 1..18 (18 items -> 95% of 20 items = 19th rank):
+		// depth=1 (`"├─ "` = 3) + icon (`"📄 "` = 3) + label (`"item_standard_len_20"` = 20) + border(2) + gutter(2) = 30 cells
+		for i := 1; i < 19; i += 1 {
+			nodes[i] = bifrost.Tree_Node{
+				id         = fmt.aprintf("item_%02d", i, allocator = context.temp_allocator),
+				label      = "item_standard_len_20",
+				icon       = "📄",
+				depth      = 1,
+				parent_idx = 0,
+			}
+		}
+		// Node 19 (1 outlier = top 5%): 70-char label that would blow out a naive max-width tree to 80+ cols!
+		nodes[19] = bifrost.Tree_Node{
+			id         = "outlier_19",
+			label      = "outlier_extremely_long_path_that_should_not_blow_out_p95_default_width",
+			icon       = "📄",
+			depth      = 1,
+			parent_idx = 0,
+		}
+
+		if bifrost.container(ctx, "root_row", {dir = .Row, width = bifrost.grow(1), height = bifrost.grow(1)}) {
+			// Omit `width` on `Tree_Config` -> defaults to p95 item width (`30` cols), NOT the single 80-col outlier!
+			bifrost.ui_tree(ctx, scr, &s.input, "auto_tree", nodes, {
+				title         = "Explorer",
+				border        = .Rounded,
+				fallback_rows = 10,
+			})
+			bifrost.leaf(ctx, "right_workspace", 10, 10, {
+				width  = bifrost.grow(1),
+				height = bifrost.grow(1),
+				border = .Rounded,
+			})
+		}
+	}
+
+	upon.rendering_frame(build_auto_width_tree)
+	// p95 of 20 items is the 19th item (`30` cols), leaving 70 cols for `right_workspace`!
+	then.node_rect_is("auto_tree", {0, 0, 30, 12})
+	then.node_rect_is("right_workspace", {30, 0, 70, 12})
+}

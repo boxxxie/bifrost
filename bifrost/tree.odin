@@ -16,6 +16,7 @@ MAX_TREE_DEPTH        :: 32
 MAX_TREE_BITSET_WORDS :: 256 // 256 * 64 = 16,384 nodes tracked inline per Tree_Slot
 MAX_TREE_HASH_CAP     :: 512 // Open-addressed power-of-two table tracking expand/collapse by `id_hash`
 MAX_TREE_HASH_WORDS   :: MAX_TREE_HASH_CAP / 64
+MAX_TREE_WIDTH_HIST   :: 256 // Fixed-bucket row-width histogram for O(N) zero-allocation p95 width estimation
 
 Tree_Node :: struct {
 	id:           string,      // Optional explicit string ID (defaults to hashed index/label)
@@ -35,23 +36,26 @@ Tree_Node :: struct {
 }
 
 Tree_Config :: struct {
-	title:          string,
-	width:          Axis_Size,
-	height:         Axis_Size,
-	border:         Border_Kind,
-	fg:             Color,
-	bg:             Color,
-	border_fg:      Color,
-	title_fg:       Color,
-	guide_fg:       Color, // Color for `│  `, `├─ `, `╰─ ` box-drawing connectors
-	toggle_fg:      Color, // Color for `▾ ` / `▸ ` branch indicators
-	sel_fg:         Color, // Highlighted selected row foreground
-	sel_bg:         Color, // Highlighted selected row background
-	leaf_prefix:    string, // Optional prefix for leaf nodes (e.g. `""` or `"• "`)
-	scroll_step:    i32,
-	scroll_padding: i32,
-	fallback_rows:  i32, // Estimated viewport rows on Frame 0 before first layout solve
-	focus_flags:    Focus_Flags,
+	title:            string,
+	width:            Axis_Size, // Defaults to smart p95 content width when nil (or grow(1) when width_percentile < 0)
+	height:           Axis_Size,
+	border:           Border_Kind,
+	fg:               Color,
+	bg:               Color,
+	border_fg:        Color,
+	title_fg:         Color,
+	guide_fg:         Color, // Color for `│  `, `├─ `, `╰─ ` box-drawing connectors
+	toggle_fg:        Color, // Color for `▾ ` / `▸ ` branch indicators
+	sel_fg:           Color, // Highlighted selected row foreground
+	sel_bg:           Color, // Highlighted selected row background
+	leaf_prefix:      string, // Optional prefix for leaf nodes (e.g. `""` or `"• "`)
+	scroll_step:      i32,
+	scroll_padding:   i32,
+	fallback_rows:    i32, // Estimated viewport rows on Frame 0 before first layout solve
+	width_percentile: i32, // Target item-width percentile (1..100, default 95 when 0; < 0 disables auto p95 sizing)
+	min_auto_width:   i32, // Minimum auto-computed outer box width in cells (defaults to 20)
+	max_auto_width:   i32, // Maximum auto-computed outer box width in cells (defaults to 56 when 0)
+	focus_flags:      Focus_Flags,
 }
 
 Tree_Slice :: struct {
@@ -64,6 +68,7 @@ Tree_Slice :: struct {
 	viewport_rows:      i32, // Number of visible rows in the tree viewport
 	total_visible_rows: i32, // Total flattened visible rows after skipping collapsed subtrees
 	total_nodes:        i32, // Total nodes in the input `nodes` slice
+	recommended_width:  i32, // Auto-computed p95 outer box width (including borders + scrollbar gutter)
 }
 
 Tree_Node_Meta :: struct {
@@ -84,6 +89,7 @@ Tree_Slot :: struct {
 	activated_node_idx: i32,
 	total_nodes:        i32,
 	total_visible_rows: i32,
+	recommended_width:  i32,
 	expanded_bits:      [MAX_TREE_BITSET_WORDS]u64,
 	initialized_bits:   [MAX_TREE_BITSET_WORDS]u64,
 	hash_keys:          [MAX_TREE_HASH_CAP]u64,
@@ -425,6 +431,68 @@ format_tree_guide_prefix :: proc(
 	return strings.to_string(b)
 }
 
+// Computes the target outer box width (in terminal cells) needed to accommodate the `percentile`-th
+// (default p95) rendered row width of `nodes` in a single O(N) zero-allocation pass using a fixed
+// 256-bucket histogram. Accounts for box-drawing indentation (`depth * 3`), branch/leaf toggles,
+// icons, borders, and scrollbar gutter, while clamping outliers via `[min_width .. max_width]`.
+compute_tree_auto_width :: proc "contextless" (
+	nodes: []Tree_Node,
+	border: Border_Kind = .Rounded,
+	leaf_prefix: string = "",
+	percentile: i32 = 95,
+	min_width: i32 = 20,
+	max_width: i32 = 56,
+) -> i32 {
+	eff_min := max(8, min_width if min_width > 0 else 20)
+	eff_max := max(eff_min, max_width) if max_width > 0 else max(eff_min, 56)
+	if len(nodes) == 0 {
+		return eff_min
+	}
+
+	pct := clamp(percentile if percentile > 0 else 95, 1, 100)
+	leaf_pref_w := string_display_width(leaf_prefix)
+	border_pad: i32 = 2 if border != .None else 0
+	scrollbar_gutter: i32 = 2 // 1 cell scrollbar + 1 cell breathing room
+
+	hist: [MAX_TREE_WIDTH_HIST]i32
+	prev_depth: i32 = -1
+	n := len(nodes)
+
+	for i := 0; i < n; i += 1 {
+		nd := nodes[i]
+		d := nd.depth
+		if i > 0 && d > 0 {
+			d = min(d, min(prev_depth + 1, MAX_TREE_DEPTH - 1))
+		} else {
+			d = 0
+		}
+		prev_depth = d
+
+		has_ch := nd.has_children || (i + 1 < n && nodes[i + 1].depth > d)
+		prefix_w := d * 3
+		toggle_w := i32(2) if has_ch else leaf_pref_w
+		icon_w   := (string_display_width(nd.icon) + 1) if len(nd.icon) > 0 else 0
+		label_w  := string_display_width(nd.label)
+
+		outer_w := prefix_w + toggle_w + icon_w + label_w + border_pad + scrollbar_gutter
+		bucket  := clamp(outer_w, 0, MAX_TREE_WIDTH_HIST - 1)
+		hist[bucket] += 1
+	}
+
+	target_rank := max(1, (i32(n) * pct + 99) / 100)
+	accum: i32 = 0
+	p_width := eff_min
+	for w: i32 = 0; w < MAX_TREE_WIDTH_HIST; w += 1 {
+		accum += hist[w]
+		if accum >= target_rank {
+			p_width = w
+			break
+		}
+	}
+
+	return clamp(p_width, eff_min, eff_max)
+}
+
 // Mounts a virtualized collapsible tree container and materializes ONLY the visible row slice
 // `[start_row ..< end_row]` inside the scroll viewport (`O(visible_rows)` `Layout_Node`s per frame).
 ui_tree :: proc(
@@ -546,16 +614,35 @@ ui_tree :: proc(
 	if s_slot.viewport_rows <= 0 {
 		s_slot.viewport_rows = cfg.fallback_rows if cfg.fallback_rows > 0 else 10
 	}
+	prev_total_rows := s_slot.total_rows
+	prev_sel_row    := s_slot.selected_row
 	s_slot.total_rows     = t_slot.total_visible_rows
 	s_slot.total_cols     = 1
 	s_slot.max_offset     = max(0, s_slot.total_rows - s_slot.viewport_rows)
 	s_slot.selected_row   = clamp(t_slot.selected_vis_row, 0, max(0, s_slot.total_rows - 1))
 	s_slot.scroll_padding = max(0, cfg.scroll_padding)
-	move_virtual_selection(s_slot, 0)
-	s_slot.offset         = clamp(s_slot.offset, 0, s_slot.max_offset)
+	if s_slot.total_rows != prev_total_rows || s_slot.selected_row != prev_sel_row {
+		move_virtual_selection(s_slot, 0)
+	}
+	s_slot.offset = clamp(s_slot.offset, 0, s_slot.max_offset)
 
 	start_r := s_slot.offset
 	end_r   := min(s_slot.total_rows, start_r + s_slot.viewport_rows)
+
+	auto_w := compute_tree_auto_width(
+		nodes,
+		cfg.border,
+		cfg.leaf_prefix,
+		cfg.width_percentile if cfg.width_percentile > 0 else 95,
+		cfg.min_auto_width,
+		cfg.max_auto_width,
+	)
+	if len(cfg.title) > 0 {
+		title_outer_w := string_display_width(cfg.title) + 4
+		eff_max_w := max(auto_w, cfg.max_auto_width) if cfg.max_auto_width > 0 else max(auto_w, 56)
+		auto_w = clamp(max(auto_w, title_outer_w), auto_w, eff_max_w)
+	}
+	t_slot.recommended_width = auto_w
 
 	if out_slice != nil {
 		out_slice^ = Tree_Slice{
@@ -568,10 +655,18 @@ ui_tree :: proc(
 			viewport_rows      = s_slot.viewport_rows,
 			total_visible_rows = t_slot.total_visible_rows,
 			total_nodes        = t_slot.total_nodes,
+			recommended_width  = auto_w,
 		}
 	}
 
-	w := cfg.width if cfg.width != nil else grow(1)
+	w: Axis_Size
+	if cfg.width != nil {
+		w = cfg.width
+	} else if cfg.width_percentile < 0 {
+		w = grow(1)
+	} else {
+		w = fixed(auto_w)
+	}
 	h := cfg.height if cfg.height != nil else grow(1)
 	step := cfg.scroll_step if cfg.scroll_step > 0 else 3
 
@@ -973,6 +1068,14 @@ get_tree_visible_row_count :: proc(inp: ^Input_State, id: string) -> i32 {
 		return 0
 	}
 	return t_slot.total_visible_rows
+}
+
+get_tree_recommended_width :: proc(inp: ^Input_State, id: string) -> i32 {
+	t_slot := find_tree_slot(inp, hash_id(id))
+	if t_slot == nil {
+		return 0
+	}
+	return t_slot.recommended_width
 }
 
 is_tree_node_expanded :: proc(inp: ^Input_State, id: string, node_idx: i32) -> bool {

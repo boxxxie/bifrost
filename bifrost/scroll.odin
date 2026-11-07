@@ -831,7 +831,35 @@ handle_mouse_scroll :: proc "contextless" (
 		inp.scrolled_id    = node.id_hash
 		return true
 	}
+	if node.config.virtual_total_rows == 0 && node.content_span[1] <= node.inner_rect.h && node.content_span[0] > node.inner_rect.w {
+		apply_scroll_delta_x(inp, ctx, scroll_idx, dir * step)
+		return true
+	}
 	apply_scroll_delta(inp, ctx, scroll_idx, dir * step, false)
+	return true
+}
+
+handle_mouse_scroll_x :: proc "contextless" (
+	inp: ^Input_State,
+	ctx: ^Layout_Context,
+	capture_idx: i32,
+	mx, my: i32,
+	dir: i32, // -1 for Scroll_Left, +1 for Scroll_Right
+) -> bool {
+	scroll_idx := hit_test_scrollable(ctx, capture_idx, mx, my)
+	if scroll_idx < 0 {
+		return false
+	}
+
+	node := &ctx.nodes[scroll_idx]
+	step := node.config.scroll_step if node.config.scroll_step > 0 else 4
+	if node.config.text_area {
+		ta_slot := get_text_area_slot(inp, node.id_hash)
+		ta_slot.scroll_col = max(0, ta_slot.scroll_col + dir * step)
+		inp.scrolled_id    = node.id_hash
+		return true
+	}
+	apply_scroll_delta_x(inp, ctx, scroll_idx, dir * step)
 	return true
 }
 
@@ -965,6 +993,7 @@ apply_scroll_delta :: proc "contextless" (
 
 	if move_selection && node.config.virtual_total_rows > 0 {
 		slot.selected_row = clamp(slot.selected_row + delta, 0, max(0, slot.total_rows - 1))
+		sync_tree_selection_from_scroll(inp, node.id_hash, slot.selected_row)
 	}
 
 	if actual_delta != 0 && node.config.virtual_total_rows == 0 {

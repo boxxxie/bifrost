@@ -605,9 +605,41 @@ draw_vertical_scrollbar :: proc(
 	}
 }
 
-// =============================================================================
-// 50% RGB & 3-Band ANSI_256 Backdrop Dimming
-// =============================================================================
+draw_horizontal_scrollbar :: proc(
+	s: ^Screen,
+	outer: Rect,
+	inner: Rect,
+	clip: Rect,
+	offset_x: i32,
+	total_content_w: i32,
+	fg, bg: Color,
+) {
+	track_w := inner.w
+	metrics := compute_scrollbar_metrics(track_w, total_content_w, offset_x)
+	if !metrics.visible {
+		return
+	}
+
+	sb_y := (outer.y + outer.h - 1) if outer.h > inner.h else (inner.y + inner.h - 1)
+	track_x := inner.x
+
+	for col: i32 = 0; col < track_w; col += 1 {
+		is_thumb := col >= metrics.thumb_offset && col < (metrics.thumb_offset + metrics.thumb_height)
+		x := track_x + col
+		eff_bg := bg
+		if eff_bg.kind == .Default && x >= 0 && x < s.width && sb_y >= 0 && sb_y < s.height {
+			eff_bg = s.back[int(sb_y * s.width + x)].bg
+		}
+		cell := Cell{
+			ch    = '━' if is_thumb else '─',
+			fg    = fg,
+			bg    = eff_bg,
+			style = {.Bold} if is_thumb else {.Dim},
+			width = 1,
+		}
+		put_cell_clipped(s, x, sb_y, cell, clip)
+	}
+}
 
 dim_color :: proc "contextless" (c: Color, is_fg: bool) -> Color {
 	switch c.kind {
@@ -791,6 +823,20 @@ render_layout :: proc(s: ^Screen, ctx: ^Layout_Context, temp_alloc := context.te
 				node_clip,
 				node.config.scroll_offset,
 				node.content_span[1],
+				sb_fg,
+				paint.bg,
+			)
+		}
+
+		if node.config.scrollable && node.content_span[0] > node.inner_rect.w {
+			sb_fg := paint.border_fg if paint.border_fg.kind != .Default else paint.fg
+			draw_horizontal_scrollbar(
+				s,
+				node.rect,
+				node.inner_rect,
+				node_clip,
+				node.config.scroll_offset_x,
+				node.content_span[0],
 				sb_fg,
 				paint.bg,
 			)
@@ -1188,7 +1234,9 @@ screen_export_html :: proc(s: ^Screen, title: string, out: ^strings.Builder) {
 			has_styles := (eff_style - {.Reverse}) != {}
 
 			if has_custom_fg || has_custom_bg || has_styles {
-				strings.write_string(out, "<span style=\"")
+				strings.write_string(out, "<span style=\"width: ")
+				strings.write_int(out, int(run_len))
+				strings.write_string(out, "ch;")
 				if has_custom_fg {
 					r, g, b := color_to_rgb(eff_fg, false)
 					strings.write_string(out, "color: rgb(")
@@ -1223,7 +1271,9 @@ screen_export_html :: proc(s: ^Screen, title: string, out: ^strings.Builder) {
 				}
 				strings.write_string(out, "\">")
 			} else {
-				strings.write_string(out, "<span>")
+				strings.write_string(out, "<span style=\"width: ")
+				strings.write_int(out, int(run_len))
+				strings.write_string(out, "ch;\">")
 			}
 
 			for i: i32 = 0; i < run_len; i += 1 {

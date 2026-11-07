@@ -161,14 +161,16 @@ Key_Event :: struct {
 }
 
 Mouse_Action :: enum u8 {
-	Move        = 0,
-	Press       = 1,
-	Drag        = 2,
-	Release     = 3,
-	Scroll_Up   = 4,
-	Scroll_Down = 5,
-	Motion      = 6,
-	Leave       = 7,
+	Move         = 0,
+	Press        = 1,
+	Drag         = 2,
+	Release      = 3,
+	Scroll_Up    = 4,
+	Scroll_Down  = 5,
+	Motion       = 6,
+	Leave        = 7,
+	Scroll_Left  = 8,
+	Scroll_Right = 9,
 }
 
 Mouse_Button :: enum u8 {
@@ -273,6 +275,8 @@ Keymap_Style :: enum u8 {
 Page_Cmd :: enum u8 {
 	Page_Up,
 	Page_Down,
+	Half_Page_Up,
+	Half_Page_Down,
 	Home,
 	End,
 }
@@ -1409,12 +1413,30 @@ handle_mouse_event :: proc(inp: ^Input_State, ctx: ^Layout_Context, capture_idx:
 			if inp.hover_path_len > 0 {
 				dispatch_three_phase(ctx, inp.hover_path[:inp.hover_path_len], ev, inp.event_handler, inp.event_userdata)
 			}
-			handle_mouse_scroll(inp, ctx, capture_idx, ev.x, ev.y, -1)
+			if .Shift in ev.mods {
+				handle_mouse_scroll_x(inp, ctx, capture_idx, ev.x, ev.y, -1)
+			} else {
+				handle_mouse_scroll(inp, ctx, capture_idx, ev.x, ev.y, -1)
+			}
 		} else if ev.button == .Wheel_Down {
 			if inp.hover_path_len > 0 {
 				dispatch_three_phase(ctx, inp.hover_path[:inp.hover_path_len], ev, inp.event_handler, inp.event_userdata)
 			}
-			handle_mouse_scroll(inp, ctx, capture_idx, ev.x, ev.y, +1)
+			if .Shift in ev.mods {
+				handle_mouse_scroll_x(inp, ctx, capture_idx, ev.x, ev.y, +1)
+			} else {
+				handle_mouse_scroll(inp, ctx, capture_idx, ev.x, ev.y, +1)
+			}
+		} else if ev.button == .Wheel_Left {
+			if inp.hover_path_len > 0 {
+				dispatch_three_phase(ctx, inp.hover_path[:inp.hover_path_len], ev, inp.event_handler, inp.event_userdata)
+			}
+			handle_mouse_scroll_x(inp, ctx, capture_idx, ev.x, ev.y, -1)
+		} else if ev.button == .Wheel_Right {
+			if inp.hover_path_len > 0 {
+				dispatch_three_phase(ctx, inp.hover_path[:inp.hover_path_len], ev, inp.event_handler, inp.event_userdata)
+			}
+			handle_mouse_scroll_x(inp, ctx, capture_idx, ev.x, ev.y, +1)
 		} else if ev.button == .Left {
 			inp.mouse_down = true
 			if hit_idx >= 0 {
@@ -1508,13 +1530,33 @@ handle_mouse_event :: proc(inp: ^Input_State, ctx: ^Layout_Context, capture_idx:
 		if inp.hover_path_len > 0 {
 			dispatch_three_phase(ctx, inp.hover_path[:inp.hover_path_len], ev, inp.event_handler, inp.event_userdata)
 		}
-		handle_mouse_scroll(inp, ctx, capture_idx, ev.x, ev.y, -1)
+		if .Shift in ev.mods {
+			handle_mouse_scroll_x(inp, ctx, capture_idx, ev.x, ev.y, -1)
+		} else {
+			handle_mouse_scroll(inp, ctx, capture_idx, ev.x, ev.y, -1)
+		}
 
 	case .Scroll_Down:
 		if inp.hover_path_len > 0 {
 			dispatch_three_phase(ctx, inp.hover_path[:inp.hover_path_len], ev, inp.event_handler, inp.event_userdata)
 		}
-		handle_mouse_scroll(inp, ctx, capture_idx, ev.x, ev.y, +1)
+		if .Shift in ev.mods {
+			handle_mouse_scroll_x(inp, ctx, capture_idx, ev.x, ev.y, +1)
+		} else {
+			handle_mouse_scroll(inp, ctx, capture_idx, ev.x, ev.y, +1)
+		}
+
+	case .Scroll_Left:
+		if inp.hover_path_len > 0 {
+			dispatch_three_phase(ctx, inp.hover_path[:inp.hover_path_len], ev, inp.event_handler, inp.event_userdata)
+		}
+		handle_mouse_scroll_x(inp, ctx, capture_idx, ev.x, ev.y, -1)
+
+	case .Scroll_Right:
+		if inp.hover_path_len > 0 {
+			dispatch_three_phase(ctx, inp.hover_path[:inp.hover_path_len], ev, inp.event_handler, inp.event_userdata)
+		}
+		handle_mouse_scroll_x(inp, ctx, capture_idx, ev.x, ev.y, +1)
 	}
 }
 

@@ -560,7 +560,7 @@ end_layout :: proc(ctx: ^Layout_Context) {
 			intrinsic[main_axis]      = children_main + insets[main_axis]
 			intrinsic[cross_axis]     = children_cross + insets[cross_axis]
 			min_intrinsic[main_axis]  = insets[main_axis] if node.config.scrollable else (min_main + insets[main_axis])
-			min_intrinsic[cross_axis] = min_cross + insets[cross_axis]
+			min_intrinsic[cross_axis] = insets[cross_axis] if node.config.scrollable else (min_cross + insets[cross_axis])
 		} else if len(node.text) > 0 {
 			unwrapped_w, longest_word, line_count := measure_text_intrinsic(node.text)
 			base_w := max(node.content_size[0], unwrapped_w)
@@ -569,8 +569,8 @@ end_layout :: proc(ctx: ^Layout_Context) {
 
 			intrinsic[0]     = base_w + insets[0]
 			intrinsic[1]     = base_h + insets[1]
-			min_intrinsic[0] = min_w + insets[0]
-			min_intrinsic[1] = line_count + insets[1]
+			min_intrinsic[0] = insets[0] if node.config.scrollable else (min_w + insets[0])
+			min_intrinsic[1] = insets[1] if node.config.scrollable else (line_count + insets[1])
 		} else {
 			intrinsic[0]     = node.content_size[0] + insets[0]
 			intrinsic[1]     = node.content_size[1] + insets[1]
@@ -1251,12 +1251,14 @@ position_nodes_topological :: proc(ctx: ^Layout_Context) {
 
 		in_flow_count: i32 = 0
 		total_main_span: i32 = 0
+		max_cross_span: i32 = inner_size[cross_axis]
 		for c := parent.first_child; c != -1; c = ctx.nodes[c].next_sibling {
 			child := &ctx.nodes[c]
 			if child.out_of_flow {
 				continue
 			}
 			total_main_span += child.dims[main_axis]
+			max_cross_span = max(max_cross_span, child.dims[cross_axis])
 			in_flow_count += 1
 		}
 		if in_flow_count > 1 {
@@ -1264,27 +1266,38 @@ position_nodes_topological :: proc(ctx: ^Layout_Context) {
 		}
 
 		parent.content_span[main_axis]  = total_main_span
-		parent.content_span[cross_axis] = inner_size[cross_axis]
+		parent.content_span[cross_axis] = max_cross_span
 		if parent.config.virtual_total_rows > 0 {
 			parent.content_span[1] = parent.config.virtual_total_rows
 		}
 
-		scroll_shift: i32 = 0
+		scroll_shift_main: i32 = 0
+		scroll_shift_cross: i32 = 0
 		if parent.config.scrollable && parent.config.virtual_total_rows == 0 {
 			if main_axis == 1 {
 				max_scroll := max(0, total_main_span - inner_size[1])
-				scroll_shift = clamp(parent.config.scroll_offset, 0, max_scroll)
-				parent.config.scroll_offset  = scroll_shift
-				parent.applied_scroll_offset = scroll_shift
+				scroll_shift_main = clamp(parent.config.scroll_offset, 0, max_scroll)
+				parent.config.scroll_offset  = scroll_shift_main
+				parent.applied_scroll_offset = scroll_shift_main
+
+				max_scroll_x := max(0, max_cross_span - inner_size[0])
+				scroll_shift_cross = clamp(parent.config.scroll_offset_x, 0, max_scroll_x)
+				parent.config.scroll_offset_x  = scroll_shift_cross
+				parent.applied_scroll_offset_x = scroll_shift_cross
 			} else {
 				max_scroll_x := max(0, total_main_span - inner_size[0])
-				scroll_shift = clamp(parent.config.scroll_offset_x, 0, max_scroll_x)
-				parent.config.scroll_offset_x  = scroll_shift
-				parent.applied_scroll_offset_x = scroll_shift
+				scroll_shift_main = clamp(parent.config.scroll_offset_x, 0, max_scroll_x)
+				parent.config.scroll_offset_x  = scroll_shift_main
+				parent.applied_scroll_offset_x = scroll_shift_main
+
+				max_scroll := max(0, max_cross_span - inner_size[1])
+				scroll_shift_cross = clamp(parent.config.scroll_offset, 0, max_scroll)
+				parent.config.scroll_offset  = scroll_shift_cross
+				parent.applied_scroll_offset = scroll_shift_cross
 			}
 		}
 
-		main_cursor := align_offset(inner_size[main_axis], total_main_span, parent.config.main_align) - scroll_shift
+		main_cursor := align_offset(inner_size[main_axis], total_main_span, parent.config.main_align) - scroll_shift_main
 		inner_origin := [2]i32{parent.inner_rect.x, parent.inner_rect.y}
 
 		for c := parent.first_child; c != -1; c = ctx.nodes[c].next_sibling {
@@ -1292,7 +1305,7 @@ position_nodes_topological :: proc(ctx: ^Layout_Context) {
 			if child.out_of_flow {
 				continue
 			}
-			cross_offset := align_offset(inner_size[cross_axis], child.dims[cross_axis], parent.config.cross_align)
+			cross_offset := align_offset(inner_size[cross_axis], child.dims[cross_axis], parent.config.cross_align) - scroll_shift_cross
 
 			pos: [2]i32
 			pos[main_axis]  = inner_origin[main_axis] + main_cursor

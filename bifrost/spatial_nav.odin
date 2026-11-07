@@ -66,18 +66,30 @@ key_to_page_cmd :: proc "contextless" (
 	style: Keymap_Style = .Vim,
 ) -> (cmd: Page_Cmd, ok: bool) {
 	eff_mods := ev.mods - {.Caps_Lock, .Num_Lock}
-	if style == .Emacs && !text_editing && ev.code == .Rune {
-		if eff_mods == {.Ctrl} && (ev.ch == 'v' || ev.ch == 'V') {
-			return .Page_Down, true
-		}
-		if eff_mods == {.Alt} && (ev.ch == 'v' || ev.ch == 'V') {
-			return .Page_Up, true
-		}
-		if eff_mods == {.Ctrl} && (ev.ch == 'a' || ev.ch == 'A') {
-			return .Home, true
-		}
-		if eff_mods == {.Ctrl} && (ev.ch == 'e' || ev.ch == 'E') {
-			return .End, true
+	if !text_editing && ev.code == .Rune {
+		if style == .Emacs {
+			if eff_mods == {.Ctrl} && (ev.ch == 'v' || ev.ch == 'V') {
+				return .Page_Down, true
+			}
+			if eff_mods == {.Alt} && (ev.ch == 'v' || ev.ch == 'V') {
+				return .Page_Up, true
+			}
+			if eff_mods == {.Ctrl} && (ev.ch == 'a' || ev.ch == 'A') {
+				return .Home, true
+			}
+			if eff_mods == {.Ctrl} && (ev.ch == 'e' || ev.ch == 'E') {
+				return .End, true
+			}
+		} else {
+			if eff_mods == {.Ctrl} && (ev.ch == 'd' || ev.ch == 'D') {
+				return .Half_Page_Down, true
+			}
+			if eff_mods == {.Ctrl} && (ev.ch == 'u' || ev.ch == 'U') {
+				return .Half_Page_Up, true
+			}
+			if eff_mods == {} && ev.ch == 'G' {
+				return .End, true
+			}
 		}
 	}
 	if eff_mods != {} {
@@ -532,15 +544,25 @@ handle_spatial_nav_at_level :: proc(
 		}
 	}
 
-	// 2. Read-only focusable materialized scroll container (`0` focusable children) line scroll
-	if is_tip && node.config.scrollable && node.config.virtual_total_rows == 0 && (dir == .Up || dir == .Down) {
+	// 2. Read-only focusable materialized scroll container (`0` focusable children) line/column scroll
+	if is_tip && node.config.scrollable && node.config.virtual_total_rows == 0 {
 		if resolve_scope_child_target_idx(inp, ctx, node_idx, capture_idx, false) < 0 {
 			slot := get_scroll_slot(inp, node.id_hash)
-			delta: i32 = (-1 if dir == .Up else +1) * count
-			if (delta < 0 && slot.offset > 0) || (delta > 0 && slot.offset < slot.max_offset) {
-				_ = consume_repeat_count(inp)
-				apply_scroll_delta(inp, ctx, node_idx, delta, false)
-				return .Consumed
+			if dir == .Up || dir == .Down {
+				delta: i32 = (-1 if dir == .Up else +1) * count
+				if (delta < 0 && slot.offset > 0) || (delta > 0 && slot.offset < slot.max_offset) {
+					_ = consume_repeat_count(inp)
+					apply_scroll_delta(inp, ctx, node_idx, delta, false)
+					return .Consumed
+				}
+			} else if dir == .Left || dir == .Right {
+				step_x := node.config.scroll_step if node.config.scroll_step > 0 else 4
+				delta_x: i32 = (-step_x if dir == .Left else +step_x) * count
+				if (delta_x < 0 && slot.offset_x > 0) || (delta_x > 0 && slot.offset_x < slot.max_offset_x) {
+					_ = consume_repeat_count(inp)
+					apply_scroll_delta_x(inp, ctx, node_idx, delta_x)
+					return .Consumed
+				}
 			}
 		}
 	}
@@ -651,9 +673,13 @@ find_paged_sibling :: proc "contextless" (
 	}
 	origin := ctx.nodes[origin_idx]
 	scope_idx := origin.parent_scope_idx
-	vertical, step := resolve_paging_metrics(ctx, origin_idx)
+	vertical, raw_step := resolve_paging_metrics(ctx, origin_idx)
+	step := raw_step
+	if cmd == .Half_Page_Up || cmd == .Half_Page_Down {
+		step = max(1, raw_step / 2)
+	}
 
-	forward := cmd == .Page_Down || cmd == .End
+	forward := cmd == .Page_Down || cmd == .Half_Page_Down || cmd == .End
 	dir: Nav_Dir
 	if vertical {
 		dir = .Down if forward else .Up
@@ -695,7 +721,7 @@ find_paged_sibling :: proc "contextless" (
 			furthest_dist = move_dist
 			furthest_idx  = i
 		}
-		if cmd == .Page_Up || cmd == .Page_Down {
+		if cmd == .Page_Up || cmd == .Page_Down || cmd == .Half_Page_Up || cmd == .Half_Page_Down {
 			overshoot := (cand_pos - target_pos) if forward else (target_pos - cand_pos)
 			if overshoot <= 0 {
 				dist_to_target := -overshoot
@@ -731,6 +757,7 @@ scroll_container_by_page :: proc "contextless" (
 	}
 	slot := get_scroll_slot(inp, node.id_hash)
 	page := max(1, slot.viewport_rows - 1)
+	half_page := max(1, slot.viewport_rows / 2)
 
 	if node.config.virtual_total_rows > 0 {
 		old_row := slot.selected_row
@@ -741,6 +768,12 @@ scroll_container_by_page :: proc "contextless" (
 			sync_tree_selection_from_scroll(inp, node.id_hash, slot.selected_row)
 		case .Page_Down:
 			move_virtual_selection(slot, +page)
+			sync_tree_selection_from_scroll(inp, node.id_hash, slot.selected_row)
+		case .Half_Page_Up:
+			move_virtual_selection(slot, -half_page)
+			sync_tree_selection_from_scroll(inp, node.id_hash, slot.selected_row)
+		case .Half_Page_Down:
+			move_virtual_selection(slot, +half_page)
 			sync_tree_selection_from_scroll(inp, node.id_hash, slot.selected_row)
 		case .Home:
 			slot.selected_row = 0
@@ -767,6 +800,10 @@ scroll_container_by_page :: proc "contextless" (
 		apply_scroll_delta(inp, ctx, scroll_idx, -page, false)
 	case .Page_Down:
 		apply_scroll_delta(inp, ctx, scroll_idx, +page, false)
+	case .Half_Page_Up:
+		apply_scroll_delta(inp, ctx, scroll_idx, -half_page, false)
+	case .Half_Page_Down:
+		apply_scroll_delta(inp, ctx, scroll_idx, +half_page, false)
 	case .Home:
 		apply_scroll_delta(inp, ctx, scroll_idx, -slot.max_offset - 1, false)
 	case .End:

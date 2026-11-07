@@ -267,3 +267,90 @@ spec_incremental_ansi_diff_and_sync_output :: proc(t: ^testing.T) {
 	then.diff_bytes_equal(len(expected_delta))
 	then.diff_ansi_equals(expected_delta)
 }
+
+@(test)
+@(scenario)
+spec_scrollable_child_with_wide_content_clips_and_scrolls_horizontally_without_expanding_parent :: proc(t: ^testing.T) {
+	_ = scenario(t, w = 60, h = 8)
+
+	build_split :: proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen) {
+		if bifrost.ui_scope(ctx, scr, "root_row", {
+			dir    = .Row,
+			width  = bifrost.grow(1),
+			height = bifrost.grow(1),
+		}) {
+			bifrost.leaf(ctx, "left_tree", 24, 8, {
+				width  = bifrost.fixed(24),
+				height = bifrost.grow(1),
+				border = .Rounded,
+			})
+			if bifrost.ui_scope(ctx, scr, "right_col", {
+				dir    = .Column,
+				width  = bifrost.grow(1),
+				height = bifrost.grow(1),
+				border = .Rounded,
+			}) {
+				if bifrost.ui_scope(ctx, scr, "lineage_box", {
+					dir         = .Column,
+					width       = bifrost.grow(1),
+					height      = bifrost.fixed(4),
+					border      = .Plain,
+					scrollable  = true,
+					scroll_step = 6,
+					focus_flags = {.Focusable, .Default_Focus},
+				}) {
+					bifrost.ui_label(
+						ctx,
+						scr,
+						"wide_line_0",
+						"@3: Hash_Map -> Hash_Map ({map}) | Annual review adjustments & Sleipnir coalescer tuning",
+						bifrost.rgb(220, 220, 220),
+						{},
+						{width = bifrost.fit(), height = bifrost.fixed(1)},
+					)
+				}
+			}
+		}
+	}
+
+	// 1. Even though `wide_line_0` is 88 columns wide inside `lineage_box`,
+	//    `right_col` MUST remain strictly within the remaining 36 columns (x=24, w=36 -> x+w=60),
+	//    and `lineage_box` fits inside `right_col` (x=25, w=34) with a horizontal scrollbar (`━`) on its bottom border!
+	upon.rendering_frame(build_split)
+	then.focused_widget_is("lineage_box")
+	then.node_rect_is("left_tree",   {x = 0,  y = 0, w = 24, h = 8})
+	then.node_rect_is("right_col",   {x = 24, y = 0, w = 36, h = 8})
+	then.node_rect_is("lineage_box", {x = 25, y = 1, w = 34, h = 4})
+	then.cell_at_is(26, 2, '@', 1)
+	then.cell_at_is(26, 4, '━', 1)
+
+	// 2. Pressing 'l' (Right) scrolls `lineage_box` horizontally by `scroll_step` (6 cols),
+	//    shifting `wide_line_0` left inside its clipped viewport without altering parent rects!
+	upon.pressing_key_rune('l')
+	upon.rendering_frame(build_split)
+	then.node_rect_is("right_col",   {x = 24, y = 0, w = 36, h = 8})
+	then.node_rect_is("lineage_box", {x = 25, y = 1, w = 34, h = 4})
+	then.cell_at_is(26, 2, 's', 1) // 6th char of "@3: Hash_Map..." is 's'
+
+	// 3. Shift+Wheel_Up over `lineage_box` scrolls horizontally left by `scroll_step` (-6 cols -> back to 0)!
+	sc := current_scenario()
+	bifrost.resolve_input(&sc.input, &sc.layout_ctx, bifrost.Mouse_Event{
+		x      = 30,
+		y      = 2,
+		action = .Press,
+		button = .Wheel_Up,
+		mods   = {.Shift},
+	})
+	upon.rendering_frame(build_split)
+	then.cell_at_is(26, 2, '@', 1)
+
+	// 4. Native horizontal `Wheel_Right` (or plain `Wheel_Down` when only horizontal overflow exists) scrolls right (+6 cols)!
+	bifrost.resolve_input(&sc.input, &sc.layout_ctx, bifrost.Mouse_Event{
+		x      = 30,
+		y      = 2,
+		action = .Press,
+		button = .Wheel_Right,
+	})
+	upon.rendering_frame(build_split)
+	then.cell_at_is(26, 2, 's', 1)
+}
