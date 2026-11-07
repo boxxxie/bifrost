@@ -1122,28 +1122,29 @@ screen_export_html :: proc(s: ^Screen, title: string, out: ^strings.Builder) {
 
 	strings.write_string(out, "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n<style>\n")
 	strings.write_string(out, "* { box-sizing: border-box; }\n")
-	strings.write_string(out, "body {\n  margin: 0;\n  padding: 32px;\n  background: #0b0f14;\n  display: inline-block;\n}\n")
+	strings.write_string(out, "body {\n  margin: 0;\n  padding: 24px;\n  background: #0d1117;\n  display: inline-block;\n}\n")
 	strings.write_string(out, ".window {\n  background: rgb(")
 	strings.write_int(out, int(win_bg_r))
 	strings.write_string(out, ", ")
 	strings.write_int(out, int(win_bg_g))
 	strings.write_string(out, ", ")
 	strings.write_int(out, int(win_bg_b))
-	strings.write_string(out, ");\n  border-radius: 12px;\n  box-shadow: 0 25px 60px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.12);\n  overflow: hidden;\n  display: inline-block;\n}\n")
-	strings.write_string(out, ".titlebar {\n  background: #181d26;\n  padding: 12px 16px;\n  display: flex;\n  align-items: center;\n  border-bottom: 1px solid rgba(255, 255, 255, 0.08);\n  position: relative;\n}\n")
-	strings.write_string(out, ".dots { display: flex; gap: 8px; }\n")
-	strings.write_string(out, ".dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }\n")
+	strings.write_string(out, ");\n  border-radius: 10px;\n  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.75), 0 0 0 1px rgba(255, 255, 255, 0.12);\n  overflow: hidden;\n  display: inline-block;\n}\n")
+	strings.write_string(out, ".titlebar {\n  background: #181d26;\n  padding: 10px 14px;\n  display: flex;\n  align-items: center;\n  border-bottom: 1px solid rgba(255, 255, 255, 0.08);\n  position: relative;\n}\n")
+	strings.write_string(out, ".dots { display: flex; gap: 7px; }\n")
+	strings.write_string(out, ".dot { width: 11px; height: 11px; border-radius: 50%; display: inline-block; }\n")
 	strings.write_string(out, ".dot-red { background: #ff5f56; }\n")
 	strings.write_string(out, ".dot-yellow { background: #ffbd2e; }\n")
 	strings.write_string(out, ".dot-green { background: #27c93f; }\n")
 	strings.write_string(out, ".title {\n  position: absolute;\n  left: 0;\n  right: 0;\n  text-align: center;\n  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;\n  font-size: 13px;\n  font-weight: 600;\n  color: #9499a8;\n  letter-spacing: 0.2px;\n  pointer-events: none;\n}\n")
-	strings.write_string(out, ".screen {\n  padding: 16px 20px;\n  font-family: 'FiraCode Nerd Font', 'Fira Code', 'DejaVu Sans Mono', monospace;\n  font-size: 14px;\n  line-height: 1.22;\n  letter-spacing: 0;\n  white-space: pre;\n  color: #d8dee9;\n}\n")
-	strings.write_string(out, ".line { height: 1.22em; display: block; }\n")
+	strings.write_string(out, ".screen {\n  padding: 12px 16px;\n  font-family: 'FiraCode Nerd Font', 'Fira Code', 'DejaVu Sans Mono', monospace;\n  font-size: 14px;\n  color: #d8dee9;\n}\n")
+	strings.write_string(out, ".line {\n  margin: 0;\n  padding: 0;\n  height: 18px;\n  line-height: 18px;\n  white-space: pre;\n  display: block;\n}\n")
+	strings.write_string(out, ".line span {\n  display: inline-block;\n  height: 18px;\n  line-height: 18px;\n  vertical-align: top;\n}\n")
 	strings.write_string(out, "</style>\n</head>\n<body>\n<div class=\"window\">\n  <div class=\"titlebar\">\n")
 	strings.write_string(out, "    <div class=\"dots\">\n      <span class=\"dot dot-red\"></span>\n      <span class=\"dot dot-yellow\"></span>\n      <span class=\"dot dot-green\"></span>\n    </div>\n")
 	strings.write_string(out, "    <div class=\"title\">")
 	write_html_escaped_string(out, title)
-	strings.write_string(out, "</div>\n  </div>\n  <div class=\"screen\">\n")
+	strings.write_string(out, "</div>\n  </div>\n  <div class=\"screen\">")
 
 	for y: i32 = 0; y < s.height; y += 1 {
 		strings.write_string(out, "<div class=\"line\">")
@@ -1221,6 +1222,8 @@ screen_export_html :: proc(s: ^Screen, title: string, out: ^strings.Builder) {
 					strings.write_string(out, "text-decoration: underline;")
 				}
 				strings.write_string(out, "\">")
+			} else {
+				strings.write_string(out, "<span>")
 			}
 
 			for i: i32 = 0; i < run_len; i += 1 {
@@ -1232,16 +1235,14 @@ screen_export_html :: proc(s: ^Screen, title: string, out: ^strings.Builder) {
 				write_html_escaped_rune(out, ch)
 			}
 
-			if has_custom_fg || has_custom_bg || has_styles {
-				strings.write_string(out, "</span>")
-			}
+			strings.write_string(out, "</span>")
 
 			x += run_len
 		}
-		strings.write_string(out, "</div>\n")
+		strings.write_string(out, "</div>")
 	}
 
-	strings.write_string(out, "  </div>\n</div>\n</body>\n</html>\n")
+	strings.write_string(out, "</div>\n</div>\n</body>\n</html>\n")
 }
 
 write_color_sgr :: proc(out: ^strings.Builder, c: Color, is_bg: bool) {
