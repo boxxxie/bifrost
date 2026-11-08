@@ -1,0 +1,9 @@
+{
+  "track_id": "log_stream_and_table_controls_20261108",
+  "title": "Track 20: Auto-Scrolling Log Stream Viewer, Table Column Controls & OSC 8 Hyperlinks",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2026-11-08T09:47:00+08:00",
+  "updated_at": "2026-11-08T09:47:00+08:00",
+  "description": "Implement auto-scrolling log stream viewer with tail -f pinning, interactive table column sorting/resizing, and OSC 8 terminal hyperlinks."
+}

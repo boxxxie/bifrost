@@ -1,0 +1,9 @@
+{
+  "track_id": "dialogs_toasts_tooltips_20261108",
+  "title": "Track 19: Turnkey Modal Dialogs, Floating Toasts & Contextual Tooltips",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2026-11-08T09:47:00+08:00",
+  "updated_at": "2026-11-08T09:47:00+08:00",
+  "description": "Implement turnkey modal dialogs (confirm, alert, prompt), corner floating toasts, and hover-triggered tooltips."
+}

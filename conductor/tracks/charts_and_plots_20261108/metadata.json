@@ -1,0 +1,9 @@
+{
+  "track_id": "charts_and_plots_20261108",
+  "title": "Track 17: Cartesian 2D Coordinate Charts & Categorical Bar Charts",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2026-11-08T09:47:00+08:00",
+  "updated_at": "2026-11-08T09:47:00+08:00",
+  "description": "Implement 2D Cartesian coordinate charts with X/Y axes, tick marks, legends, and categorical bar charts."
+}

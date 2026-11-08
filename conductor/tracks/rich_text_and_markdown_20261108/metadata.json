@@ -1,0 +1,9 @@
+{
+  "track_id": "rich_text_and_markdown_20261108",
+  "title": "Track 18: Word-Wrapped Rich Text Paragraph & Markdown Document Viewer",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2026-11-08T09:47:00+08:00",
+  "updated_at": "2026-11-08T09:47:00+08:00",
+  "description": "Implement read-only word-wrapped rich text paragraphs with multi-style inline spans and a lightweight Markdown document viewer."
+}
