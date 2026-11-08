@@ -2,6 +2,7 @@ package bifrost
 
 import "core:mem"
 import "core:strings"
+import "../deps/heimdall/heimdall"
 
 // =============================================================================
 // Color, Style & Cell Primitives
@@ -137,6 +138,7 @@ Screen :: struct {
 	canvas_entries: map[u64]Canvas_Render_Entry,
 	first_frame:    bool,
 	allocator:      mem.Allocator,
+	recorder:       ^heimdall.Recorder,
 }
 
 // =============================================================================
@@ -770,6 +772,9 @@ dim_rect_backdrop :: proc(s: ^Screen, bounds: Rect) {
 render_layout :: proc(s: ^Screen, ctx: ^Layout_Context, temp_alloc := context.temp_allocator) {
 	_ = temp_alloc
 	node_count := len(ctx.nodes)
+	rec := resolve_recorder(s.recorder if s.recorder != nil else ctx.recorder)
+	heimdall.scoped_span(rec, TELEMETRY_SCOPE_RENDERER, "render_layout", i64(node_count))
+
 	if node_count == 0 {
 		return
 	}
@@ -920,6 +925,8 @@ render_layout :: proc(s: ^Screen, ctx: ^Layout_Context, temp_alloc := context.te
 // =============================================================================
 
 screen_diff_ansi :: proc(s: ^Screen, out: ^strings.Builder) -> int {
+	rec := resolve_recorder(s.recorder)
+	heimdall.scoped_span(rec, TELEMETRY_SCOPE_RENDERER, "screen_diff_ansi", i64(s.width) * i64(s.height))
 	start_len := len(out.buf)
 
 	cur_x := i32(-1)
@@ -1026,7 +1033,9 @@ screen_diff_ansi :: proc(s: ^Screen, out: ^strings.Builder) -> int {
 	}
 
 	s.first_frame = false
-	return len(out.buf) - start_len
+	diff_bytes := len(out.buf) - start_len
+	heimdall.histogram_record(rec, TELEMETRY_SCOPE_RENDERER, "ansi_diff_bytes", f64(diff_bytes), i64(diff_bytes))
+	return diff_bytes
 }
 
 emit_sgr_transition :: proc(

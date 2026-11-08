@@ -2,7 +2,7 @@ package bifrost
 
 import "core:mem"
 import "core:strings"
-import actor "../deps/sleipnir/actor"
+import actor "../deps/heimdall/deps/sleipnir/actor"
 
 Cursor_Shape :: enum u8 {
 	Default          = 0,

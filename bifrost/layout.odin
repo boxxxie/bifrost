@@ -2,6 +2,7 @@ package bifrost
 
 import "core:hash"
 import "core:mem"
+import "../deps/heimdall/heimdall"
 
 // =============================================================================
 // Core Layout Types & Sizing Primitives
@@ -207,6 +208,7 @@ Layout_Context :: struct {
 	screen_size:     [2]i32,
 	layout_gen:      u64,
 	allocator:       mem.Allocator,
+	recorder:        ^heimdall.Recorder,
 }
 
 // =============================================================================
@@ -498,6 +500,10 @@ get_node_clip :: proc(ctx: ^Layout_Context, id: string) -> (rect: Rect, ok: bool
 // =============================================================================
 
 end_layout :: proc(ctx: ^Layout_Context) {
+	rec := resolve_recorder(ctx.recorder)
+	heimdall.scoped_span(rec, TELEMETRY_SCOPE_LAYOUT, "end_layout", i64(len(ctx.nodes)))
+	heimdall.gauge_set(rec, TELEMETRY_SCOPE_LAYOUT, "layout_nodes", f64(len(ctx.nodes)), i64(ctx.layout_gen))
+
 	if len(ctx.nodes) == 0 {
 		return
 	}

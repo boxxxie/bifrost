@@ -1,6 +1,7 @@
 package bifrost
 
 import "core:mem"
+import heimdall "../deps/heimdall/heimdall"
 
 // =============================================================================
 // Input Events, Phases & Zero-Allocation Input State
@@ -390,6 +391,9 @@ Input_State :: struct {
 	clipboard_buf:         [MAX_TEXT_BYTES]byte,
 	clipboard_len:         int,
 	osc52_pending:         bool,
+
+	// Optional Heimdall telemetry recorder (falls back to `heimdall.default_recorder()` when nil)
+	recorder:              ^heimdall.Recorder,
 }
 
 consume_repeat_count :: proc "contextless" (inp: ^Input_State) -> i32 {
@@ -780,6 +784,12 @@ reset_pointer_on_focus_out :: proc "contextless" (inp: ^Input_State) {
 // Resolves focus scopes, nested modal LIFO input capture, 3-phase keyboard/mouse routing,
 // and clipped reverse-Z mouse hit-testing. Call after end_layout(&ctx) and before render_layout(&scr, &ctx).
 resolve_input :: proc(inp: ^Input_State, ctx: ^Layout_Context, events: ..Input_Event) {
+	rec := resolve_recorder(inp.recorder if inp.recorder != nil else ctx.recorder)
+	heimdall.scoped_span(rec, TELEMETRY_SCOPE_INPUT, "resolve_input", i64(len(events)))
+	if len(events) > 0 {
+		heimdall.counter_add(rec, TELEMETRY_SCOPE_INPUT, "input_events_total", f64(len(events)), i64(len(events)))
+	}
+
 	inp.prev_focused_id     = inp.focused_id
 	inp.prev_hovered_id     = inp.hovered_id
 	inp.prev_hover_path     = inp.hover_path
@@ -833,9 +843,14 @@ resolve_input :: proc(inp: ^Input_State, ctx: ^Layout_Context, events: ..Input_E
 
 	// 2b. Expire timed-out pending prefix chords (firing any shadowed single-step fallback)
 	expire_pending_chord(inp, ctx, capture_idx, inp.clock_ns)
+	if inp.triggered_action_id != 0 {
+		heimdall.event_emit(rec, TELEMETRY_SCOPE_INPUT, "action_triggered", i64(inp.triggered_action_id), .Ok)
+	}
 
 	// 3. Process incoming keyboard, mouse, and focus-loss events
 	for ev in events {
+		prev_act := inp.triggered_action_id
+		inp.triggered_action_id = 0
 		switch e in ev {
 		case Key_Event:
 			handle_key_event(inp, ctx, capture_idx, e)
@@ -868,6 +883,11 @@ resolve_input :: proc(inp: ^Input_State, ctx: ^Layout_Context, events: ..Input_E
 				}
 			}
 		case Resize_Event:
+		}
+		if inp.triggered_action_id != 0 {
+			heimdall.event_emit(rec, TELEMETRY_SCOPE_INPUT, "action_triggered", i64(inp.triggered_action_id), .Ok)
+		} else {
+			inp.triggered_action_id = prev_act
 		}
 	}
 

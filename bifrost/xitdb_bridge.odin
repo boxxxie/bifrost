@@ -4,7 +4,8 @@ import "core:fmt"
 import "core:strings"
 import "core:sync"
 import "core:time"
-import actor "../deps/sleipnir/actor"
+import actor "../deps/heimdall/deps/sleipnir/actor"
+import heimdall "../deps/heimdall/heimdall"
 import xitdb "../deps/xitdb/xitdb"
 
 // =============================================================================
@@ -72,6 +73,7 @@ Xitdb_Worker_State :: struct {
 	queries_done:  int,
 	diffs_done:    int,
 	last_error_ok: bool,
+	recorder:      ^heimdall.Recorder,
 }
 
 xitdb_worker_receive :: proc(
@@ -84,9 +86,11 @@ xitdb_worker_receive :: proc(
 	if state.shared == nil || state.shared.db == nil || msg == nil {
 		return
 	}
+	rec := resolve_recorder(state.recorder)
 
 	switch m in msg^ {
 	case Worker_Msg_Transact_Script:
+		heimdall.scoped_span(rec, TELEMETRY_SCOPE_XITDB, "transact_script", i64(state.commits_done + 1))
 		sync.rw_mutex_lock(&state.shared.rw_lock)
 		report, t_err := xitdb.transact_script(state.shared.db, m.script, context.temp_allocator)
 		latest_idx := report.moment_index
@@ -101,6 +105,7 @@ xitdb_worker_receive :: proc(
 		if t_err == nil {
 			state.commits_done += 1
 			state.last_error_ok = true
+			heimdall.counter_add(rec, TELEMETRY_SCOPE_XITDB, "commits_done", 1.0, latest_idx)
 			if state.ui_pid.ref != nil {
 				actor.send(
 					ctx,
@@ -113,9 +118,13 @@ xitdb_worker_receive :: proc(
 					}),
 				)
 			}
+		} else {
+			state.last_error_ok = false
+			heimdall.span_set_error(rec, 1)
 		}
 
 	case Worker_Msg_Commit_Batch:
+		heimdall.scoped_span(rec, TELEMETRY_SCOPE_XITDB, "commit_batch", i64(m.count))
 		sync.rw_mutex_lock(&state.shared.rw_lock)
 		tx := xitdb.tx_init(state.shared.db, -1, false, context.temp_allocator)
 		if len(m.tag_name) > 0 {
@@ -155,6 +164,7 @@ xitdb_worker_receive :: proc(
 		if c_err == nil {
 			state.commits_done += 1
 			state.last_error_ok = true
+			heimdall.counter_add(rec, TELEMETRY_SCOPE_XITDB, "commits_done", 1.0, latest_idx)
 			if state.ui_pid.ref != nil {
 				actor.send(
 					ctx,
@@ -167,9 +177,13 @@ xitdb_worker_receive :: proc(
 					}),
 				)
 			}
+		} else {
+			state.last_error_ok = false
+			heimdall.span_set_error(rec, 1)
 		}
 
 	case Worker_Msg_Run_Datalog:
+		heimdall.scoped_span(rec, TELEMETRY_SCOPE_XITDB, "run_datalog", i64(state.queries_done + 1))
 		sync.rw_mutex_shared_lock(&state.shared.rw_lock)
 		local_core := state.shared.db.core^
 		local_db   := state.shared.db^
@@ -186,6 +200,7 @@ xitdb_worker_receive :: proc(
 
 		if q_err == nil {
 			state.queries_done += 1
+			heimdall.counter_add(rec, TELEMETRY_SCOPE_XITDB, "queries_done", 1.0, i64(row_count))
 			ready := UI_Msg_Datalog_Ready{
 				row_count = row_count,
 				col_count = col_count,
@@ -195,9 +210,13 @@ xitdb_worker_receive :: proc(
 			if state.ui_pid.ref != nil {
 				actor.send(ctx, state.ui_pid, UI_Msg(ready))
 			}
+		} else {
+			state.last_error_ok = false
+			heimdall.span_set_error(rec, 1)
 		}
 
 	case Worker_Msg_Diff_Moments:
+		heimdall.scoped_span(rec, TELEMETRY_SCOPE_XITDB, "diff_moments", m.moment_b)
 		sync.rw_mutex_shared_lock(&state.shared.rw_lock)
 		local_core := state.shared.db.core^
 		local_db   := state.shared.db^
@@ -230,6 +249,7 @@ xitdb_worker_receive :: proc(
 
 		if d_err == nil {
 			state.diffs_done += 1
+			heimdall.counter_add(rec, TELEMETRY_SCOPE_XITDB, "diffs_done", 1.0, i64(added + modified + removed))
 			if state.ui_pid.ref != nil {
 				actor.send(
 					ctx,
@@ -243,9 +263,13 @@ xitdb_worker_receive :: proc(
 					}),
 				)
 			}
+		} else {
+			state.last_error_ok = false
+			heimdall.span_set_error(rec, 1)
 		}
 
 	case Worker_Msg_Ping_Count:
+		heimdall.scoped_span(rec, TELEMETRY_SCOPE_XITDB, "ping_count")
 		sync.rw_mutex_shared_lock(&state.shared.rw_lock)
 		local_core := state.shared.db.core^
 		local_db   := state.shared.db^
@@ -472,10 +496,17 @@ xitdb_slice_viewport :: proc(
 	visible_rows: i64,
 	filter: Xitdb_Filter = {},
 	alloc := context.temp_allocator,
+	recorder: ^heimdall.Recorder = nil,
 ) -> (
 	slice: Xitdb_Viewport_Slice,
 	err: xitdb.Error,
 ) {
+	rec := resolve_recorder(recorder)
+	heimdall.scoped_span(rec, TELEMETRY_SCOPE_XITDB, "xitdb_slice_viewport", visible_rows)
+	defer if err != nil {
+		heimdall.span_set_error(rec, 1)
+	}
+
 	moment_cur, resolved_idx, m_err := xitdb_open_moment_cursor(db, moment_idx)
 	if m_err != nil {
 		return {}, m_err

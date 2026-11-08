@@ -6,7 +6,8 @@ import "core:strings"
 import "core:sync"
 import "core:time"
 import "core:unicode/utf8"
-import actor "../deps/sleipnir/actor"
+import actor "../deps/heimdall/deps/sleipnir/actor"
+import heimdall "../deps/heimdall/heimdall"
 
 
 // =============================================================================
@@ -276,6 +277,20 @@ UI_Coordinator_State :: struct {
 
 	// Immediate-Mode Render Callback
 	render_pass:           UI_Render_Pass_Fn,
+
+	// Optional Heimdall telemetry recorder (falls back to `heimdall.default_recorder()` when nil)
+	recorder:              ^heimdall.Recorder,
+}
+
+// Configures `coord.recorder` and propagates it to `coord.screen`, `coord.layout_ctx`, and `coord.input`.
+ui_coordinator_set_recorder :: proc "contextless" (coord: ^UI_Coordinator_State, rec: ^heimdall.Recorder) {
+	if coord == nil {
+		return
+	}
+	coord.recorder            = rec
+	coord.screen.recorder     = rec
+	coord.layout_ctx.recorder = rec
+	coord.input.recorder      = rec
 }
 
 ui_coordinator_init :: proc(
@@ -488,6 +503,8 @@ ui_coordinator_slice_viewport :: proc(
 	if coord == nil {
 		return {}
 	}
+	rec := resolve_recorder(coord.recorder)
+	heimdall.scoped_span(rec, TELEMETRY_SCOPE_COORDINATOR, "slice_viewport", i64(visible_rows))
 	if coord.shared_db != nil && coord.shared_db.db != nil {
 		sync.rw_mutex_shared_lock(&coord.shared_db.rw_lock)
 		defer sync.rw_mutex_shared_unlock(&coord.shared_db.rw_lock)
@@ -510,9 +527,12 @@ ui_coordinator_slice_viewport :: proc(
 				i64(visible_rows),
 				coord.filter,
 				allocator,
+				coord.recorder,
 			)
 			ui_sync_vlist_to_slot(coord, list_id, int(slice.total_rows), visible_rows)
 			if slice.total_rows > 0 && len(slice.rows) == 0 && i64(coord.vlist.scroll_offset) < requested_start {
+				// Clamped retry after filter narrowed `total_rows` below `requested_start`:
+				// pass `disabled_recorder()` so the single logical `slice_viewport` operation does not emit a duplicate `xitdb_slice_viewport` span.
 				slice, _ = xitdb_slice_viewport(
 					&local_db,
 					coord.active_moment_idx,
@@ -521,6 +541,7 @@ ui_coordinator_slice_viewport :: proc(
 					i64(visible_rows),
 					coord.filter,
 					allocator,
+					disabled_recorder(),
 				)
 			}
 		} else {
@@ -530,6 +551,7 @@ ui_coordinator_slice_viewport :: proc(
 		ui_sync_vlist_to_slot(coord, list_id, coord.vlist.total_rows, visible_rows)
 	}
 	coord.last_viewport_rows = len(slice.rows)
+	heimdall.gauge_set(rec, TELEMETRY_SCOPE_COORDINATOR, "viewport_rows", f64(len(slice.rows)), slice.total_rows)
 	return slice
 }
 
@@ -1082,6 +1104,12 @@ ui_post_resolve_step :: proc(state: ^UI_Coordinator_State) -> (mutated: bool) {
 }
 
 ui_coordinator_flush_frame :: proc(state: ^UI_Coordinator_State) {
+	state.screen.recorder     = state.recorder
+	state.layout_ctx.recorder = state.recorder
+	state.input.recorder      = state.recorder
+	rec := resolve_recorder(state.recorder)
+	heimdall.scoped_span(rec, TELEMETRY_SCOPE_COORDINATOR, "flush_frame", i64(state.total_frames + 1))
+
 	ui_rebind_internal_slices(state)
 	strings.builder_reset(&state.ansi_builder)
 	_ = ui_drain_side_effects(state, &state.ansi_builder)
@@ -1113,9 +1141,15 @@ ui_coordinator_flush_frame :: proc(state: ^UI_Coordinator_State) {
 				last_act_name := state.input.triggered_action_name
 				last_has_enum := state.input.has_triggered_enum
 				last_enum_val := state.input.triggered_enum_val
+				saved_lay_rec := state.layout_ctx.recorder
+				saved_inp_rec := state.input.recorder
+				state.layout_ctx.recorder = disabled_recorder()
+				state.input.recorder      = disabled_recorder()
 				ui_invoke_render_pass(state)
 				_ = ui_drain_side_effects(state, &state.ansi_builder)
 				resolve_input(&state.input, &state.layout_ctx)
+				state.layout_ctx.recorder = saved_lay_rec
+				state.input.recorder      = saved_inp_rec
 				state.input.triggered_action_id   = last_act_id
 				state.input.triggered_action_name = last_act_name
 				state.input.has_triggered_enum    = last_has_enum
@@ -1172,13 +1206,21 @@ ui_coordinator_flush_frame :: proc(state: ^UI_Coordinator_State) {
 				// If a modal/focus/state transition occurred mid-burst and more events remain,
 				// rebuild and reconcile immediately so subsequent events in the same burst see the updated tree.
 				if ev_idx + 1 < len(events) && (palette_changed || state_changed || state.input.wants_focus_id != 0) {
+					saved_lay_rec := state.layout_ctx.recorder
+					saved_inp_rec := state.input.recorder
+					state.layout_ctx.recorder = disabled_recorder()
+					state.input.recorder      = disabled_recorder()
 					ui_invoke_render_pass(state)
 					resolve_input(&state.input, &state.layout_ctx)
+					state.layout_ctx.recorder = saved_lay_rec
+					state.input.recorder      = saved_inp_rec
 				}
 			}
 
 			// Rebuild layout with updated state and run post-rebuild focus reconciliation so newly opened
 			// `.Trap_Focus` modals (e.g. `Command_Palette`) or `wants_focus_id` targets acquire focus on the same frame.
+			// Suppress telemetry on the internal post-action layout/focus reconciliation pass so a single
+			// `flush_frame` emits exactly one `end_layout` / `resolve_input` span for the frame.
 			state.input.triggered_action_id   = last_act_id
 			state.input.triggered_action_name = last_act_name
 			state.input.has_triggered_enum    = last_has_enum
@@ -1189,9 +1231,15 @@ ui_coordinator_flush_frame :: proc(state: ^UI_Coordinator_State) {
 			state.input.text_changed_id       = last_text_changed
 			state.input.last_disabled_reason  = last_disabled_msg
 
+			saved_lay_rec := state.layout_ctx.recorder
+			saved_inp_rec := state.input.recorder
+			state.layout_ctx.recorder = disabled_recorder()
+			state.input.recorder      = disabled_recorder()
 			ui_invoke_render_pass(state)
 			_ = ui_drain_side_effects(state, &state.ansi_builder)
 			resolve_input(&state.input, &state.layout_ctx)
+			state.layout_ctx.recorder = saved_lay_rec
+			state.input.recorder      = saved_inp_rec
 
 			state.input.triggered_action_id   = last_act_id
 			state.input.triggered_action_name = last_act_name
@@ -1226,6 +1274,9 @@ ui_coordinator_flush_frame :: proc(state: ^UI_Coordinator_State) {
 	state.batch_drained   = 0
 	state.total_frames    += 1
 	state.last_frame_tick = time.tick_now()
+
+	heimdall.counter_add(rec, TELEMETRY_SCOPE_COORDINATOR, "frames_rendered", 1.0, i64(state.total_frames))
+	heimdall.gauge_set(rec, TELEMETRY_SCOPE_COORDINATOR, "diff_cells", f64(state.last_diff_cells), i64(state.last_ansi_bytes))
 }
 
 // Single-owner UI Coordinator actor receive callback with mailbox burst coalescing.
@@ -1239,6 +1290,9 @@ ui_coordinator_receive :: proc(
 	if msg == nil {
 		return
 	}
+	rec := resolve_recorder(state.recorder)
+	heimdall.scoped_span(rec, TELEMETRY_SCOPE_COORDINATOR, "actor_turn", i64(state.batch_drained + 1))
+	msgs_before := state.total_msgs_processed
 
 	// 1. Reduce the incoming message in O(1) time.
 	is_tick := ui_reduce_single_msg(state, msg^)
@@ -1254,11 +1308,22 @@ ui_coordinator_receive :: proc(
 				switch ev in fe^ {
 				case UI_Msg_Key:
 					_ = ui_reduce_single_msg(s, UI_Msg(ev))
+					s.batch_drained += 1
 				case UI_Msg_Mouse:
 					_ = ui_reduce_single_msg(s, UI_Msg(ev))
+					s.batch_drained += 1
 				}
 			},
 		)
+	}
+
+	// Update `actor_turn`'s `attr_i64` with the cumulative `batch_drained` count after draining
+	// both the mailbox turn and any SPSC fast-path events.
+	heimdall.span_set_status(rec, .Ok, i64(state.batch_drained), true)
+
+	msgs_delta := state.total_msgs_processed - msgs_before
+	if msgs_delta > 0 {
+		heimdall.counter_add(rec, TELEMETRY_SCOPE_COORDINATOR, "msgs_processed", f64(msgs_delta), i64(state.total_msgs_processed))
 	}
 
 	// 3. Mailbox Burst Coalescing:
