@@ -1,9 +1,12 @@
 package bifrost_tests
 
+import "core:fmt"
+import "core:os"
 import "core:strings"
 import "core:testing"
 import "../bifrost"
-import actor "../deps/sleipnir/actor"
+import actor "../deps/heimdall/deps/sleipnir/actor"
+import heimdall "../deps/heimdall/heimdall"
 import xitdb "../deps/xitdb/xitdb"
 
 // =============================================================================
@@ -1436,6 +1439,177 @@ then_row_runes_at_are :: proc(
 		cur_x += 1
 	}
 }
+
+// =============================================================================
+// Layer 2: Domain-Specific Language (Track 15: Heimdall Telemetry & Arrow Store)
+// =============================================================================
+
+given_heimdall_recorder :: proc(
+	s: ^Suite_Ctx,
+	sub_dir: string,
+	bind_explicit: bool = true,
+	set_default: bool = false,
+	loc := #caller_location,
+) {
+	if s.heimdall_active {
+		if s.heimdall_was_default {
+			bifrost.set_thread_default_recorder(nil)
+		}
+		bifrost.heimdall_store_destroy(&s.heimdall_store)
+		heimdall.recorder_destroy(&s.heimdall_rec)
+		s.heimdall_active      = false
+		s.heimdall_was_default = false
+	}
+
+	dir_b := fmt.bprintf(s.heimdall_dir_buf[:], ".tmp/%s", sub_dir)
+	s.heimdall_dir_len = len(dir_b)
+	dir_str := string(s.heimdall_dir_buf[:s.heimdall_dir_len])
+	_ = os.remove_all(dir_str)
+	mk_err := os.make_directory_all(dir_str)
+	testing.expect_value(s.t, mk_err, nil, loc = loc)
+
+	prefix_b := fmt.bprintf(s.heimdall_prefix_buf[:], "%s/seg", dir_str)
+	s.heimdall_prefix_len = len(prefix_b)
+	prefix_str := string(s.heimdall_prefix_buf[:s.heimdall_prefix_len])
+
+	r_err := heimdall.recorder_init(&s.heimdall_rec, heimdall.Config{
+		file_prefix      = prefix_str,
+		batches_per_file = 4,
+		ring_page_count  = 4,
+	}, s.alloc)
+	testing.expect_value(s.t, r_err, nil, loc = loc)
+
+	st_err := bifrost.heimdall_store_init(&s.heimdall_store, s.alloc)
+	testing.expect_value(s.t, st_err, nil, loc = loc)
+
+	s.heimdall_active      = true
+	s.heimdall_was_default = set_default
+
+	if bind_explicit {
+		s.screen.recorder     = &s.heimdall_rec
+		s.layout_ctx.recorder = &s.heimdall_rec
+		s.input.recorder      = &s.heimdall_rec
+		if s.ui_actor != nil {
+			bifrost.ui_coordinator_set_recorder(&s.ui_actor.state, &s.heimdall_rec)
+		}
+		if s.worker_actor != nil {
+			s.worker_actor.state.recorder = &s.heimdall_rec
+		}
+	}
+	if set_default {
+		bifrost.set_thread_default_recorder(&s.heimdall_rec)
+	}
+}
+
+upon_flushing_and_loading_heimdall_segments :: proc(s: ^Suite_Ctx, loc := #caller_location) {
+	if s.actor_active {
+		actor.scheduler_wait_idle(&s.sched)
+	}
+	heimdall.recorder_flush(&s.heimdall_rec)
+	prefix_str := string(s.heimdall_prefix_buf[:s.heimdall_prefix_len])
+	segs, rows := bifrost.heimdall_store_load_prefix(&s.heimdall_store, prefix_str)
+	testing.expect(s.t, segs >= 1, "Expected at least 1 flushed .arrow segment", loc = loc)
+	testing.expect(s.t, rows >= 1, "Expected at least 1 decoded telemetry record", loc = loc)
+}
+
+upon_filtering_heimdall_store :: proc(
+	s: ^Suite_Ctx,
+	kind_filter: bifrost.Heimdall_Filter_Kind,
+	scope_filter: string = "",
+	query: string = "",
+	loc := #caller_location,
+) {
+	_ = loc
+	_ = bifrost.heimdall_store_apply_filter(&s.heimdall_store, kind_filter, scope_filter, query)
+}
+
+then_heimdall_recorder_dropped_is :: proc(
+	s: ^Suite_Ctx,
+	expected_dropped: u64,
+	loc := #caller_location,
+) {
+	stats := bifrost.heimdall_snapshot_recorder_stats(&s.heimdall_rec)
+	testing.expect_value(s.t, stats.enabled, true, loc = loc)
+	testing.expect_value(s.t, stats.dropped_records, expected_dropped, loc = loc)
+}
+
+then_heimdall_has_record :: proc(
+	s: ^Suite_Ctx,
+	expected_scope: string,
+	expected_name: string,
+	expected_kind: heimdall.Kind,
+	loc := #caller_location,
+) {
+	found := false
+	for r in s.heimdall_store.records {
+		if r.scope == expected_scope && r.name == expected_name && r.kind == expected_kind {
+			found = true
+			break
+		}
+	}
+	testing.expectf(
+		s.t,
+		found,
+		"Expected Heimdall store to contain record scope=%q name=%q kind=%v (total records=%d)",
+		expected_scope,
+		expected_name,
+		expected_kind,
+		len(s.heimdall_store.records),
+		loc = loc,
+	)
+}
+
+then_heimdall_span_is_child_of :: proc(
+	s: ^Suite_Ctx,
+	child_scope: string,
+	child_name: string,
+	parent_scope: string,
+	parent_name: string,
+	loc := #caller_location,
+) {
+	parent_ids := make(map[u64]bool, 16, context.temp_allocator)
+	for r in s.heimdall_store.records {
+		if r.kind == .Span && r.scope == parent_scope && r.name == parent_name && r.span_id != 0 {
+			parent_ids[r.span_id] = true
+		}
+	}
+	linked := false
+	for r in s.heimdall_store.records {
+		if r.kind == .Span && r.scope == child_scope && r.name == child_name {
+			if r.parent_id in parent_ids {
+				linked = true
+				break
+			}
+		}
+	}
+	testing.expectf(
+		s.t,
+		linked,
+		"Expected span %s/%s to have parent_id matching a %s/%s span",
+		child_scope,
+		child_name,
+		parent_scope,
+		parent_name,
+		loc = loc,
+	)
+}
+
+then_heimdall_filtered_count_at_least :: proc(
+	s: ^Suite_Ctx,
+	min_expected: int,
+	loc := #caller_location,
+) {
+	actual := len(s.heimdall_store.filtered_idxs)
+	testing.expectf(
+		s.t,
+		actual >= min_expected,
+		"Expected filtered Heimdall record count >= %d, got %d",
+		min_expected,
+		actual,
+		loc = loc,
+	)
+}
+
 
 
 

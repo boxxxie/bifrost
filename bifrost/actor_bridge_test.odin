@@ -4,7 +4,7 @@ import "core:fmt"
 import "core:mem"
 import "core:strings"
 import "core:testing"
-import actor "../deps/sleipnir/actor"
+import actor "../deps/heimdall/deps/sleipnir/actor"
 import xitdb "../deps/xitdb/xitdb"
 
 @(test)

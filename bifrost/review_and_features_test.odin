@@ -5,7 +5,7 @@ import "core:mem"
 import "core:strings"
 import "core:testing"
 import "core:unicode/utf8"
-import actor "../deps/sleipnir/actor"
+import actor "../deps/heimdall/deps/sleipnir/actor"
 import xitdb "../deps/xitdb/xitdb"
 import codegen "./codegen"
 

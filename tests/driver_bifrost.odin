@@ -2,12 +2,14 @@ package bifrost_tests
 
 import "core:fmt"
 import "core:mem"
+import "core:os"
 import "core:strconv"
 import "core:strings"
 import "core:testing"
 import "core:unicode/utf8"
 import "../bifrost"
-import actor "../deps/sleipnir/actor"
+import actor "../deps/heimdall/deps/sleipnir/actor"
+import heimdall "../deps/heimdall/heimdall"
 import xitdb "../deps/xitdb/xitdb"
 
 // =============================================================================
@@ -58,6 +60,16 @@ Suite_Ctx :: struct {
 	ui_pid:          actor.PID(bifrost.UI_Msg),
 	worker_pid:      actor.PID(bifrost.Xitdb_Worker_Msg),
 	last_slice:      bifrost.Xitdb_Viewport_Slice,
+
+	// Track 15: Heimdall Telemetry Recorder & OdinArrow Segment Store
+	heimdall_active:      bool,
+	heimdall_was_default: bool,
+	heimdall_dir_buf:     [128]u8,
+	heimdall_dir_len:     int,
+	heimdall_prefix_buf:  [160]u8,
+	heimdall_prefix_len:  int,
+	heimdall_rec:         heimdall.Recorder,
+	heimdall_store:       bifrost.Heimdall_Segment_Store,
 }
 
 driver_init :: proc(s: ^Suite_Ctx, t: ^testing.T, w: i32 = 80, h: i32 = 24) {
@@ -94,12 +106,30 @@ driver_destroy :: proc(s: ^Suite_Ctx) {
 	}
 	if s.actor_active {
 		actor.scheduler_wait_idle(&s.sched)
-		if s.ui_actor != nil {
-			bifrost.ui_coordinator_destroy(&s.ui_actor.state)
+		ui_state: bifrost.UI_Coordinator_State
+		has_ui := s.ui_actor != nil
+		if has_ui {
+			ui_state = s.ui_actor.state
+			s.ui_actor.state = {}
 		}
 		actor.scheduler_stop_and_destroy(&s.sched)
+		if has_ui {
+			bifrost.ui_coordinator_destroy(&ui_state)
+		}
 		_ = xitdb.core_destroy(&s.db_core)
 		s.actor_active = false
+	}
+	if s.heimdall_active {
+		if s.heimdall_was_default {
+			bifrost.set_thread_default_recorder(nil)
+		}
+		heimdall.recorder_destroy(&s.heimdall_rec)
+		bifrost.heimdall_store_destroy(&s.heimdall_store)
+		if s.heimdall_dir_len > 0 {
+			dir_str := string(s.heimdall_dir_buf[:s.heimdall_dir_len])
+			_ = os.remove_all(dir_str)
+		}
+		s.heimdall_active = false
 	}
 	delete(s.parsed_events)
 	delete(s.dispatch_steps)

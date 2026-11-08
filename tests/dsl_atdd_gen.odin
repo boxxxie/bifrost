@@ -3,6 +3,7 @@ package bifrost_tests
 
 import "core:testing"
 import "../bifrost"
+import heimdall "../deps/heimdall/heimdall"
 
 // =============================================================================
 // Ambient Scenario Context & `@(deferred_out)` Scoped RAII Harness
@@ -211,6 +212,13 @@ Suite_Ctx_VTable :: struct {
 	then_canvas_cell_mask_is: proc(s: ^Suite_Ctx, canvas: ^bifrost.Braille_Canvas, cx: i32, cy: i32, expected_mask: u8, loc := #caller_location),
 	then_cell_style_has: proc(s: ^Suite_Ctx, x: i32, y: i32, expected_flag: bifrost.Style_Flag, expected_present: bool, loc := #caller_location),
 	then_row_runes_at_are: proc(s: ^Suite_Ctx, x: i32, y: i32, expected_text: string, loc := #caller_location),
+	given_heimdall_recorder: proc(s: ^Suite_Ctx, sub_dir: string, bind_explicit: bool = true, set_default: bool = false, loc := #caller_location),
+	upon_flushing_and_loading_heimdall_segments: proc(s: ^Suite_Ctx, loc := #caller_location),
+	upon_filtering_heimdall_store: proc(s: ^Suite_Ctx, kind_filter: bifrost.Heimdall_Filter_Kind, scope_filter: string = "", query: string = "", loc := #caller_location),
+	then_heimdall_recorder_dropped_is: proc(s: ^Suite_Ctx, expected_dropped: u64, loc := #caller_location),
+	then_heimdall_has_record: proc(s: ^Suite_Ctx, expected_scope: string, expected_name: string, expected_kind: heimdall.Kind, loc := #caller_location),
+	then_heimdall_span_is_child_of: proc(s: ^Suite_Ctx, child_scope: string, child_name: string, parent_scope: string, parent_name: string, loc := #caller_location),
+	then_heimdall_filtered_count_at_least: proc(s: ^Suite_Ctx, min_expected: int, loc := #caller_location),
 }
 
 @(private)
@@ -353,6 +361,13 @@ _suite_ctx_vtable := Suite_Ctx_VTable{
 	then_canvas_cell_mask_is = then_canvas_cell_mask_is,
 	then_cell_style_has = then_cell_style_has,
 	then_row_runes_at_are = then_row_runes_at_are,
+	given_heimdall_recorder = given_heimdall_recorder,
+	upon_flushing_and_loading_heimdall_segments = upon_flushing_and_loading_heimdall_segments,
+	upon_filtering_heimdall_store = upon_filtering_heimdall_store,
+	then_heimdall_recorder_dropped_is = then_heimdall_recorder_dropped_is,
+	then_heimdall_has_record = then_heimdall_has_record,
+	then_heimdall_span_is_child_of = then_heimdall_span_is_child_of,
+	then_heimdall_filtered_count_at_least = then_heimdall_filtered_count_at_least,
 }
 
 Given_DSL :: struct {
@@ -371,6 +386,7 @@ Given_DSL :: struct {
 	nonblocking_pipe_terminal: proc(loc := #caller_location),
 	text_area_text: proc(id: string, text: string),
 	active_tab: proc(id: string, tab_idx: int, restore_body_focus: bool = true),
+	heimdall_recorder: proc(sub_dir: string, bind_explicit: bool = true, set_default: bool = false, loc := #caller_location),
 }
 
 @(rodata)
@@ -390,6 +406,7 @@ given := Given_DSL{
 	nonblocking_pipe_terminal = given_nonblocking_pipe_terminal_ambient,
 	text_area_text = given_text_area_text_ambient,
 	active_tab = given_active_tab_ambient,
+	heimdall_recorder = given_heimdall_recorder_ambient,
 }
 
 Upon_DSL :: struct {
@@ -429,6 +446,8 @@ Upon_DSL :: struct {
 	feeding_win32_console_record: proc(rec: bifrost.Win32_Console_Record),
 	pasting_text: proc(text: string),
 	clicking_tab: proc(id: string, tab_idx: int, loc := #caller_location),
+	flushing_and_loading_heimdall_segments: proc(loc := #caller_location),
+	filtering_heimdall_store: proc(kind_filter: bifrost.Heimdall_Filter_Kind, scope_filter: string = "", query: string = "", loc := #caller_location),
 }
 
 @(rodata)
@@ -469,6 +488,8 @@ upon := Upon_DSL{
 	feeding_win32_console_record = upon_feeding_win32_console_record_ambient,
 	pasting_text = upon_pasting_text_ambient,
 	clicking_tab = upon_clicking_tab_ambient,
+	flushing_and_loading_heimdall_segments = upon_flushing_and_loading_heimdall_segments_ambient,
+	filtering_heimdall_store = upon_filtering_heimdall_store_ambient,
 }
 
 Then_DSL :: struct {
@@ -558,6 +579,10 @@ Then_DSL :: struct {
 	canvas_cell_mask_is: proc(canvas: ^bifrost.Braille_Canvas, cx: i32, cy: i32, expected_mask: u8, loc := #caller_location),
 	cell_style_has: proc(x: i32, y: i32, expected_flag: bifrost.Style_Flag, expected_present: bool, loc := #caller_location),
 	row_runes_at_are: proc(x: i32, y: i32, expected_text: string, loc := #caller_location),
+	heimdall_recorder_dropped_is: proc(expected_dropped: u64, loc := #caller_location),
+	heimdall_has_record: proc(expected_scope: string, expected_name: string, expected_kind: heimdall.Kind, loc := #caller_location),
+	heimdall_span_is_child_of: proc(child_scope: string, child_name: string, parent_scope: string, parent_name: string, loc := #caller_location),
+	heimdall_filtered_count_at_least: proc(min_expected: int, loc := #caller_location),
 }
 
 @(rodata)
@@ -648,6 +673,10 @@ then := Then_DSL{
 	canvas_cell_mask_is = then_canvas_cell_mask_is_ambient,
 	cell_style_has = then_cell_style_has_ambient,
 	row_runes_at_are = then_row_runes_at_are_ambient,
+	heimdall_recorder_dropped_is = then_heimdall_recorder_dropped_is_ambient,
+	heimdall_has_record = then_heimdall_has_record_ambient,
+	heimdall_span_is_child_of = then_heimdall_span_is_child_of_ambient,
+	heimdall_filtered_count_at_least = then_heimdall_filtered_count_at_least_ambient,
 }
 
 // =============================================================================
@@ -1218,5 +1247,33 @@ then_cell_style_has_ambient :: #force_inline proc(x: i32, y: i32, expected_flag:
 
 then_row_runes_at_are_ambient :: #force_inline proc(x: i32, y: i32, expected_text: string, loc := #caller_location) {
 	then_row_runes_at_are(current_scenario(loc), x, y, expected_text, loc)
+}
+
+given_heimdall_recorder_ambient :: #force_inline proc(sub_dir: string, bind_explicit: bool = true, set_default: bool = false, loc := #caller_location) {
+	given_heimdall_recorder(current_scenario(loc), sub_dir, bind_explicit, set_default, loc)
+}
+
+upon_flushing_and_loading_heimdall_segments_ambient :: #force_inline proc(loc := #caller_location) {
+	upon_flushing_and_loading_heimdall_segments(current_scenario(loc), loc)
+}
+
+upon_filtering_heimdall_store_ambient :: #force_inline proc(kind_filter: bifrost.Heimdall_Filter_Kind, scope_filter: string = "", query: string = "", loc := #caller_location) {
+	upon_filtering_heimdall_store(current_scenario(loc), kind_filter, scope_filter, query, loc)
+}
+
+then_heimdall_recorder_dropped_is_ambient :: #force_inline proc(expected_dropped: u64, loc := #caller_location) {
+	then_heimdall_recorder_dropped_is(current_scenario(loc), expected_dropped, loc)
+}
+
+then_heimdall_has_record_ambient :: #force_inline proc(expected_scope: string, expected_name: string, expected_kind: heimdall.Kind, loc := #caller_location) {
+	then_heimdall_has_record(current_scenario(loc), expected_scope, expected_name, expected_kind, loc)
+}
+
+then_heimdall_span_is_child_of_ambient :: #force_inline proc(child_scope: string, child_name: string, parent_scope: string, parent_name: string, loc := #caller_location) {
+	then_heimdall_span_is_child_of(current_scenario(loc), child_scope, child_name, parent_scope, parent_name, loc)
+}
+
+then_heimdall_filtered_count_at_least_ambient :: #force_inline proc(min_expected: int, loc := #caller_location) {
+	then_heimdall_filtered_count_at_least(current_scenario(loc), min_expected, loc)
 }
 
