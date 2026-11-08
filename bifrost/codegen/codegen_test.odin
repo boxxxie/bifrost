@@ -198,6 +198,7 @@ test_codegen_generate_directory_compiles_cleanly_with_odin_check :: proc(t: ^tes
 			tmp_dir,
 			"-no-entry-point",
 			"-custom-attribute:ui_actions,ui_action,ui_scope",
+			"-ignore-unknown-attributes",
 			"-vet",
 			"-vet-packages:codegen_test_pkg",
 			"-strict-style",

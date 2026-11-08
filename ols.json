@@ -2,8 +2,10 @@
 	"$schema": "https://raw.githubusercontent.com/DanielGavin/ols/master/misc/ols.schema.json",
 	"collections": [
 		{ "name": "bifrost", "path": "./bifrost" },
-		{ "name": "actor", "path": "./deps/sleipnir/actor" },
-		{ "name": "xitdb", "path": "./deps/xitdb/xitdb" }
+		{ "name": "actor", "path": "./deps/heimdall/deps/sleipnir/actor" },
+		{ "name": "xitdb", "path": "./deps/xitdb/xitdb" },
+		{ "name": "heimdall", "path": "./deps/heimdall/heimdall" },
+		{ "name": "odinarrow", "path": "./deps/heimdall/deps/OdinArrow/src" }
 	],
 	"enable_document_symbols": true,
 	"enable_hover": true,

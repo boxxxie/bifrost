@@ -37,3 +37,6 @@
 [submodule "reference/qpc"]
 	path = reference/qpc
 	url = https://github.com/QuantumLeaps/qpc.git
+[submodule "deps/heimdall"]
+	path = deps/heimdall
+	url = https://github.com/boxxxie/heimdall.git
