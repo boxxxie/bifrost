@@ -6,6 +6,7 @@ import "core:mem"
 import "core:os"
 import "core:strings"
 import "../../bifrost"
+import heimdall "../../deps/heimdall/heimdall"
 
 // =============================================================================
 // Bifrost Widget Showcase (Tracks 11-14 Unified Interactive Demo)
@@ -91,16 +92,20 @@ Showcase_Action :: enum u8 {
 	Pulse_Telemetry,
 	Focus_Tree,
 	Focus_Editor,
+	Heimdall_Flush,
+	Heimdall_Kind_Cycle,
 	Quit,
 }
 
 Showcase_Actions :: struct {
-	Theme_Cycle:     Showcase_Action `bifrost:"key=<C-t>, id=theme.cycle, allow_in_edit=true, desc=Theme, label=Cycle Color Theme (Nord / Tokyo / Gruvbox), category=Appearance"`,
-	Style_Cycle:     Showcase_Action `bifrost:"key=<F2>, id=style.cycle, policy=global, allow_in_edit=true, desc='Bindings (F2)', label='Cycle Keymap Style (Vim / Helix / Emacs) [F2]', category=Keymap"`,
-	Pulse_Telemetry: Showcase_Action `bifrost:"vim=p, helix=<Space> p, emacs=<C-x> p, id=telemetry.pulse, desc=Pulse, label=Advance Telemetry Wave Phase, category=Telemetry"`,
-	Focus_Tree:      Showcase_Action `bifrost:"vim=g t, helix=g t, emacs=<C-x> t, id=nav.tree, desc=Tree, label=Focus Architecture Tree Explorer, category=Navigation"`,
-	Focus_Editor:    Showcase_Action `bifrost:"vim=g n, helix=g n, emacs=<C-x> n, id=nav.editor, desc=Editor, label=Switch to Tab 1 & Focus Notes Editor, category=Navigation"`,
-	Quit:            Showcase_Action `bifrost:"vim=q|<C-q>|<C-c>, helix=q|<C-q>|<C-c>, emacs=<C-x> c|<C-q>, id=app.quit, policy=global, desc=Quit, label=Quit Widget Showcase, category=System"`,
+	Theme_Cycle:         Showcase_Action `bifrost:"key=<C-t>, id=theme.cycle, allow_in_edit=true, desc=Theme, label=Cycle Color Theme (Nord / Tokyo / Gruvbox), category=Appearance"`,
+	Style_Cycle:         Showcase_Action `bifrost:"key=<F2>, id=style.cycle, policy=global, allow_in_edit=true, desc='Bindings (F2)', label='Cycle Keymap Style (Vim / Helix / Emacs) [F2]', category=Keymap"`,
+	Pulse_Telemetry:     Showcase_Action `bifrost:"vim=p, helix=<Space> p, emacs=<C-x> p, id=telemetry.pulse, desc=Pulse, label=Advance Telemetry Wave Phase, category=Telemetry"`,
+	Focus_Tree:          Showcase_Action `bifrost:"vim=g t, helix=g t, emacs=<C-x> t, id=nav.tree, desc=Tree, label=Focus Architecture Tree Explorer, category=Navigation"`,
+	Focus_Editor:        Showcase_Action `bifrost:"vim=g n, helix=g n, emacs=<C-x> n, id=nav.editor, desc=Editor, label=Switch to Tab 1 & Focus Notes Editor, category=Navigation"`,
+	Heimdall_Flush:      Showcase_Action `bifrost:"key=<C-r>, id=heimdall.flush, allow_in_edit=true, desc='Flush IPC (^R)', label='Flush & Reload Heimdall .arrow Segments [^R]', category=Telemetry"`,
+	Heimdall_Kind_Cycle: Showcase_Action `bifrost:"key=<C-k>, id=heimdall.kind, allow_in_edit=true, desc='Kind (^K)', label='Cycle Heimdall Record Kind Filter [^K]', category=Telemetry"`,
+	Quit:                Showcase_Action `bifrost:"vim=q|<C-q>|<C-c>, helix=q|<C-q>|<C-c>, emacs=<C-x> c|<C-q>, id=app.quit, policy=global, desc=Quit, label=Quit Widget Showcase, category=System"`,
 }
 
 @(rodata)
@@ -340,27 +345,77 @@ track_14 :: "ui_canvas & ui_sparkline (Braille 2x4)"`
 
 TELEMETRY_SAMPLES :: 48
 
+SHOWCASE_HEIMDALL_DIR    :: ".tmp/showcase_heimdall"
+SHOWCASE_HEIMDALL_PREFIX :: ".tmp/showcase_heimdall/seg"
+
 Showcase_App :: struct {
-	screen:          bifrost.Screen,
-	layout_ctx:      bifrost.Layout_Context,
-	input:           bifrost.Input_State,
-	state_store:     bifrost.Widget_State_Store,
-	palette:         bifrost.Command_Palette,
-	ansi_builder:    strings.Builder,
-	theme:           Theme_Preset,
-	wave_phase:      f32,
-	latency_series:  [TELEMETRY_SAMPLES]f32,
-	fps_series:      [TELEMETRY_SAMPLES]f32,
-	spark_ops:       [32]f32,
-	spark_mem:       [32]int,
-	last_tree_node:  i32,
-	last_activated:  string,
-	active_file:     string,
-	editor_syntax:   bifrost.Text_Area_Syntax_Mode,
-	last_action:     string,
-	action_count:    int,
-	frames_rendered: int,
-	quit_requested:  bool,
+	screen:               bifrost.Screen,
+	layout_ctx:           bifrost.Layout_Context,
+	input:                bifrost.Input_State,
+	state_store:          bifrost.Widget_State_Store,
+	palette:              bifrost.Command_Palette,
+	ansi_builder:         strings.Builder,
+	recorder:             heimdall.Recorder,
+	heimdall_store:       bifrost.Heimdall_Segment_Store,
+	heimdall_filter_kind: bifrost.Heimdall_Filter_Kind,
+	heimdall_scope_buf:   [64]u8,
+	heimdall_scope_len:   int,
+	theme:                Theme_Preset,
+	wave_phase:           f32,
+	latency_series:       [TELEMETRY_SAMPLES]f32,
+	fps_series:           [TELEMETRY_SAMPLES]f32,
+	spark_ops:            [32]f32,
+	spark_mem:            [32]int,
+	last_tree_node:       i32,
+	last_activated:       string,
+	active_file:          string,
+	editor_syntax:        bifrost.Text_Area_Syntax_Mode,
+	last_action:          string,
+	action_count:         int,
+	frames_rendered:      int,
+	quit_requested:       bool,
+}
+
+active_heimdall_scope_filter :: proc(app: ^Showcase_App) -> string {
+	if app.heimdall_scope_len <= 0 {
+		return ""
+	}
+	return string(app.heimdall_scope_buf[:app.heimdall_scope_len])
+}
+
+set_heimdall_scope_filter :: proc(app: ^Showcase_App, scope: string) {
+	if len(scope) == 0 {
+		app.heimdall_scope_len = 0
+		return
+	}
+	n := min(len(scope), len(app.heimdall_scope_buf))
+	copy(app.heimdall_scope_buf[:n], scope[:n])
+	app.heimdall_scope_len = n
+}
+
+flush_and_reload_showcase_heimdall :: proc(app: ^Showcase_App) {
+	heimdall.recorder_flush(&app.recorder)
+	_, _ = bifrost.heimdall_store_load_prefix(&app.heimdall_store, SHOWCASE_HEIMDALL_PREFIX)
+	scope_filter := active_heimdall_scope_filter(app)
+	if len(scope_filter) > 0 {
+		found := false
+		for st in app.heimdall_store.scope_stats {
+			if st.scope == scope_filter {
+				found = true
+				break
+			}
+		}
+		if !found {
+			app.heimdall_scope_len = 0
+			scope_filter           = ""
+		}
+	}
+	_ = bifrost.heimdall_store_apply_filter(
+		&app.heimdall_store,
+		app.heimdall_filter_kind,
+		scope_filter,
+		"",
+	)
 }
 
 recompute_telemetry :: proc(app: ^Showcase_App) {
@@ -403,6 +458,30 @@ showcase_init :: proc(app: ^Showcase_App, cols, rows: i32, allocator := context.
 		bifrost.screen_destroy(&app.screen)
 		return false
 	}
+
+	_ = os.remove_all(SHOWCASE_HEIMDALL_DIR)
+	_ = os.make_directory_all(SHOWCASE_HEIMDALL_DIR)
+	if heimdall.recorder_init(&app.recorder, heimdall.Config{
+		file_prefix      = SHOWCASE_HEIMDALL_PREFIX,
+		batches_per_file = 8,
+		ring_page_count  = 4,
+	}, allocator) != nil {
+		bifrost.state_store_destroy(&app.state_store)
+		bifrost.screen_destroy(&app.screen)
+		return false
+	}
+	if bifrost.heimdall_store_init(&app.heimdall_store, allocator) != nil {
+		heimdall.recorder_destroy(&app.recorder)
+		bifrost.state_store_destroy(&app.state_store)
+		bifrost.screen_destroy(&app.screen)
+		return false
+	}
+
+	// Attach the Heimdall recorder directly to Screen, Layout_Context, and Input_State
+	app.screen.recorder     = &app.recorder
+	app.layout_ctx.recorder = &app.recorder
+	app.input.recorder      = &app.recorder
+
 	app.ansi_builder    = strings.builder_make(0, 8192, allocator)
 	app.theme           = .Nord
 	app.last_action     = "ready"
@@ -431,6 +510,9 @@ showcase_init :: proc(app: ^Showcase_App, cols, rows: i32, allocator := context.
 }
 
 showcase_destroy :: proc(app: ^Showcase_App) {
+	bifrost.heimdall_store_destroy(&app.heimdall_store)
+	heimdall.recorder_destroy(&app.recorder)
+	_ = os.remove_all(SHOWCASE_HEIMDALL_DIR)
 	strings.builder_destroy(&app.ansi_builder)
 	bifrost.state_store_destroy(&app.state_store)
 	bifrost.screen_destroy(&app.screen)
@@ -520,10 +602,11 @@ build_showcase_ui :: proc(app: ^Showcase_App, out_tree_slice: ^bifrost.Tree_Slic
 			})
 
 			// 2c. Right Pane: Track 13 Focus-Scope-Integrated Tab Bar (`ui_tabs`)
-			tab_specs := [3]bifrost.Tab_Item_Spec{
-				{label = "Editor & Docs",    badge = "T11", key_hint = "1:"},
-				{label = "Braille Telemetry", badge = "T14", key_hint = "2:"},
-				{label = "Inspector & Keys", badge = "T12/13", key_hint = "3:"},
+			tab_specs := [4]bifrost.Tab_Item_Spec{
+				{label = "Editor & Docs",      badge = "T11",    key_hint = "1:"},
+				{label = "Braille Telemetry",   badge = "T14",    key_hint = "2:"},
+				{label = "Inspector & Keys",    badge = "T12/13", key_hint = "3:"},
+				{label = "Heimdall IPC Viewer", badge = "ARROW",  key_hint = "4:"},
 			}
 
 			cur_tab := 0
@@ -551,7 +634,7 @@ build_showcase_ui :: proc(app: ^Showcase_App, out_tree_slice: ^bifrost.Tree_Slic
 					sep_fg           = pal.border_fg,
 					border_fg        = pal.border_fg,
 					title_fg         = pal.accent_fg,
-					title            = "Workspace ([ / ] or Alt+1..3 switches tabs with H* Focus Memory)",
+					title            = "Workspace ([ / ] or Alt+1..4 switches tabs with H* Focus Memory)",
 					show_index_hints = true,
 				},
 				&cur_tab,
@@ -776,6 +859,135 @@ build_showcase_ui :: proc(app: ^Showcase_App, out_tree_slice: ^bifrost.Tree_Slic
 							bg     = pal.header_bg,
 						})
 					}
+
+				case 3:
+					// =========================================================
+					// TAB 3: Heimdall Arrow IPC Telemetry Viewer
+					// =========================================================
+					rec_stats := bifrost.heimdall_snapshot_recorder_stats(&app.recorder)
+					scope_lbl := active_heimdall_scope_filter(app)
+					if len(scope_lbl) == 0 {
+						scope_lbl = "ALL SCOPES"
+					}
+					stats_text := fmt.tprintf(
+						" Segs: %d | Records: %d/%d | Spans: %d | Cnt: %d | Gauges: %d | Hists: %d | Drop: %d | Kind: %s | Scope: %s",
+						app.heimdall_store.segment_count,
+						len(app.heimdall_store.filtered_idxs),
+						len(app.heimdall_store.records),
+						app.heimdall_store.total_spans,
+						app.heimdall_store.total_counters,
+						app.heimdall_store.total_gauges,
+						app.heimdall_store.total_hists,
+						rec_stats.dropped_records,
+						bifrost.heimdall_filter_kind_label(app.heimdall_filter_kind),
+						scope_lbl,
+					)
+					bifrost.set_paint(&app.screen, "heimdall_summary_bar", bifrost.Paint_Spec{
+						text    = stats_text,
+						fg      = pal.accent_fg,
+						bg      = pal.header_bg,
+						style   = {.Bold},
+						fill_bg = true,
+					})
+					bifrost.leaf(&app.layout_ctx, "heimdall_summary_bar", 40, 1, bifrost.Box_Config{
+						width  = bifrost.grow(1),
+						height = bifrost.fixed(1),
+						text   = stats_text,
+					})
+
+					span_durs := bifrost.heimdall_store_extract_span_durations_us(&app.heimdall_store, 32)
+					bifrost.ui_sparkline(&app.layout_ctx, &app.screen, "heimdall_span_spark", span_durs, bifrost.Sparkline_Config{
+						title     = fmt.tprintf("Span Durations us (max %d us)", app.heimdall_store.max_duration_ns / 1_000),
+						width     = bifrost.grow(1),
+						height    = bifrost.fixed(3),
+						border    = .Plain,
+						fg        = pal.series_a,
+						bg        = pal.bg,
+						border_fg = pal.border_fg,
+						title_fg  = pal.accent_fg,
+						fill_bg   = true,
+					})
+
+					vslice: bifrost.Virtual_Slice
+					total_filtered := i32(len(app.heimdall_store.filtered_idxs))
+					list_rows := max(i32(4), h - 14)
+					if bifrost.ui_virtual_list(
+						&app.layout_ctx,
+						&app.screen,
+						&app.input,
+						"heimdall_records_list",
+						total_filtered,
+						bifrost.Virtual_List_Config{
+							title         = fmt.tprintf("Heimdall Zero-Copy Arrow IPC Records (%d matching)", total_filtered),
+							width         = bifrost.grow(1),
+							height        = bifrost.grow(1),
+							border        = .Rounded,
+							fg            = pal.text_fg,
+							bg            = pal.bg,
+							border_fg     = pal.border_fg,
+							title_fg      = pal.accent_fg,
+							fallback_rows = list_rows,
+							focus_flags   = {.Focusable, .Default_Focus},
+						},
+						&vslice,
+					) {
+						for row_idx := vslice.start_row; row_idx < vslice.end_row; row_idx += 1 {
+							rec, rec_ok := bifrost.heimdall_store_get_filtered_record(&app.heimdall_store, int(row_idx))
+							if !rec_ok {
+								continue
+							}
+							is_sel := row_idx == vslice.selected_row
+							row_id := fmt.tprintf("hd_row_%d", row_idx - vslice.start_row)
+							line_str := fmt.tprintf(
+								"%s [%-9.9s] %-16.16s | %-18.18s | %s",
+								"▸" if is_sel else " ",
+								bifrost.heimdall_kind_label(rec.kind),
+								rec.scope,
+								rec.name,
+								bifrost.heimdall_format_record_value(rec),
+							)
+							bifrost.set_paint(&app.screen, row_id, bifrost.Paint_Spec{
+								text    = line_str,
+								fg      = pal.sel_fg if is_sel else pal.text_fg,
+								bg      = pal.sel_bg if is_sel else pal.bg,
+								style   = {.Bold} if is_sel else {},
+								fill_bg = true,
+							})
+							bifrost.leaf(&app.layout_ctx, row_id, bifrost.string_display_width(line_str), 1, bifrost.Box_Config{
+								width  = bifrost.grow(1),
+								height = bifrost.fixed(1),
+							})
+						}
+					}
+
+					if bifrost.ui_scope(&app.layout_ctx, &app.screen, "heimdall_toolbar", bifrost.Scope_Config{
+						dir    = .Row,
+						width  = bifrost.grow(1),
+						height = bifrost.fixed(1),
+						gap    = 1,
+					}) {
+						bifrost.ui_button(&app.layout_ctx, &app.screen, "btn_hd_flush", bifrost.Button_Spec{
+							label  = "Flush & Reload (^R)",
+							width  = bifrost.grow(1),
+							height = bifrost.fixed(1),
+							fg     = pal.accent_fg,
+							bg     = pal.header_bg,
+						})
+						bifrost.ui_button(&app.layout_ctx, &app.screen, "btn_hd_kind", bifrost.Button_Spec{
+							label  = fmt.tprintf("Kind: %s (^K)", bifrost.heimdall_filter_kind_label(app.heimdall_filter_kind)),
+							width  = bifrost.grow(1),
+							height = bifrost.fixed(1),
+							fg     = pal.text_fg,
+							bg     = pal.header_bg,
+						})
+						bifrost.ui_button(&app.layout_ctx, &app.screen, "btn_hd_scope", bifrost.Button_Spec{
+							label  = fmt.tprintf("Scope: %s", scope_lbl),
+							width  = bifrost.grow(1),
+							height = bifrost.fixed(1),
+							fg     = pal.text_fg,
+							bg     = pal.header_bg,
+						})
+					}
 				}
 			}
 		}
@@ -825,7 +1037,11 @@ handle_showcase_interactions :: proc(app: ^Showcase_App) -> bool {
 
 	// Track 13: Check if active tab changed this frame
 	if bifrost.was_tab_changed(&app.input, "workspace_tabs") {
-		app.last_action   = fmt.tprintf("tab.switch:%d", bifrost.get_active_tab(&app.input, "workspace_tabs") + 1)
+		new_tab := bifrost.get_active_tab(&app.input, "workspace_tabs")
+		if new_tab == 3 {
+			flush_and_reload_showcase_heimdall(app)
+		}
+		app.last_action   = fmt.tprintf("tab.switch:%d", new_tab + 1)
 		app.action_count += 1
 		changed = true
 	}
@@ -906,6 +1122,63 @@ handle_showcase_interactions :: proc(app: ^Showcase_App) -> bool {
 		app.input.wants_focus_id = bifrost.hash_id(app.palette.input_id)
 		app.last_action          = "palette.opened"
 		app.action_count        += 1
+		changed = true
+	}
+	if bifrost.was_activated(&app.input, "btn_hd_flush") || (has_act && act == .Heimdall_Flush) || bifrost.was_action_triggered(&app.input, "heimdall.flush") {
+		flush_and_reload_showcase_heimdall(app)
+		app.last_action   = "heimdall.flush"
+		app.action_count += 1
+		changed = true
+	}
+	if bifrost.was_activated(&app.input, "btn_hd_kind") || (has_act && act == .Heimdall_Kind_Cycle) || bifrost.was_action_triggered(&app.input, "heimdall.kind") {
+		next_ord := (int(app.heimdall_filter_kind) + 1) % len(bifrost.Heimdall_Filter_Kind)
+		app.heimdall_filter_kind = bifrost.Heimdall_Filter_Kind(next_ord)
+		_ = bifrost.heimdall_store_apply_filter(
+			&app.heimdall_store,
+			app.heimdall_filter_kind,
+			active_heimdall_scope_filter(app),
+			"",
+		)
+		slot := bifrost.get_scroll_slot(&app.input, bifrost.hash_id("heimdall_records_list"))
+		if slot != nil {
+			slot.selected_row = 0
+			slot.offset       = 0
+		}
+		app.last_action   = fmt.tprintf("heimdall.kind:%s", bifrost.heimdall_filter_kind_label(app.heimdall_filter_kind))
+		app.action_count += 1
+		changed = true
+	}
+	if bifrost.was_activated(&app.input, "btn_hd_scope") {
+		cur_scope := active_heimdall_scope_filter(app)
+		next_scope := ""
+		if len(app.heimdall_store.scope_stats) > 0 {
+			if len(cur_scope) == 0 {
+				next_scope = app.heimdall_store.scope_stats[0].scope
+			} else {
+				for st, idx in app.heimdall_store.scope_stats {
+					if st.scope == cur_scope {
+						if idx + 1 < len(app.heimdall_store.scope_stats) {
+							next_scope = app.heimdall_store.scope_stats[idx + 1].scope
+						}
+						break
+					}
+				}
+			}
+		}
+		set_heimdall_scope_filter(app, next_scope)
+		_ = bifrost.heimdall_store_apply_filter(
+			&app.heimdall_store,
+			app.heimdall_filter_kind,
+			active_heimdall_scope_filter(app),
+			"",
+		)
+		slot := bifrost.get_scroll_slot(&app.input, bifrost.hash_id("heimdall_records_list"))
+		if slot != nil {
+			slot.selected_row = 0
+			slot.offset       = 0
+		}
+		app.last_action   = "heimdall.scope"
+		app.action_count += 1
 		changed = true
 	}
 	if (has_act && act == .Quit) || bifrost.was_action_triggered(&app.input, "app.quit") {
@@ -1072,6 +1345,27 @@ run_showcase :: proc(live_tty: bool) -> bool {
 			b := strings.builder_make(context.temp_allocator)
 			bifrost.screen_export_html(&app.screen, "Bifrost Showcase — Tab 2: Braille Telemetry & Sparklines", &b)
 			_ = os.write_entire_file_from_string(fmt.tprintf("%s/widget_showcase_tab2.html", dir), strings.to_string(b))
+		}
+
+		// Switch to Tab 4 (`Alt+4`) to flush and inspect live Heimdall Arrow IPC telemetry records
+		step_showcase_frame(&app, bifrost.Key_Event{code = .Rune, ch = '4', mods = {.Alt}})
+		fmt.printf(
+			"\n[Bifrost Showcase — Tab 4 (Heimdall Arrow IPC Viewer)] active_tab=%d segments=%d records=%d spans=%d frames=%d actions=%d\n",
+			bifrost.get_active_tab(&app.input, "workspace_tabs") + 1,
+			app.heimdall_store.segment_count,
+			len(app.heimdall_store.records),
+			app.heimdall_store.total_spans,
+			app.frames_rendered,
+			app.action_count,
+		)
+		for r: i32 = 0; r < app.screen.height; r += 1 {
+			fmt.printf("  %s\n", extract_screen_row(&app.screen, r))
+		}
+
+		if dir := os.get_env("BIFROST_SCREENSHOT_DIR", context.temp_allocator); dir != "" {
+			b := strings.builder_make(context.temp_allocator)
+			bifrost.screen_export_html(&app.screen, "Bifrost Showcase — Tab 4: Heimdall Arrow IPC Viewer", &b)
+			_ = os.write_entire_file_from_string(fmt.tprintf("%s/widget_showcase_tab4.html", dir), strings.to_string(b))
 		}
 	}
 

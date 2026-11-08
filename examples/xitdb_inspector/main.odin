@@ -6,7 +6,7 @@ import "core:os"
 import "core:strings"
 import "core:time"
 import "../../bifrost"
-import actor "../../deps/sleipnir/actor"
+import actor "../../deps/heimdall/deps/sleipnir/actor"
 import xitdb "../../deps/xitdb/xitdb"
 
 extract_row_text :: proc(coord: ^bifrost.UI_Coordinator_State, row: int, alloc := context.temp_allocator) -> string {

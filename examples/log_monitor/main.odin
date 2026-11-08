@@ -7,7 +7,8 @@ import "core:strings"
 import "core:sync"
 import "core:time"
 import "../../bifrost"
-import actor "../../deps/sleipnir/actor"
+import heimdall "../../deps/heimdall/heimdall"
+import actor "../../deps/heimdall/deps/sleipnir/actor"
 import xitdb "../../deps/xitdb/xitdb"
 
 Service_Info :: struct {
@@ -55,13 +56,82 @@ Log_Monitor_Action :: enum u8 {
 	Filter_Warn,
 	Filter_Error,
 	Stream_Burst,
+	Tab_Logs,
+	Tab_Heimdall,
+	Heimdall_Flush,
+	Heimdall_Kind_Cycle,
+	Heimdall_Scope_Cycle,
 }
 
 Log_Monitor_Actions :: struct {
-	filter_all:   Log_Monitor_Action `bifrost:"action=filter.all,chord=1,policy=root,group=lvl_filter,group_desc=Level Filter,category=Filter,label=Show All Structured Logs,desc=All Logs"`,
-	filter_warn:  Log_Monitor_Action `bifrost:"action=filter.warn,chord=2,policy=root,group=lvl_filter,group_desc=Level Filter,category=Filter,label=Filter WARN Logs Only,desc=WARN Only"`,
-	filter_error: Log_Monitor_Action `bifrost:"action=filter.error,chord=3,policy=root,group=lvl_filter,group_desc=Level Filter,category=Filter,label=Filter ERROR Logs Only,desc=ERROR Only"`,
-	stream_burst: Log_Monitor_Action `bifrost:"action=stream.burst,chord=<C-b>,policy=root,allow_in_edit=true,category=Stream,label=Inject 20 Live Log Events,desc=Burst +20"`,
+	filter_all:    Log_Monitor_Action `bifrost:"action=filter.all,chord=1,policy=root,group=lvl_filter,group_desc=Level Filter,category=Filter,label=Show All Structured Logs,desc=All Logs"`,
+	filter_warn:   Log_Monitor_Action `bifrost:"action=filter.warn,chord=2,policy=root,group=lvl_filter,group_desc=Level Filter,category=Filter,label=Filter WARN Logs Only,desc=WARN Only"`,
+	filter_error:  Log_Monitor_Action `bifrost:"action=filter.error,chord=3,policy=root,group=lvl_filter,group_desc=Level Filter,category=Filter,label=Filter ERROR Logs Only,desc=ERROR Only"`,
+	stream_burst:  Log_Monitor_Action `bifrost:"action=stream.burst,chord=<C-b>,policy=root,allow_in_edit=true,category=Stream,label=Inject 20 Live Log Events,desc=Burst +20"`,
+	tab_logs:      Log_Monitor_Action `bifrost:"action=tab.logs,chord=<M-1>,policy=global,allow_in_edit=true,category=View,label=Switch to Structured Log Stream Tab,desc=Logs (Alt+1)"`,
+	tab_heimdall:  Log_Monitor_Action `bifrost:"action=tab.heimdall,chord=4|<M-2>,policy=global,allow_in_edit=true,category=View,label=Toggle Heimdall IPC Viewer Tab,desc=Heimdall (4)"`,
+	hd_flush:      Log_Monitor_Action `bifrost:"action=heimdall.flush,chord=<C-r>,policy=global,allow_in_edit=true,category=Telemetry,label=Flush & Reload Heimdall .arrow Segments,desc=Flush IPC (^R)"`,
+	hd_kind:       Log_Monitor_Action `bifrost:"action=heimdall.kind,chord=<C-k>,policy=global,allow_in_edit=true,category=Telemetry,label=Cycle Heimdall Kind Filter,desc=Kind (^K)"`,
+	hd_scope:      Log_Monitor_Action `bifrost:"action=heimdall.scope,chord=s,policy=root,category=Telemetry,label=Cycle Heimdall Scope Filter,desc=Scope (s)"`,
+}
+
+MONITOR_HEIMDALL_DIR    :: ".tmp/log_monitor_heimdall"
+MONITOR_HEIMDALL_PREFIX :: ".tmp/log_monitor_heimdall/seg"
+
+Monitor_Telemetry_Ctx :: struct {
+	recorder:    heimdall.Recorder,
+	store:       bifrost.Heimdall_Segment_Store,
+	filter_kind: bifrost.Heimdall_Filter_Kind,
+	scope_buf:   [64]u8,
+	scope_len:   int,
+}
+
+active_monitor_scope_filter :: proc(tctx: ^Monitor_Telemetry_Ctx) -> string {
+	if tctx == nil || tctx.scope_len <= 0 {
+		return ""
+	}
+	return string(tctx.scope_buf[:tctx.scope_len])
+}
+
+set_monitor_scope_filter :: proc(tctx: ^Monitor_Telemetry_Ctx, scope: string) {
+	if tctx == nil {
+		return
+	}
+	if len(scope) == 0 {
+		tctx.scope_len = 0
+		return
+	}
+	n := min(len(scope), len(tctx.scope_buf))
+	copy(tctx.scope_buf[:n], scope[:n])
+	tctx.scope_len = n
+}
+
+flush_and_reload_monitor_heimdall :: proc(tctx: ^Monitor_Telemetry_Ctx) {
+	if tctx == nil {
+		return
+	}
+	heimdall.recorder_flush(&tctx.recorder)
+	_, _ = bifrost.heimdall_store_load_prefix(&tctx.store, MONITOR_HEIMDALL_PREFIX)
+	scope_filter := active_monitor_scope_filter(tctx)
+	if len(scope_filter) > 0 {
+		found := false
+		for st in tctx.store.scope_stats {
+			if st.scope == scope_filter {
+				found = true
+				break
+			}
+		}
+		if !found {
+			tctx.scope_len = 0
+			scope_filter   = ""
+		}
+	}
+	_ = bifrost.heimdall_store_apply_filter(
+		&tctx.store,
+		tctx.filter_kind,
+		scope_filter,
+		"",
+	)
 }
 
 // =============================================================================
@@ -81,6 +151,7 @@ Log_Producer_Msg :: union {
 Log_Producer_State :: struct {
 	shared:       ^bifrost.Xitdb_Shared_Handle,
 	ui_pid:       actor.PID(bifrost.UI_Msg),
+	recorder:     ^heimdall.Recorder,
 	batches_sent: int,
 	logs_written: int,
 }
@@ -101,6 +172,8 @@ log_producer_receive :: proc(
 
 	switch m in msg^ {
 	case Log_Batch_Request:
+		rec := bifrost.resolve_recorder(state.recorder)
+		heimdall.scoped_span(rec, "bifrost.log_producer", "commit_log_batch", i64(m.count))
 		sync.rw_mutex_lock(&state.shared.rw_lock)
 		tx := xitdb.tx_init(state.shared.db, -1, false, context.temp_allocator)
 		if len(m.tag_name) > 0 {
@@ -131,6 +204,7 @@ log_producer_receive :: proc(
 		if c_err == nil {
 			state.batches_sent += 1
 			state.logs_written += m.count
+			heimdall.counter_add(rec, "bifrost.log_producer", "logs_written", f64(m.count))
 			if state.ui_pid.ref != nil {
 				actor.send(
 					ctx,
@@ -174,6 +248,89 @@ apply_monitor_level_filter :: proc(coord: ^bifrost.UI_Coordinator_State, action_
 		coord.search_len = 5
 		bifrost.set_text(&coord.input, "search_box", "ERROR")
 	}
+}
+
+on_monitor_tab_switch :: proc(coord: ^bifrost.UI_Coordinator_State, action_name: string, ud: rawptr) {
+	tctx := (^Monitor_Telemetry_Ctx)(ud)
+	switch action_name {
+	case "tab.logs":
+		bifrost.set_active_tab(&coord.input, "monitor_tabs", 0, true)
+		coord.input.wants_focus_id = bifrost.hash_id("log_stream_pane")
+	case "tab.heimdall":
+		cur := bifrost.get_active_tab(&coord.input, "monitor_tabs")
+		next_tab := 1 if cur == 0 else 0
+		bifrost.set_active_tab(&coord.input, "monitor_tabs", next_tab, true)
+		if next_tab == 1 {
+			flush_and_reload_monitor_heimdall(tctx)
+			coord.input.wants_focus_id = bifrost.hash_id("monitor_heimdall_pane")
+		} else {
+			coord.input.wants_focus_id = bifrost.hash_id("log_stream_pane")
+		}
+	}
+	coord.dirty = true
+}
+
+on_monitor_heimdall_flush :: proc(coord: ^bifrost.UI_Coordinator_State, _: string, ud: rawptr) {
+	tctx := (^Monitor_Telemetry_Ctx)(ud)
+	flush_and_reload_monitor_heimdall(tctx)
+	coord.dirty = true
+}
+
+on_monitor_heimdall_kind :: proc(coord: ^bifrost.UI_Coordinator_State, _: string, ud: rawptr) {
+	tctx := (^Monitor_Telemetry_Ctx)(ud)
+	if tctx == nil {
+		return
+	}
+	next_ord := (int(tctx.filter_kind) + 1) % len(bifrost.Heimdall_Filter_Kind)
+	tctx.filter_kind = bifrost.Heimdall_Filter_Kind(next_ord)
+	_ = bifrost.heimdall_store_apply_filter(
+		&tctx.store,
+		tctx.filter_kind,
+		active_monitor_scope_filter(tctx),
+		"",
+	)
+	slot := bifrost.get_scroll_slot(&coord.input, bifrost.hash_id("monitor_heimdall_pane"))
+	if slot != nil {
+		slot.selected_row = 0
+		slot.offset       = 0
+	}
+	coord.dirty = true
+}
+
+on_monitor_heimdall_scope :: proc(coord: ^bifrost.UI_Coordinator_State, _: string, ud: rawptr) {
+	tctx := (^Monitor_Telemetry_Ctx)(ud)
+	if tctx == nil {
+		return
+	}
+	cur_scope := active_monitor_scope_filter(tctx)
+	next_scope := ""
+	if len(tctx.store.scope_stats) > 0 {
+		if len(cur_scope) == 0 {
+			next_scope = tctx.store.scope_stats[0].scope
+		} else {
+			for st, idx in tctx.store.scope_stats {
+				if st.scope == cur_scope {
+					if idx + 1 < len(tctx.store.scope_stats) {
+						next_scope = tctx.store.scope_stats[idx + 1].scope
+					}
+					break
+				}
+			}
+		}
+	}
+	set_monitor_scope_filter(tctx, next_scope)
+	_ = bifrost.heimdall_store_apply_filter(
+		&tctx.store,
+		tctx.filter_kind,
+		active_monitor_scope_filter(tctx),
+		"",
+	)
+	slot := bifrost.get_scroll_slot(&coord.input, bifrost.hash_id("monitor_heimdall_pane"))
+	if slot != nil {
+		slot.selected_row = 0
+		slot.offset       = 0
+	}
+	coord.dirty = true
 }
 
 build_monitor_diff_msg :: proc(coord: ^bifrost.UI_Coordinator_State, _: rawptr) -> (bifrost.Xitdb_Worker_Msg, bool) {
@@ -381,62 +538,208 @@ render_log_monitor_frame :: proc(coord: ^bifrost.UI_Coordinator_State) {
 				active_fg    = accent,
 			})
 
-			// Zero-Copy xitdb Log Stream Slice
-			visible_rows := max(1, int(body_h) - 2)
-			slice := bifrost.ui_coordinator_slice_viewport(coord, "log_stream_pane", visible_rows)
+			// Right Pane: Focus-Scope-Integrated Tab Bar (`ui_tabs`) switching between:
+			//   - Tab 1 (`Alt+1`): Zero-Copy xitdb Structured Log Stream
+			//   - Tab 2 (`Alt+2`): Heimdall Arrow IPC Telemetry Viewer
+			tctx := (^Monitor_Telemetry_Ctx)(coord.user_ptr)
+			if bifrost.was_tab_changed(&coord.input, "monitor_tabs") {
+				if bifrost.get_active_tab(&coord.input, "monitor_tabs") == 1 {
+					flush_and_reload_monitor_heimdall(tctx)
+				}
+			}
 
-			vslice: bifrost.Virtual_Slice
-			if bifrost.ui_virtual_list(
+			tab_specs := [2]bifrost.Tab_Item_Spec{
+				{label = "Structured Log Stream", badge = "XITDB", key_hint = "1:"},
+				{label = "Heimdall IPC Viewer",   badge = "ARROW", key_hint = "2:"},
+			}
+
+			cur_tab := 0
+			if bifrost.ui_tabs(
 				&coord.layout_ctx,
 				&coord.screen,
 				&coord.input,
-				"log_stream_pane",
-				i32(slice.total_rows),
-				bifrost.Virtual_List_Config{
-					title         = fmt.tprintf("Structured Log Stream (%d total in %s, showing %d)", slice.total_rows, coord.active_collection, len(slice.rows)),
-					width         = bifrost.grow(1),
-					height        = bifrost.grow(1),
-					border        = .Plain,
-					fg            = text_fg,
-					bg            = panel_bg,
-					border_fg     = bifrost.rgb(75, 95, 125),
-					title_fg      = accent,
-					fallback_rows = i32(visible_rows),
-					focus_flags   = {.Focusable, .Default_Focus},
+				"monitor_tabs",
+				tab_specs[:],
+				bifrost.Tabs_Config{
+					width            = bifrost.grow(1),
+					height           = bifrost.grow(1),
+					body_dir         = .Column,
+					body_padding     = bifrost.pad_xy(0, 0),
+					body_gap         = 0,
+					body_border      = .None,
+					fg               = text_fg,
+					bg               = panel_bg,
+					header_bg        = bar_bg,
+					active_fg        = bifrost.rgb(255, 240, 150),
+					active_bg        = bifrost.rgb(42, 56, 82),
+					inactive_fg      = muted_fg,
+					inactive_bg      = bar_bg,
+					badge_fg         = accent,
+					sep_fg           = bifrost.rgb(75, 95, 125),
+					show_index_hints = true,
 				},
-				&vslice,
+				&cur_tab,
 			) {
-				for row_i in 0 ..< len(slice.rows) {
-					rv := slice.rows[row_i]
-					is_sel := int(rv.view_index) == coord.vlist.selected_row
-					row_id := fmt.tprintf("log_row_%d", row_i)
-					row_line := fmt.tprintf(
-						"%s %-10s | %s",
-						"▸" if is_sel else " ",
-						rv.key_text,
-						rv.val_text,
-					)
+				switch cur_tab {
+				case 0:
+					// Zero-Copy xitdb Log Stream Slice
+					visible_rows := max(1, int(body_h) - 3)
+					slice := bifrost.ui_coordinator_slice_viewport(coord, "log_stream_pane", visible_rows)
 
-					row_fg := text_fg
-					if strings.contains(rv.val_text, "ERROR") {
-						row_fg = bifrost.rgb(255, 120, 125)
-					} else if strings.contains(rv.val_text, "WARN") {
-						row_fg = bifrost.rgb(250, 205, 100)
-					} else if is_sel {
-						row_fg = bifrost.rgb(255, 240, 150)
+					vslice: bifrost.Virtual_Slice
+					if bifrost.ui_virtual_list(
+						&coord.layout_ctx,
+						&coord.screen,
+						&coord.input,
+						"log_stream_pane",
+						i32(slice.total_rows),
+						bifrost.Virtual_List_Config{
+							title         = fmt.tprintf("Structured Log Stream (%d total in %s, showing %d)", slice.total_rows, coord.active_collection, len(slice.rows)),
+							width         = bifrost.grow(1),
+							height        = bifrost.grow(1),
+							border        = .Plain,
+							fg            = text_fg,
+							bg            = panel_bg,
+							border_fg     = bifrost.rgb(75, 95, 125),
+							title_fg      = accent,
+							fallback_rows = i32(visible_rows),
+							focus_flags   = {.Focusable, .Default_Focus},
+						},
+						&vslice,
+					) {
+						for row_i in 0 ..< len(slice.rows) {
+							rv := slice.rows[row_i]
+							is_sel := int(rv.view_index) == coord.vlist.selected_row
+							row_id := fmt.tprintf("log_row_%d", row_i)
+							row_line := fmt.tprintf(
+								"%s %-10s | %s",
+								"▸" if is_sel else " ",
+								rv.key_text,
+								rv.val_text,
+							)
+
+							row_fg := text_fg
+							if strings.contains(rv.val_text, "ERROR") {
+								row_fg = bifrost.rgb(255, 120, 125)
+							} else if strings.contains(rv.val_text, "WARN") {
+								row_fg = bifrost.rgb(250, 205, 100)
+							} else if is_sel {
+								row_fg = bifrost.rgb(255, 240, 150)
+							}
+
+							bifrost.set_paint(&coord.screen, row_id, bifrost.Paint_Spec{
+								text    = row_line,
+								fg      = row_fg,
+								bg      = bifrost.rgb(42, 56, 82) if is_sel else panel_bg,
+								style   = {.Bold} if is_sel else {},
+								fill_bg = true,
+							})
+							bifrost.leaf(&coord.layout_ctx, row_id, 20, 1, bifrost.Box_Config{
+								width  = bifrost.grow(1),
+								height = bifrost.fixed(1),
+							})
+						}
 					}
 
-					bifrost.set_paint(&coord.screen, row_id, bifrost.Paint_Spec{
-						text    = row_line,
-						fg      = row_fg,
-						bg      = bifrost.rgb(42, 56, 82) if is_sel else panel_bg,
-						style   = {.Bold} if is_sel else {},
-						fill_bg = true,
-					})
-					bifrost.leaf(&coord.layout_ctx, row_id, 20, 1, bifrost.Box_Config{
-						width  = bifrost.grow(1),
-						height = bifrost.fixed(1),
-					})
+				case 1:
+					// Heimdall Arrow IPC Telemetry Viewer
+					if tctx != nil {
+						rec_stats := bifrost.heimdall_snapshot_recorder_stats(&tctx.recorder)
+						scope_lbl := active_monitor_scope_filter(tctx)
+						if len(scope_lbl) == 0 {
+							scope_lbl = "ALL SCOPES"
+						}
+						hd_summary := fmt.tprintf(
+							" Segs: %d | Records: %d/%d | Spans: %d | Cnt: %d | Gauges: %d | Hists: %d | Drop: %d | Kind: %s (^K) | Scope: %s (s) | Flush (^R)",
+							tctx.store.segment_count,
+							len(tctx.store.filtered_idxs),
+							len(tctx.store.records),
+							tctx.store.total_spans,
+							tctx.store.total_counters,
+							tctx.store.total_gauges,
+							tctx.store.total_hists,
+							rec_stats.dropped_records,
+							bifrost.heimdall_filter_kind_label(tctx.filter_kind),
+							scope_lbl,
+						)
+						bifrost.set_paint(&coord.screen, "monitor_hd_summary", bifrost.Paint_Spec{
+							text    = hd_summary,
+							fg      = accent,
+							bg      = bar_bg,
+							style   = {.Bold},
+							fill_bg = true,
+						})
+						bifrost.leaf(&coord.layout_ctx, "monitor_hd_summary", 24, 1, bifrost.Box_Config{
+							width  = bifrost.grow(1),
+							height = bifrost.fixed(1),
+							text   = hd_summary,
+						})
+
+						span_durs := bifrost.heimdall_store_extract_span_durations_us(&tctx.store, 32)
+						bifrost.ui_sparkline(&coord.layout_ctx, &coord.screen, "monitor_hd_spark", span_durs, bifrost.Sparkline_Config{
+							title     = fmt.tprintf("Span Durations us (max %d us)", tctx.store.max_duration_ns / 1_000),
+							width     = bifrost.grow(1),
+							height    = bifrost.fixed(3),
+							border    = .Plain,
+							fg        = bifrost.rgb(130, 230, 165),
+							bg        = bg_dark,
+							border_fg = bifrost.rgb(75, 95, 125),
+							title_fg  = accent,
+							fill_bg   = true,
+						})
+
+						hd_vslice: bifrost.Virtual_Slice
+						total_hd := i32(len(tctx.store.filtered_idxs))
+						hd_rows  := max(i32(4), body_h - 7)
+						if bifrost.ui_virtual_list(
+							&coord.layout_ctx,
+							&coord.screen,
+							&coord.input,
+							"monitor_heimdall_pane",
+							total_hd,
+							bifrost.Virtual_List_Config{
+								title         = fmt.tprintf("Heimdall Zero-Copy Arrow IPC Records (%d matching)", total_hd),
+								width         = bifrost.grow(1),
+								height        = bifrost.grow(1),
+								border        = .Plain,
+								fg            = text_fg,
+								bg            = panel_bg,
+								border_fg     = bifrost.rgb(75, 95, 125),
+								title_fg      = accent,
+								fallback_rows = hd_rows,
+								focus_flags   = {.Focusable, .Default_Focus},
+							},
+							&hd_vslice,
+						) {
+							for row_idx := hd_vslice.start_row; row_idx < hd_vslice.end_row; row_idx += 1 {
+								rec, rec_ok := bifrost.heimdall_store_get_filtered_record(&tctx.store, int(row_idx))
+								if !rec_ok {
+									continue
+								}
+								is_sel := row_idx == hd_vslice.selected_row
+								row_id := fmt.tprintf("mon_hd_row_%d", row_idx - hd_vslice.start_row)
+								line_str := fmt.tprintf(
+									"%s [%-9.9s] %-18.18s | %-18.18s | %s",
+									"▸" if is_sel else " ",
+									bifrost.heimdall_kind_label(rec.kind),
+									rec.scope,
+									rec.name,
+									bifrost.heimdall_format_record_value(rec),
+								)
+								bifrost.set_paint(&coord.screen, row_id, bifrost.Paint_Spec{
+									text    = line_str,
+									fg      = bifrost.rgb(255, 240, 150) if is_sel else text_fg,
+									bg      = bifrost.rgb(42, 56, 82) if is_sel else panel_bg,
+									style   = {.Bold} if is_sel else {},
+									fill_bg = true,
+								})
+								bifrost.leaf(&coord.layout_ctx, row_id, bifrost.string_display_width(line_str), 1, bifrost.Box_Config{
+									width  = bifrost.grow(1),
+									height = bifrost.fixed(1),
+								})
+							}
+						}
+					}
 				}
 			}
 		}
@@ -506,6 +809,27 @@ run_log_monitor :: proc(live_tty: bool) -> bool {
 
 	shared := bifrost.Xitdb_Shared_Handle{db = &db}
 
+	_ = os.remove_all(MONITOR_HEIMDALL_DIR)
+	_ = os.make_directory_all(MONITOR_HEIMDALL_DIR)
+	tctx: Monitor_Telemetry_Ctx
+	if heimdall.recorder_init(&tctx.recorder, heimdall.Config{
+		file_prefix      = MONITOR_HEIMDALL_PREFIX,
+		batches_per_file = 8,
+		ring_page_count  = 4,
+	}, context.allocator) != nil {
+		fmt.eprintln("Failed to initialize Heimdall recorder")
+		return false
+	}
+	defer {
+		bifrost.heimdall_store_destroy(&tctx.store)
+		heimdall.recorder_destroy(&tctx.recorder)
+		_ = os.remove_all(MONITOR_HEIMDALL_DIR)
+	}
+	if bifrost.heimdall_store_init(&tctx.store, context.allocator) != nil {
+		fmt.eprintln("Failed to initialize Heimdall segment store")
+		return false
+	}
+
 	sched: actor.Scheduler
 	if actor.scheduler_init(&sched, actor.Scheduler_Config{
 		num_workers    = 2,
@@ -516,13 +840,26 @@ run_log_monitor :: proc(live_tty: bool) -> bool {
 		fmt.eprintln("Failed to initialize sleipnir scheduler")
 		return false
 	}
+	ui_actor: ^actor.Actor(bifrost.UI_Coordinator_State, bifrost.UI_Msg)
+	defer {
+		actor.scheduler_wait_idle(&sched)
+		ui_state: bifrost.UI_Coordinator_State
+		has_ui := ui_actor != nil
+		if has_ui {
+			ui_state = ui_actor.state
+			ui_actor.state = {}
+		}
+		actor.scheduler_stop_and_destroy(&sched)
+		if has_ui {
+			bifrost.ui_coordinator_destroy(&ui_state)
+		}
+	}
 
 	cols := 104
 	rows := 24
 	term: bifrost.Terminal
 	if live_tty {
 		if bifrost.terminal_init(&term) != .None {
-			actor.scheduler_stop_and_destroy(&sched)
 			fmt.eprintln("Failed to initialize raw terminal")
 			return false
 		}
@@ -535,7 +872,8 @@ run_log_monitor :: proc(live_tty: bool) -> bool {
 		bifrost.terminal_deinit(&term)
 	}
 
-	ui_actor, ui_ok := bifrost.spawn_ui_coordinator(
+	ui_ok: bool
+	ui_actor, ui_ok = bifrost.spawn_ui_coordinator(
 		&sched,
 		cols,
 		rows,
@@ -544,9 +882,10 @@ run_log_monitor :: proc(live_tty: bool) -> bool {
 		context.allocator,
 	)
 	if !ui_ok {
-		actor.scheduler_stop_and_destroy(&sched)
 		return false
 	}
+	bifrost.ui_coordinator_set_recorder(&ui_actor.state, &tctx.recorder)
+	ui_actor.state.user_ptr          = &tctx
 	ui_actor.state.active_collection = "$logs"
 	ui_actor.state.primary_list_id   = "log_stream_pane"
 	ui_actor.state.input.wants_focus_id = bifrost.hash_id("log_stream_pane")
@@ -556,14 +895,12 @@ run_log_monitor :: proc(live_tty: bool) -> bool {
 	// Spawn xitdb analytics worker actor (Datalog & Moment Diffs)
 	worker_actor, w_err := actor.spawn(
 		&sched,
-		bifrost.Xitdb_Worker_State{shared = &shared, ui_pid = ui_pid},
+		bifrost.Xitdb_Worker_State{shared = &shared, ui_pid = ui_pid, recorder = &tctx.recorder},
 		bifrost.xitdb_worker_receive,
 		2,
 		context.allocator,
 	)
 	if w_err != nil {
-		bifrost.ui_coordinator_destroy(&ui_actor.state)
-		actor.scheduler_stop_and_destroy(&sched)
 		return false
 	}
 	worker_pid := actor.pid(worker_actor)
@@ -571,14 +908,12 @@ run_log_monitor :: proc(live_tty: bool) -> bool {
 	// Spawn Sleipnir Log Producer actor
 	producer_actor, p_err := actor.spawn(
 		&sched,
-		Log_Producer_State{shared = &shared, ui_pid = ui_pid},
+		Log_Producer_State{shared = &shared, ui_pid = ui_pid, recorder = &tctx.recorder},
 		log_producer_receive,
 		2,
 		context.allocator,
 	)
 	if p_err != nil {
-		bifrost.ui_coordinator_destroy(&ui_actor.state)
-		actor.scheduler_stop_and_destroy(&sched)
 		return false
 	}
 	producer_pid := actor.pid(producer_actor)
@@ -591,9 +926,14 @@ run_log_monitor :: proc(live_tty: bool) -> bool {
 	_ = bifrost.bind_button_action(&ui_actor.state, "btn_lvl_err",    "filter.error")
 	_ = bifrost.bind_button_action(&ui_actor.state, "btn_pin_toggle", "moment.follow")
 
-	_ = bifrost.on_ui_action(&ui_actor.state, "filter.all",   apply_monitor_level_filter)
-	_ = bifrost.on_ui_action(&ui_actor.state, "filter.warn",  apply_monitor_level_filter)
-	_ = bifrost.on_ui_action(&ui_actor.state, "filter.error", apply_monitor_level_filter)
+	_ = bifrost.on_ui_action(&ui_actor.state, "filter.all",     apply_monitor_level_filter)
+	_ = bifrost.on_ui_action(&ui_actor.state, "filter.warn",    apply_monitor_level_filter)
+	_ = bifrost.on_ui_action(&ui_actor.state, "filter.error",   apply_monitor_level_filter)
+	_ = bifrost.on_ui_action(&ui_actor.state, "tab.logs",       on_monitor_tab_switch,     &tctx)
+	_ = bifrost.on_ui_action(&ui_actor.state, "tab.heimdall",   on_monitor_tab_switch,     &tctx)
+	_ = bifrost.on_ui_action(&ui_actor.state, "heimdall.flush", on_monitor_heimdall_flush, &tctx)
+	_ = bifrost.on_ui_action(&ui_actor.state, "heimdall.kind",  on_monitor_heimdall_kind,  &tctx)
+	_ = bifrost.on_ui_action(&ui_actor.state, "heimdall.scope", on_monitor_heimdall_scope, &tctx)
 
 	_ = bifrost.bind_actor_action(
 		&ui_actor.state,
@@ -636,6 +976,7 @@ run_log_monitor :: proc(live_tty: bool) -> bool {
 
 		next_seq := 121
 		frame_counter := 0
+		boot_tick := time.tick_now()
 		for !ui_actor.state.quit_requested {
 			ev, has_ev, _ := bifrost.poll_next_event(&term, 16)
 			if has_ev {
@@ -654,7 +995,7 @@ run_log_monitor :: proc(live_tty: bool) -> bool {
 			}
 
 			actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Frame_Tick{
-				tick_ns = time.tick_now()._nsec,
+				tick_ns = max(1, i64(time.tick_since(boot_tick))),
 			}))
 			actor.scheduler_wait_idle(&sched)
 			if ui_actor.state.last_ansi_bytes > 0 {
@@ -694,8 +1035,6 @@ run_log_monitor :: proc(live_tty: bool) -> bool {
 
 		saved_ws := bifrost.save_ui_workspace_to_xitdb(&shared, &ui_actor.state, "monitor_default")
 		if !saved_ws {
-			bifrost.ui_coordinator_destroy(&ui_actor.state)
-			actor.scheduler_stop_and_destroy(&sched)
 			return false
 		}
 
@@ -717,10 +1056,30 @@ run_log_monitor :: proc(live_tty: bool) -> bool {
 			bifrost.screen_export_html(&ui_actor.state.screen, "Bifrost Log & Metrics Monitor", &b)
 			_ = os.write_entire_file_from_string(fmt.tprintf("%s/log_monitor.html", dir), strings.to_string(b))
 		}
+
+		// 4. Switch to Tab 2 (`4` -> `tab.heimdall`) to flush & inspect live Heimdall Arrow IPC telemetry records
+		actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Key{code = .Rune, ch = '4'}))
+		actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Frame_Tick{tick_ns = 4}))
+		actor.scheduler_wait_idle(&sched)
+
+		fmt.printf(
+			"\n[Bifrost Log Monitor — Tab 2 (Heimdall Arrow IPC Viewer)] segments=%d records=%d spans=%d frames=%d\n",
+			tctx.store.segment_count,
+			len(tctx.store.records),
+			tctx.store.total_spans,
+			ui_actor.state.total_frames,
+		)
+		for r := 0; r < ui_actor.state.rows; r += 1 {
+			fmt.printf("  %s\n", extract_monitor_row(&ui_actor.state, r))
+		}
+
+		if dir := os.get_env("BIFROST_SCREENSHOT_DIR", context.temp_allocator); dir != "" {
+			b := strings.builder_make(context.temp_allocator)
+			bifrost.screen_export_html(&ui_actor.state.screen, "Bifrost Log Monitor — Heimdall IPC Viewer", &b)
+			_ = os.write_entire_file_from_string(fmt.tprintf("%s/log_monitor_heimdall.html", dir), strings.to_string(b))
+		}
 	}
 
-	bifrost.ui_coordinator_destroy(&ui_actor.state)
-	actor.scheduler_stop_and_destroy(&sched)
 	return true
 }
 

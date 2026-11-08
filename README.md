@@ -1,6 +1,6 @@
 # Bifrost (`package bifrost`)
 
-An immediate-mode, actor-driven Terminal User Interface (TUI) framework for [Odin](https://odin-lang.org/), engineered to bridge [**Sleipnir (`package actor`)**](deps/sleipnir) lock-free actors and [**xitdb (`package xitdb`)**](deps/xitdb) immutable persistent databases.
+An immediate-mode, actor-driven Terminal User Interface (TUI) framework for [Odin](https://odin-lang.org/), engineered to bridge [**Sleipnir (`package actor`)**](deps/sleipnir) lock-free actors, [**xitdb (`package xitdb`)**](deps/xitdb) immutable persistent databases, and [**Heimdall (`package heimdall`)**](deps/heimdall) columnar Apache Arrow telemetry.
 
 Bifrost combines a Clay-inspired multi-pass topological Flexbox layout engine, Harel statechart focus scopes with Shallow (H) and Deep (H*) history, 2D spatial cone navigation, multi-style modal keymaps (**Vim**, **Helix**, **Emacs**), and zero-allocation widget state slots into a single cohesive package.
 
@@ -28,6 +28,10 @@ Bifrost combines a Clay-inspired multi-pass topological Flexbox layout engine, H
 * **Declarative Key-Chord Engine, Multi-Style Modal Editing & AST Codegen (`keymap.odin`, `tools/bifrost_gen`):**
   * 1- and 2-step key chords (`g g`, `<C-x> <C-f>`, `q|<C-q>`) with prefix timeout fallback, scope wildcards (`scope=col_*`), transient sub-modes (`Splitter_Submode.Resize`), and action guards (`.Enabled`, `.Disabled_Swallow`, `.Disabled_Bubble`).
   * Live runtime switching (`set_keymap_style`, `cycle_keymap_style`) between **Vim** (prefix counts `5j`), **Helix** (postfix counts `j5`), and **Emacs** (`C-n`/`C-p`/`C-f`/`C-b`, `C-u` universal argument 4ⁿ, `<M-x>` palette).
+* **Zero-Allocation Columnar Telemetry & Arrow Segment Store (`heimdall_bridge.odin`):**
+  * Built-in nested span and metric instrumentation across `bifrost.coordinator` (`actor_turn`, `flush_frame`, `slice_viewport`), `bifrost.layout` (`end_layout`, `layout_nodes`), `bifrost.input` (`resolve_input`, `input_events_total`, `action_triggered`), `bifrost.renderer` (`render_layout`, `screen_diff_ansi`, `ansi_diff_bytes`), and `bifrost.xitdb` (`transact_script`, `commit_batch`, `run_datalog`, `diff_moments`, `xitdb_slice_viewport`).
+  * Supports explicit per-struct `recorder: ^heimdall.Recorder` configuration (`ui_coordinator_set_recorder`) with automatic fallback to `heimdall.default_recorder()`.
+  * Zero-copy `Heimdall_Segment_Store` loads `.arrow` IPC segments via `OdinArrow` and `heimdall.Record_Batch_Reader` for live TUI inspection (`ui_tree`, `ui_virtual_list`, `ui_sparkline`, `ui_canvas`).
 
 ---
 
@@ -120,14 +124,14 @@ main :: proc() {
 ## Running Tests & Codegen
 
 ```bash
-# Unit & verification suites (layout, renderer, focus scopes, 2D spatial nav, keymaps, widgets, actors)
-odin test bifrost -vet -strict-style -vet-packages:bifrost
+# Unit & verification suites (layout, renderer, focus scopes, 2D spatial nav, keymaps, widgets, actors, heimdall)
+odin test bifrost -custom-attribute:telemetry_schema -vet -strict-style -vet-packages:bifrost
 
 # AST keymap & ATDD code generator tests
 odin test bifrost/codegen -vet -strict-style
 
 # 4-layer ATDD executable specifications (@(scenario) + in-memory VT verification)
-odin test tests -custom-attribute:scenario -vet -strict-style -vet-packages:bifrost,bifrost_tests
+odin test tests -custom-attribute:scenario,telemetry_schema -vet -strict-style -vet-packages:bifrost,bifrost_tests
 
 # Standalone AST keymap & ATDD code generator CLI
 odin run tools/bifrost_gen -- <target_dir>
@@ -209,6 +213,14 @@ odin run examples/xitdb_explorer -- --live-tty [optional/path/to/db.xit]
 
 **Tab 3: Structural Moment Diff (`diff_moments`) & Braille Storage Telemetry**
 ![Bifrost xitdb Explorer Tab 3 — Structural Diff & Storage](docs/assets/screenshots/xitdb_explorer_diff.png)
+
+### 7. Interactive Heimdall Columnar Telemetry Inspector (`examples/heimdall_inspector`)
+Live telemetry capture and `.arrow` segment inspector combining `Heimdall_Segment_Store` with `ui_sparkline` (span durations in microseconds), `ui_canvas` (Braille ANSI diff byte series), `ui_tree` (collapsible scopes and operations), and `ui_virtual_list` (11-column Arrow records with parent-child span linkage).
+
+```bash
+odin run examples/heimdall_inspector -custom-attribute:ui_actions,ui_action,ui_scope,telemetry_schema -vet -strict-style -vet-packages:bifrost,main
+odin run examples/heimdall_inspector -custom-attribute:ui_actions,ui_action,ui_scope,telemetry_schema -- --live-tty
+```
 
 ---
 

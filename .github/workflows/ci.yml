@@ -33,25 +33,28 @@ jobs:
           git diff --ignore-space-at-eol --exit-code tests/dsl_atdd_gen.odin
 
       - name: Run Bifrost Unit Test Suite (with Tracking Allocator)
-        run: odin test bifrost -vet -strict-style -vet-packages:bifrost
+        run: odin test bifrost -custom-attribute:telemetry_schema -vet -strict-style -vet-packages:bifrost
 
       - name: Run AST Codegen Test Suite (with Tracking Allocator)
         run: odin test bifrost/codegen -vet -strict-style
 
       - name: Run ATDD Executable Specification Suite
-        run: odin test tests -custom-attribute:scenario -vet -strict-style -vet-packages:bifrost,bifrost_tests
+        run: odin test tests -custom-attribute:scenario,telemetry_schema -vet -strict-style -vet-packages:bifrost,bifrost_tests
 
       - name: Verify Headless Example 1 (Widget Gallery)
-        run: odin run examples/widget_gallery -custom-attribute:ui_actions,ui_action,ui_scope -vet -strict-style -vet-packages:bifrost -- --headless
+        run: odin run examples/widget_gallery -custom-attribute:ui_actions,ui_action,ui_scope,telemetry_schema -vet -strict-style -vet-packages:bifrost -- --headless
 
       - name: Verify Headless Example 2 (Kanban Board)
-        run: odin run examples/kanban_board -custom-attribute:ui_actions,ui_action,ui_scope -vet -strict-style -vet-packages:bifrost -- --headless
+        run: odin run examples/kanban_board -custom-attribute:ui_actions,ui_action,ui_scope,telemetry_schema -vet -strict-style -vet-packages:bifrost -- --headless
 
       - name: Verify Headless Example 3 (Log Monitor)
-        run: odin run examples/log_monitor -custom-attribute:ui_actions,ui_action,ui_scope -vet -strict-style -vet-packages:bifrost -- --headless
+        run: odin run examples/log_monitor -custom-attribute:ui_actions,ui_action,ui_scope,telemetry_schema -vet -strict-style -vet-packages:bifrost -- --headless
 
       - name: Verify Headless Example 4 (xitdb Inspector)
-        run: odin run examples/xitdb_inspector -custom-attribute:ui_actions,ui_action,ui_scope -vet -strict-style -vet-packages:bifrost -- --headless
+        run: odin run examples/xitdb_inspector -custom-attribute:ui_actions,ui_action,ui_scope,telemetry_schema -vet -strict-style -vet-packages:bifrost -- --headless
 
       - name: Verify Headless Example 5 (Keymap Workbench)
-        run: odin run examples/keymap_workbench -custom-attribute:ui_actions,ui_action,ui_scope -vet -strict-style -vet-packages:bifrost -- --headless
+        run: odin run examples/keymap_workbench -custom-attribute:ui_actions,ui_action,ui_scope,telemetry_schema -vet -strict-style -vet-packages:bifrost -- --headless
+
+      - name: Verify Headless Example 6 (Heimdall Telemetry Inspector)
+        run: odin run examples/heimdall_inspector -custom-attribute:ui_actions,ui_action,ui_scope,telemetry_schema -vet -strict-style -vet-packages:bifrost -- --headless
