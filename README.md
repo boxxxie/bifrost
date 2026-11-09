@@ -44,7 +44,7 @@ Every widget is zero-allocation in steady state (backed by fixed-capacity LRU sl
 | **`container`, `leaf`, `ui_scope`, `ui_label`, `ui_button`, `ui_modal`** | `layout.odin`, `focus_scope.odin`, `renderer.odin`, `input.odin` | Core layout containers, Harel focus scopes (H/H*), labels, interactive buttons, and z-layered modals with 50% RGB backdrop dimming. | [`docs/widget/primitives_and_scopes.md`](docs/widget/primitives_and_scopes.md) |
 | **`ui_text_input`** | `text_input.odin` | Single-line UTF-8 grapheme-aware input with `.Auto_Edit`, `two_stage`, `.Scope_Text_Sink`, `linked_list_id` forwarding, OSC 52 copy/cut, and `Xitdb_Filter`. | [`docs/widget/text_input.md`](docs/widget/text_input.md) |
 | **`ui_text_area`** | `text_area.odin` | Multi-line UTF-8 editor with sticky `preferred_col`, dynamic line-number gutter, 2D selection, OSC 52 clipboard, and built-in **Odin** / **CUE** syntax highlighting. | [`docs/widget/text_area.md`](docs/widget/text_area.md) |
-| **`ui_virtual_list` & 2D Table Solver** | `scroll.odin`, `xitdb_bridge.odin` | O(1) virtualized viewport for 100,000+ rows, 2D `(row, col)` navigation, monotonic high-water-mark column solver (`resolve_table_columns`), and 64-bit proportional scrollbar. | [`docs/widget/virtual_list_and_table.md`](docs/widget/virtual_list_and_table.md) |
+| **`ui_table`, `ui_virtual_list` & `CSV_Grid_Table`** | `table.odin`, `scroll.odin`, `csv_grid.odin`, `xitdb_bridge.odin` | O(1) 2D virtualized viewport for `1,000,000+` rows and `256` columns, frozen left columns (`pinned_cols` with `║`/`╫`), interactive sorting (`▲`/`▼`) & resizing, single-glyph `…` truncation, SIMD RFC 4180 CSV grid engine (`u8x32`), and 64-bit proportional 2D scrollbars. | [`docs/widget/virtual_list_and_table.md`](docs/widget/virtual_list_and_table.md) |
 | **`ui_tree`** | `tree.odin` | Virtualized collapsible tree over 10,000+ nodes with box-drawing guides (`├─`, `╰─`, `│`, `▾`, `▸`), `h`/`l` expand/collapse & parent jump, and `id_hash`-persistent state. | [`docs/widget/tree.md`](docs/widget/tree.md) |
 | **`ui_tabs` & `ui_tab_bar`** | `tabs.odin` | Focus-scope-integrated tab bar and container with per-tab `<id>_body_<i>` Deep History (H*) restoration, `[` / `]`, `Alt+1..9`, and mouse switching. | [`docs/widget/tabs.md`](docs/widget/tabs.md) |
 | **`ui_splitter`** | `splitter.odin` | Interactive 1-cell horizontal/vertical pane divider supporting mouse drag, middle-click reset, keyboard `[RESIZE]` sub-mode, and same-frame rect reflow. | [`docs/widget/splitter.md`](docs/widget/splitter.md) |
@@ -224,6 +224,14 @@ odin run examples/xitdb_explorer -- --live-tty [optional/path/to/db.xit]
 ```bash
 odin run examples/heimdall_inspector -custom-attribute:ui_actions,ui_action,ui_scope,telemetry_schema -vet -strict-style -vet-packages:bifrost,main
 odin run examples/heimdall_inspector -custom-attribute:ui_actions,ui_action,ui_scope,telemetry_schema -- --live-tty
+```
+
+### 8. 1,000,000-Row SIMD CSV Grid Workbench (`examples/csv_workbench`)
+High-speed 2D tabular workbench built on `ui_table` (`MAX_TABLE_COLS :: 256`) and `CSV_Grid_Table` (`#simd[32]u8` RFC 4180 quote-parity sparse row indexer). Loads real multi-megabyte PitchBook (`74,356` rows) and HubSpot (`190` columns) CSV files in tens of milliseconds, scales to `1,000,000` virtual rows (`m`), pins frozen left columns (`p` with `║`/`╫` dividers), sorts numeric and text columns in a single `O(N)` pass (`s` or header click), resizes columns (`+`/`-`/`0` or divider drag), filters across all columns (`/`), and supports `O(1)` interval multi-row selection (`x`, `Ctrl+A`, `Ctrl+I`) plus a full-record vertical field inspector modal (`i`).
+
+```bash
+odin run examples/csv_workbench -custom-attribute:telemetry_schema -vet -strict-style -vet-packages:bifrost,main
+odin run examples/csv_workbench -custom-attribute:telemetry_schema -- --live-tty [optional/path/to/file.csv]
 ```
 
 ---

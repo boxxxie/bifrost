@@ -22,14 +22,39 @@ Virtual_List_Config :: struct {
 }
 
 Virtual_Slice :: struct {
-	start_row:     i32, // Inclusive start index into xitdb ArrayList / Filtered View
-	end_row:       i32, // Exclusive end index into xitdb ArrayList / Filtered View
-	selected_row:  i32, // Currently highlighted row index
-	selected_col:  i32, // Currently highlighted column index (0 when total_cols <= 1)
-	scroll_offset: i32, // Clamped top visible row index
-	viewport_rows: i32, // Number of visible rows in the container
-	total_rows:    i32, // Total logical rows in dataset
-	total_cols:    i32, // Total logical columns in dataset (max(1, cfg.total_cols))
+	start_row:       i32, // Inclusive start index into xitdb ArrayList / Filtered View
+	end_row:         i32, // Exclusive end index into xitdb ArrayList / Filtered View
+	selected_row:    i32, // Currently highlighted row index
+	selected_col:    i32, // Currently highlighted column index (0 when total_cols <= 1)
+	scroll_offset:   i32, // Clamped top visible row index
+	scroll_offset_x: i32, // Clamped horizontal cell scroll offset for scrollable columns
+	viewport_rows:   i32, // Number of visible rows in the container
+	total_rows:      i32, // Total logical rows in dataset
+	total_cols:      i32, // Total logical columns in dataset (max(1, cfg.total_cols))
+	pinned_cols:     i32, // Number of left-frozen columns (0 ..< pinned_cols stay anchored)
+	start_col:       i32, // Inclusive first visible scrollable column index (>= pinned_cols)
+	end_col:         i32, // Exclusive one-past-last visible scrollable column index
+	sort_col:        i32, // Active sorted column index (-1 when unsorted)
+	sort_dir:        Table_Sort_Dir,
+	sort_changed:    bool,
+	follow_tail:     bool,
+}
+
+// Returns true if `col_idx` is either a pinned left column (`< slice.pinned_cols`)
+// or intersects the horizontally visible scrollable column window `[slice.start_col, slice.end_col)`.
+// Callers with wide tables (e.g. 190-column CSVs) can use this to skip formatting off-screen cells.
+ui_table_is_col_visible :: #force_inline proc "contextless" (slice: Virtual_Slice, col_idx: int) -> bool {
+	c := i32(col_idx)
+	if c < 0 || c >= slice.total_cols {
+		return false
+	}
+	if c < slice.pinned_cols {
+		return true
+	}
+	if slice.end_col <= slice.start_col {
+		return true
+	}
+	return c >= slice.start_col && c < slice.end_col
 }
 
 @(deferred_in = defer_end_virtual_list)
@@ -212,10 +237,14 @@ Table_Column_Span :: struct {
 	align: Column_Align,
 }
 
-// Records the display width of a cell in a virtualized table column.
-// Monotonic high-water-mark clamping ensures scrolling through variable-length rows never jitters left.
+DEFAULT_MAX_AUTO_COL_W :: 64
+
+// Records the display width of a cell in a virtualized table column in `O(max_width)` time.
+// Monotonic high-water-mark clamping ensures scrolling through variable-length rows never jitters left,
+// while bounded measurement prevents multi-KB biography strings from scanning past `max_width`.
 table_column_observe_cell :: proc "contextless" (spec: ^Table_Column_Spec, cell_text: string) {
-	w := string_display_width(cell_text)
+	cap_w := spec.max_width if spec.max_width > 0 else DEFAULT_MAX_AUTO_COL_W
+	w, _ := string_display_width_bounded(cell_text, cap_w)
 	if w > spec.max_observed_w {
 		spec.max_observed_w = w
 	}
@@ -318,7 +347,8 @@ resolve_table_columns :: proc "contextless" (
 
 	rem_w := max(0, avail_w - used_w)
 	if total_weight > 0 && rem_w > 0 {
-		distributed: i32 = 0
+		rem_budget := rem_w
+		rem_weight := total_weight
 		last_fill_idx := -1
 		for i := 0; i < count; i += 1 {
 			if specs[i].kind != .Fill {
@@ -327,17 +357,17 @@ resolve_table_columns :: proc "contextless" (
 			last_fill_idx = i
 			raw_weight := specs[i].value if specs[i].value > 0 else specs[i].fill_weight
 			weight := max(1, raw_weight)
-			share := i32((i64(rem_w) * i64(weight)) / i64(total_weight))
+			share := i32((i64(rem_budget) * i64(weight)) / i64(max(1, rem_weight))) if rem_budget > 0 else 0
 			min_w := max(1, specs[i].min_width)
 			max_w := specs[i].max_width if specs[i].max_width > 0 else avail_w
 			w := clamp(share, min_w, max(min_w, max_w))
 			out_spans[i].width = w
-			distributed += w
+			rem_budget = max(0, rem_budget - w)
+			rem_weight = max(0, rem_weight - weight)
 		}
-		leftover := rem_w - distributed
-		if leftover > 0 && last_fill_idx >= 0 {
+		if rem_budget > 0 && last_fill_idx >= 0 {
 			max_w := specs[last_fill_idx].max_width if specs[last_fill_idx].max_width > 0 else avail_w
-			out_spans[last_fill_idx].width = min(out_spans[last_fill_idx].width + leftover, max(out_spans[last_fill_idx].width, max_w))
+			out_spans[last_fill_idx].width = min(out_spans[last_fill_idx].width + rem_budget, max(out_spans[last_fill_idx].width, max_w))
 		}
 	}
 
@@ -355,7 +385,9 @@ resolve_table_columns :: proc "contextless" (
 	return i32(count)
 }
 
-// Draws aligned cell text inside a resolved table column span at row `y`.
+// Draws aligned, single-line sanitized cell text inside a resolved table column span at row `y`.
+// Bounded to `O(span.width)` work: control characters (`\n`, `\r`, `\t`) render as spaces,
+// and strings exceeding `span.width` terminate immediately with a `…` (`U+2026`) ellipsis.
 draw_table_cell :: proc(
 	s: ^Screen,
 	span: Table_Column_Span,
@@ -364,8 +396,9 @@ draw_table_cell :: proc(
 	text: string,
 	fg, bg: Color,
 	style: Style_Flags = {},
+	truncate_ellipsis: bool = true,
 ) {
-	if span.width <= 0 {
+	if span.width <= 0 || len(text) == 0 {
 		return
 	}
 	cell_rect := Rect{x = span.x, y = y, w = span.width, h = 1}
@@ -374,21 +407,132 @@ draw_table_cell :: proc(
 		return
 	}
 
-	text_w := string_display_width(text)
-	offset_x: i32 = 0
-	switch span.align {
-	case .Left:
-		offset_x = 0
-	case .Center:
-		if span.width > text_w {
-			offset_x = (span.width - text_w) / 2
+	text_w, is_trunc := string_display_width_bounded(text, span.width)
+	if !is_trunc {
+		offset_x: i32 = 0
+		switch span.align {
+		case .Left:
+			offset_x = 0
+		case .Center:
+			if span.width > text_w {
+				offset_x = (span.width - text_w) / 2
+			}
+		case .Right:
+			if span.width > text_w {
+				offset_x = span.width - text_w
+			}
 		}
-	case .Right:
-		if span.width > text_w {
-			offset_x = span.width - text_w
-		}
+		put_sanitized_text_bounded(s, span.x + offset_x, y, text, span.width, fg, bg, style, cell_clip)
+		return
 	}
-	put_text_clipped(s, span.x + offset_x, y, text, fg, bg, style, cell_clip)
+
+	if !truncate_ellipsis || span.width <= 1 {
+		put_sanitized_text_bounded(s, span.x, y, text, span.width, fg, bg, style, cell_clip)
+		return
+	}
+
+	avail_for_prefix := span.width - 1
+	drawn_w := put_sanitized_text_bounded(s, span.x, y, text, avail_for_prefix, fg, bg, style, cell_clip)
+	ell_x := span.x + drawn_w
+	eff_bg := bg
+	if eff_bg.kind == .Default && ell_x >= 0 && ell_x < s.width && y >= 0 && y < s.height {
+		eff_bg = s.back[int(y * s.width + ell_x)].bg
+	}
+	put_cell_clipped(s, ell_x, y, Cell{
+		ch    = '…',
+		fg    = fg,
+		bg    = eff_bg,
+		style = style,
+		width = 1,
+	}, cell_clip)
+}
+
+@(private)
+put_sanitized_text_bounded :: proc(
+	s: ^Screen,
+	x, y: i32,
+	text: string,
+	max_cols: i32,
+	fg, bg: Color,
+	style: Style_Flags,
+	clip: Rect,
+) -> i32 {
+	if max_cols <= 0 {
+		return 0
+	}
+	cur_x := x
+	used_w: i32 = 0
+	idx := 0
+	for idx < len(text) && used_w < max_cols {
+		b := text[idx]
+		if b < 0x20 || b == 0x7f {
+			if b == '\r' && idx + 1 < len(text) && text[idx + 1] == '\n' {
+				idx += 2
+			} else {
+				idx += 1
+			}
+			eff_bg := bg
+			if eff_bg.kind == .Default && cur_x >= 0 && cur_x < s.width && y >= 0 && y < s.height {
+				eff_bg = s.back[int(y * s.width + cur_x)].bg
+			}
+			put_cell_clipped(s, cur_x, y, Cell{
+				ch    = ' ',
+				fg    = fg,
+				bg    = eff_bg,
+				style = style,
+				width = 1,
+			}, clip)
+			cur_x  += 1
+			used_w += 1
+			continue
+		}
+		next_idx, cluster_w, lead_r := next_grapheme_cluster(text, idx)
+		idx = next_idx
+		if cluster_w <= 0 {
+			continue
+		}
+		w := i32(clamp(cluster_w, 1, 2))
+		if used_w + w > max_cols {
+			break
+		}
+		eff_bg := bg
+		if eff_bg.kind == .Default && cur_x >= 0 && cur_x < s.width && y >= 0 && y < s.height {
+			eff_bg = s.back[int(y * s.width + cur_x)].bg
+		}
+		if w == 2 {
+			// Ensure both columns of a 2-cell wide glyph lie inside `clip`; otherwise paint a space on the visible half
+			if cur_x < clip.x || cur_x + 1 >= clip.x + clip.w {
+				put_cell_clipped(s, cur_x, y, Cell{ch = ' ', fg = fg, bg = eff_bg, style = style, width = 1}, clip)
+				put_cell_clipped(s, cur_x + 1, y, Cell{ch = ' ', fg = fg, bg = eff_bg, style = style, width = 1}, clip)
+			} else {
+				put_cell_clipped(s, cur_x, y, Cell{
+					ch    = lead_r,
+					fg    = fg,
+					bg    = eff_bg,
+					style = style,
+					width = 2,
+				}, clip)
+				put_cell_clipped(s, cur_x + 1, y, Cell{
+					ch    = 0,
+					fg    = fg,
+					bg    = eff_bg,
+					style = style,
+					width = 0,
+				}, clip)
+			}
+		} else {
+			put_cell_clipped(s, cur_x, y, Cell{
+				ch    = lead_r,
+				fg    = fg,
+				bg    = eff_bg,
+				style = style,
+				width = 1,
+			}, clip)
+		}
+		cur_x  += w
+		used_w += w
+	}
+	return used_w
 }
 
 // =============================================================================
@@ -444,9 +588,9 @@ box_rune_dirs :: proc "contextless" (r: rune) -> Box_Dirs {
 	case '┘', '╯', '┛', '╝': return {.North, .West}
 	case '├', '┣', '╠': return {.North, .South, .East}
 	case '┤', '┫', '╣': return {.North, .South, .West}
-	case '┬', '┳', '╦': return {.East, .West, .South}
-	case '┴', '┻', '╩': return {.East, .West, .North}
-	case '┼', '╋', '╬': return {.North, .East, .South, .West}
+	case '┬', '┳', '╦', '╥': return {.East, .West, .South}
+	case '┴', '┻', '╩', '╨': return {.East, .West, .North}
+	case '┼', '╋', '╬', '╫': return {.North, .East, .South, .West}
 	}
 	return {}
 }
@@ -545,7 +689,7 @@ surface_merge_box_cell :: proc(
 	}, eff_clip)
 }
 
-MAX_TABLE_COLS :: 16
+MAX_TABLE_COLS :: 256
 
 Table_Cell_Span :: struct {
 	x: i32,
@@ -553,30 +697,55 @@ Table_Cell_Span :: struct {
 }
 
 Scroll_Slot :: struct {
-	id_hash:         u64,
-	offset:          i32, // Top visible row index (or cell offset)
-	max_offset:      i32, // Clamped maximum scroll offset
-	offset_x:        i32, // Left visible column cell offset
-	max_offset_x:    i32, // Clamped maximum horizontal scroll offset
-	viewport_rows:   i32, // Solved inner_rect.h from previous/current layout pass
-	viewport_cols:   i32, // Solved inner_rect.w from previous/current layout pass
-	total_rows:      i32, // Total rows in xitdb collection or physical content_span
-	total_content_w: i32, // Total horizontal content width (`content_span[0]`)
-	selected_row:    i32, // Highlighted cursor row index inside virtual lists
-	selected_col:    i32, // Highlighted cursor column index inside 2D virtual tables
-	total_cols:      i32, // Logical column count (> 1 enables h/l column stepping)
-	scroll_padding:  i32, // Lookahead padding rows maintained above/below selected_row
-	header_rows:     u8,  // Sticky header rows (0 for lists, 1..2 for `ui_table`)
-	col_spec_count:  u8,  // Declarative column count registered by `ui_table`
-	col_gutter_w:    i8,  // Left selection gutter width registered by `ui_table`
-	col_spacing:     i8,  // Inter-column spacing registered by `ui_table`
-	col_specs:       [MAX_TABLE_COLS]Table_Column_Spec,
-	col_max_observed: [MAX_TABLE_COLS]i16, // Monotonic high-water-mark widths per column
-	col_x_starts:    [MAX_TABLE_COLS]i16, // Relative/screen x start of each column
-	col_x_widths:    [MAX_TABLE_COLS]i16, // Cell width of each column
-	col_span_count:  u8,                  // Number of registered table column spans
-	col_spans_screen_space: bool,         // True when col_x_starts are in screen-space coordinates
-	last_layout_gen: u64, // Last Layout_Context generation where this slot was mounted
+	id_hash:                u64,
+	offset:                 i32, // Top visible row index (or cell offset)
+	max_offset:             i32, // Clamped maximum scroll offset
+	offset_x:               i32, // Left visible column cell offset
+	max_offset_x:           i32, // Clamped maximum horizontal scroll offset
+	viewport_rows:          i32, // Solved inner_rect.h from previous/current layout pass
+	viewport_cols:          i32, // Solved inner_rect.w from previous/current layout pass
+	total_rows:             i32, // Total rows in xitdb collection or physical content_span
+	prev_total_rows:        i32, // Previous frame total_rows (for follow_tail detection)
+	total_content_w:        i32, // Total horizontal content width (`content_span[0]`)
+	selected_row:           i32, // Highlighted cursor row index inside virtual lists
+	selected_col:           i32, // Highlighted cursor column index inside 2D virtual tables
+	total_cols:             i32, // Logical column count (> 1 enables h/l column stepping)
+	pinned_cols:            i16, // Number of frozen left columns (`0 ..< pinned_cols`)
+	start_col:              i16, // First visible scrollable column index
+	end_col:                i16, // One-past-last visible scrollable column index
+	sort_col:               i16, // Active sort column index (-1 when unsorted)
+	sort_dir:               Table_Sort_Dir,
+	sort_changed:           bool,
+	sortable:               bool,
+	resizable:              bool,
+	follow_tail:            bool,
+	follow_tail_initialized: bool,
+	auto_size_this_frame:   bool,
+	dragging_col_idx:       i16, // >= 0 when dragging a column divider
+	drag_col_start_x:       i16,
+	drag_col_start_w:       i16,
+	dragging_v_scrollbar:   bool,
+	dragging_h_scrollbar:   bool,
+	scroll_padding:         i32, // Lookahead padding rows maintained above/below selected_row
+	header_rows:            u8,  // Sticky header rows (0 for lists, 1..2 for `ui_table`)
+	col_spec_count:         u16, // Declarative column count registered by `ui_table` (0..256)
+	col_gutter_w:           i8,  // Left selection gutter width registered by `ui_table`
+	col_spacing:            i8,  // Inter-column spacing registered by `ui_table`
+	col_kinds:              [MAX_TABLE_COLS]Column_Width_Kind,
+	col_aligns:             [MAX_TABLE_COLS]Column_Align,
+	col_req_widths:         [MAX_TABLE_COLS]i16, // Fixed width or Fill weight
+	col_min_widths:         [MAX_TABLE_COLS]i16,
+	col_max_widths:         [MAX_TABLE_COLS]i16,
+	col_header_widths:      [MAX_TABLE_COLS]i16,
+	col_max_observed:       [MAX_TABLE_COLS]i16, // Monotonic high-water-mark widths per column
+	col_user_widths:        [MAX_TABLE_COLS]i16, // > 0 when user manually resized this column
+	col_x_starts:           [MAX_TABLE_COLS]i16, // Screen x start (for visible columns) or logical x
+	col_x_widths:           [MAX_TABLE_COLS]i16, // Cell width of each column
+	col_is_visible:         [MAX_TABLE_COLS]bool,
+	col_span_count:         u16,                 // Number of registered table column spans
+	col_spans_screen_space: bool,                // True when col_x_starts are in screen-space coordinates
+	pinned_area_w:          i16,                 // Width occupied by gutter + pinned columns + freeze divider
+	last_layout_gen:        u64,                 // Last Layout_Context generation where this slot was mounted
 }
 
 
@@ -633,28 +802,30 @@ get_selected_col :: proc(inp: ^Input_State, id: string) -> i32 {
 register_virtual_table_col_spans_cells :: proc(inp: ^Input_State, list_id: string, spans: []Table_Cell_Span) {
 	slot := get_scroll_slot(inp, hash_id(list_id))
 	cnt := min(len(spans), MAX_TABLE_COLS)
-	slot.col_span_count = u8(cnt)
+	slot.col_span_count = u16(cnt)
 	slot.col_spans_screen_space = false
 	if cnt > 0 && slot.total_cols < i32(cnt) {
 		slot.total_cols = i32(cnt)
 	}
 	for i := 0; i < cnt; i += 1 {
-		slot.col_x_starts[i] = i16(clamp(spans[i].x, 0, 32767))
-		slot.col_x_widths[i] = i16(clamp(spans[i].w, 1, 32767))
+		slot.col_x_starts[i]   = i16(clamp(spans[i].x, 0, 32767))
+		slot.col_x_widths[i]   = i16(clamp(spans[i].w, 1, 32767))
+		slot.col_is_visible[i] = true
 	}
 }
 
 register_virtual_table_col_spans_columns :: proc(inp: ^Input_State, list_id: string, spans: []Table_Column_Span) {
 	slot := get_scroll_slot(inp, hash_id(list_id))
 	cnt := min(len(spans), MAX_TABLE_COLS)
-	slot.col_span_count = u8(cnt)
+	slot.col_span_count = u16(cnt)
 	slot.col_spans_screen_space = true
 	if cnt > 0 && slot.total_cols < i32(cnt) {
 		slot.total_cols = i32(cnt)
 	}
 	for i := 0; i < cnt; i += 1 {
-		slot.col_x_starts[i] = i16(clamp(spans[i].x, 0, 32767))
-		slot.col_x_widths[i] = i16(clamp(spans[i].width, 1, 32767))
+		slot.col_x_starts[i]   = i16(clamp(spans[i].x, 0, 32767))
+		slot.col_x_widths[i]   = i16(clamp(spans[i].width, 1, 32767))
+		slot.col_is_visible[i] = true
 	}
 }
 
@@ -663,9 +834,286 @@ register_virtual_table_col_spans :: proc {
 	register_virtual_table_col_spans_columns,
 }
 
+// Returns the available inner rect for table columns, reserving 1 column on the right for
+// a vertical scrollbar when the table is borderless (`border == .None`).
+table_avail_inner_rect :: #force_inline proc "contextless" (
+	inner: Rect,
+	border: Border_Kind,
+	total_rows: i32,
+	viewport_rows: i32,
+) -> Rect {
+	avail := inner
+	if total_rows > max(1, viewport_rows) && border == .None && avail.w > 2 {
+		avail.w -= 1
+	}
+	return avail
+}
+
+// Computes the screen-space x-coordinate of the vertical divider (`│` or `║`) following a column.
+table_col_divider_x :: #force_inline proc "contextless" (col_x, col_w, col_spacing: i32) -> i32 {
+	return col_x + col_w + (max(0, col_spacing) / 2)
+}
+
+// Unpacks `columns` into `slot` arrays for `resolve_slot_table_columns`.
+populate_slot_column_specs :: proc "contextless" (
+	slot: ^Scroll_Slot,
+	columns: []Table_Column_Spec,
+	sort_col: i32,
+	sort_dir: Table_Sort_Dir,
+	reset_auto_size: bool = false,
+) {
+	col_cnt := min(len(columns), MAX_TABLE_COLS)
+	slot.col_spec_count = u16(col_cnt)
+	for i := 0; i < col_cnt; i += 1 {
+		spec := columns[i]
+		hdr_w := string_display_width(spec.header)
+		if sort_dir != .None && i32(i) == sort_col {
+			hdr_w += 2
+		}
+		seed_obs := i32(0) if reset_auto_size else spec.max_observed_w
+		obs_w := max(hdr_w, max(seed_obs, i32(slot.col_max_observed[i])))
+		req_val := spec.value if spec.value > 0 else (spec.fixed_width if spec.kind == .Fixed else spec.fill_weight)
+		slot.col_kinds[i]         = spec.kind
+		slot.col_aligns[i]        = spec.align
+		slot.col_req_widths[i]    = i16(clamp(req_val, 0, 32767))
+		slot.col_min_widths[i]    = i16(clamp(max(1, spec.min_width), 1, 32767))
+		slot.col_max_widths[i]    = i16(clamp(spec.max_width, 0, 32767))
+		slot.col_header_widths[i] = i16(clamp(hdr_w, 1, 32767))
+		slot.col_max_observed[i]  = i16(clamp(obs_w, 0, 32767))
+	}
+}
+
+// Solves 2D table column widths and screen-space coordinates for `Scroll_Slot`,
+// supporting up to 256 columns, frozen left columns (`0 ..< pinned_cols`),
+// user manual width overrides (`col_user_widths`), and horizontal scroll offset (`offset_x`).
+resolve_slot_table_columns :: proc "contextless" (slot: ^Scroll_Slot, avail_rect: Rect) -> i32 {
+	cnt := int(min(slot.col_spec_count, MAX_TABLE_COLS))
+	if cnt <= 0 || avail_rect.w <= 0 {
+		slot.col_span_count = 0
+		slot.start_col      = 0
+		slot.end_col        = 0
+		slot.pinned_area_w  = 0
+		return 0
+	}
+
+	gutter := max(0, i32(slot.col_gutter_w))
+	col_sp := max(0, i32(slot.col_spacing))
+	total_gaps := i32(max(0, cnt - 1)) * col_sp
+	avail_w := max(0, avail_rect.w - gutter - total_gaps)
+
+	used_w: i32 = 0
+	total_weight: i32 = 0
+
+	// Pass 1: Resolve Fixed, Auto_Content, and user-resized columns
+	for i := 0; i < cnt; i += 1 {
+		min_w := max(1, i32(slot.col_min_widths[i]))
+		max_w := i32(slot.col_max_widths[i]) if slot.col_max_widths[i] > 0 else max(min_w, avail_rect.w)
+		obs_w := max(i32(slot.col_header_widths[i]), i32(slot.col_max_observed[i]))
+
+		w: i32 = 0
+		if slot.col_user_widths[i] > 0 {
+			w = max(min_w, i32(slot.col_user_widths[i]))
+			used_w += w
+		} else {
+			switch slot.col_kinds[i] {
+			case .Fixed:
+				fw := max(1, i32(slot.col_req_widths[i]))
+				w = clamp(fw, min_w, max(min_w, max_w))
+				used_w += w
+			case .Auto_Content:
+				w = clamp(obs_w, min_w, max(min_w, max_w))
+				used_w += w
+			case .Fill:
+				weight := max(1, i32(slot.col_req_widths[i]))
+				total_weight += weight
+				w = max(min_w, i32(slot.col_header_widths[i]))
+			}
+		}
+		slot.col_x_widths[i] = i16(clamp(w, 1, 32767))
+	}
+
+	// Pass 2: Distribute remaining viewport width across non-resized Fill columns when content fits
+	rem_w := max(0, avail_w - used_w)
+	if total_weight > 0 && rem_w > 0 {
+		rem_budget := rem_w
+		rem_weight := total_weight
+		last_fill_idx := -1
+		for i := 0; i < cnt; i += 1 {
+			if slot.col_user_widths[i] > 0 || slot.col_kinds[i] != .Fill {
+				continue
+			}
+			last_fill_idx = i
+			weight := max(1, i32(slot.col_req_widths[i]))
+			share := i32((i64(rem_budget) * i64(weight)) / i64(max(1, rem_weight))) if rem_budget > 0 else 0
+			min_w := max(1, max(i32(slot.col_min_widths[i]), i32(slot.col_header_widths[i])))
+			max_w := i32(slot.col_max_widths[i]) if slot.col_max_widths[i] > 0 else max(min_w, avail_rect.w)
+			w := clamp(share, min_w, max(min_w, max_w))
+			slot.col_x_widths[i] = i16(clamp(w, 1, 32767))
+			rem_budget = max(0, rem_budget - w)
+			rem_weight = max(0, rem_weight - weight)
+		}
+		if rem_budget > 0 && last_fill_idx >= 0 {
+			cur_w := i32(slot.col_x_widths[last_fill_idx])
+			max_w := i32(slot.col_max_widths[last_fill_idx]) if slot.col_max_widths[last_fill_idx] > 0 else max(cur_w + rem_budget, avail_rect.w)
+			slot.col_x_widths[last_fill_idx] = i16(clamp(min(cur_w + rem_budget, max(cur_w, max_w)), 1, 32767))
+		}
+	}
+
+	// Pass 3: Partition into Pinned Left Quadrant (`0 ..< pinned`) and Scrollable Right Quadrant (`pinned ..< cnt`)
+	pinned := int(clamp(i32(slot.pinned_cols), 0, max(0, i32(cnt) - 1)))
+	cur_x := avail_rect.x + gutter
+	for i := 0; i < pinned; i += 1 {
+		slot.col_x_starts[i]   = i16(clamp(cur_x, -32768, 32767))
+		slot.col_is_visible[i] = cur_x < avail_rect.x + avail_rect.w
+		cur_x += i32(slot.col_x_widths[i])
+		if i + 1 < cnt {
+			cur_x += col_sp
+		}
+	}
+
+	pinned_area_w := cur_x - avail_rect.x
+	// Guard against pinned columns consuming 100% of a tiny viewport
+	if pinned > 0 && pinned_area_w >= avail_rect.w - 4 {
+		pinned = 0
+		pinned_area_w = gutter
+		cur_x = avail_rect.x + gutter
+	}
+	slot.pinned_area_w = i16(clamp(pinned_area_w, 0, 32767))
+
+	scroll_vp_x := avail_rect.x + pinned_area_w
+	scroll_vp_w := max(1, avail_rect.w - pinned_area_w)
+
+	scrollable_total_w: i32 = 0
+	for i := pinned; i < cnt; i += 1 {
+		scrollable_total_w += i32(slot.col_x_widths[i])
+		if i + 1 < cnt {
+			scrollable_total_w += col_sp
+		}
+	}
+
+	slot.total_content_w = pinned_area_w + scrollable_total_w
+	slot.viewport_cols   = avail_rect.w
+	slot.max_offset_x    = max(0, scrollable_total_w - scroll_vp_w)
+	slot.offset_x        = clamp(slot.offset_x, 0, slot.max_offset_x)
+
+	// Pass 4: Compute screen-space x starts and visible `[start_col, end_col)` window for scrollable columns
+	first_vis := cnt
+	last_vis  := pinned
+	rel_x: i32 = 0
+	for i := pinned; i < cnt; i += 1 {
+		cw := i32(slot.col_x_widths[i])
+		screen_x := scroll_vp_x + rel_x - slot.offset_x
+		slot.col_x_starts[i] = i16(clamp(screen_x, -32768, 32767))
+		vis := (screen_x + cw + col_sp > scroll_vp_x) && (screen_x < scroll_vp_x + scroll_vp_w)
+		slot.col_is_visible[i] = vis
+		if vis {
+			if i < first_vis {
+				first_vis = i
+			}
+			if i + 1 > last_vis {
+				last_vis = i + 1
+			}
+		}
+		rel_x += cw
+		if i + 1 < cnt {
+			rel_x += col_sp
+		}
+	}
+
+	if first_vis > last_vis {
+		first_vis = pinned
+		last_vis  = pinned
+	}
+	slot.start_col              = i16(first_vis)
+	slot.end_col                = i16(last_vis)
+	slot.col_span_count         = u16(cnt)
+	slot.col_spans_screen_space = true
+	return i32(cnt)
+}
+
+// Ensures that when `slot.selected_col` is in the scrollable column range (`>= pinned_cols`),
+// `slot.offset_x` automatically scrolls horizontally so `selected_col` is fully visible inside the right viewport.
+ensure_virtual_col_visible :: proc "contextless" (slot: ^Scroll_Slot, avail_w: i32 = 0) {
+	cnt := int(min(slot.col_spec_count, MAX_TABLE_COLS))
+	if cnt <= 1 {
+		return
+	}
+	sel := int(clamp(slot.selected_col, 0, i32(cnt - 1)))
+	pinned := int(clamp(i32(slot.pinned_cols), 0, max(0, i32(cnt) - 1)))
+	if sel < pinned {
+		return
+	}
+
+	vp_total_w := avail_w if avail_w > 0 else slot.viewport_cols
+	if vp_total_w <= 0 {
+		return
+	}
+	pinned_w := i32(slot.pinned_area_w)
+	if pinned == 0 && pinned_w == 0 {
+		pinned_w = max(0, i32(slot.col_gutter_w))
+	}
+	scroll_vp_w := max(1, vp_total_w - pinned_w)
+	col_sp := max(0, i32(slot.col_spacing))
+
+	target_rel_x: i32 = 0
+	target_w: i32     = max(1, i32(slot.col_x_widths[sel]))
+	scrollable_total_w: i32 = 0
+	for i := pinned; i < cnt; i += 1 {
+		cw := max(1, i32(slot.col_x_widths[i]))
+		if i == sel {
+			target_rel_x = scrollable_total_w
+			target_w     = cw
+		}
+		scrollable_total_w += cw
+		if i + 1 < cnt {
+			scrollable_total_w += col_sp
+		}
+	}
+
+	slot.max_offset_x = max(0, scrollable_total_w - scroll_vp_w)
+	if target_rel_x < slot.offset_x {
+		slot.offset_x = target_rel_x
+	} else if target_rel_x + target_w > slot.offset_x + scroll_vp_w {
+		slot.offset_x = target_rel_x + target_w - scroll_vp_w
+	}
+	slot.offset_x = clamp(slot.offset_x, 0, slot.max_offset_x)
+}
+
 select_virtual_col_at_x :: proc "contextless" (slot: ^Scroll_Slot, inner_rect: Rect, mx: i32) {
 	cols := max(1, slot.total_cols)
 	if cols <= 1 || inner_rect.w <= 0 {
+		return
+	}
+	if slot.col_spec_count > 0 && slot.col_spans_screen_space {
+		cnt := int(min(slot.col_span_count, MAX_TABLE_COLS))
+		pinned := int(clamp(i32(slot.pinned_cols), 0, max(0, i32(cnt) - 1)))
+		pinned_right := inner_rect.x + i32(slot.pinned_area_w)
+		if pinned > 0 && mx < pinned_right {
+			for i := 0; i < pinned; i += 1 {
+				cx := i32(slot.col_x_starts[i])
+				cw := i32(slot.col_x_widths[i])
+				if mx >= cx && mx < cx + cw {
+					slot.selected_col = i32(i)
+					return
+				}
+			}
+			return
+		}
+		if pinned == 0 && mx < inner_rect.x + max(0, i32(slot.col_gutter_w)) {
+			return
+		}
+		for i := pinned; i < cnt; i += 1 {
+			if !slot.col_is_visible[i] {
+				continue
+			}
+			cx := i32(slot.col_x_starts[i])
+			cw := i32(slot.col_x_widths[i])
+			if mx >= cx && mx < cx + cw {
+				slot.selected_col = i32(i)
+				ensure_virtual_col_visible(slot, inner_rect.w)
+				return
+			}
+		}
 		return
 	}
 	rel_x := mx - inner_rect.x + slot.offset_x
@@ -771,25 +1219,23 @@ sync_scroll_viewports :: proc "contextless" (inp: ^Input_State, ctx: ^Layout_Con
 		slot.max_offset_x    = max(0, slot.total_content_w - slot.viewport_cols)
 
 		if slot.col_spec_count > 0 && node.inner_rect.w > 0 {
-			cnt := int(min(slot.col_spec_count, MAX_TABLE_COLS))
-			spans_buf: [MAX_TABLE_COLS]Table_Column_Span
-			avail_rect := node.inner_rect
-			if slot.total_rows > slot.viewport_rows && node.config.border == .None && avail_rect.w > 2 {
-				avail_rect.w -= 1
+			avail_rect := table_avail_inner_rect(node.inner_rect, node.config.border, slot.total_rows, slot.viewport_rows)
+			_ = resolve_slot_table_columns(slot, avail_rect)
+			if node.config.border == .None && slot.max_offset_x > 0 && node.inner_rect.h > hdr_h + 2 {
+				slot.viewport_rows = max(1, node.inner_rect.h - hdr_h - 1)
+				slot.max_offset    = max(0, slot.total_rows - slot.viewport_rows)
+				next_avail := table_avail_inner_rect(node.inner_rect, node.config.border, slot.total_rows, slot.viewport_rows)
+				if next_avail.w != avail_rect.w {
+					avail_rect = next_avail
+					_ = resolve_slot_table_columns(slot, avail_rect)
+				}
 			}
-			resolved := int(resolve_table_columns(
-				slot.col_specs[:cnt],
-				spans_buf[:cnt],
-				avail_rect,
-				i32(slot.col_gutter_w),
-				i32(slot.col_spacing),
-			))
-			slot.col_span_count         = u8(resolved)
-			slot.col_spans_screen_space = true
-			for c := 0; c < resolved; c += 1 {
-				slot.col_x_starts[c] = i16(clamp(spans_buf[c].x, 0, 32767))
-				slot.col_x_widths[c] = i16(clamp(spans_buf[c].width, 1, 32767))
-			}
+			// Expose total horizontal content width to `render_layout` so the horizontal scrollbar
+			// renders whenever scrollable columns overflow the right quadrant (`max_offset_x > 0`).
+			node.content_span[0] = node.inner_rect.w + slot.max_offset_x
+		} else if node.config.border == .None && slot.max_offset_x > 0 && node.inner_rect.h > hdr_h + 2 {
+			slot.viewport_rows = max(1, node.inner_rect.h - hdr_h - 1)
+			slot.max_offset    = max(0, slot.total_rows - slot.viewport_rows)
 		}
 
 		if node.config.virtual_total_rows == 0 {
@@ -820,6 +1266,11 @@ sync_scroll_viewports :: proc "contextless" (inp: ^Input_State, ctx: ^Layout_Con
 				shift_descendants_x(ctx, i32(i), -delta_unapplied_x, node.inner_clip)
 			}
 		} else {
+			if slot.follow_tail && ((slot.prev_total_rows > 0 && slot.total_rows > slot.prev_total_rows) || slot.selected_row >= max(0, slot.total_rows - 1)) {
+				slot.offset       = slot.max_offset
+				slot.selected_row = max(0, slot.total_rows - 1)
+			}
+			slot.prev_total_rows        = slot.total_rows
 			slot.offset                 = clamp(slot.offset, 0, slot.max_offset)
 			slot.offset_x               = clamp(slot.offset_x, 0, slot.max_offset_x)
 			node.config.scroll_offset   = slot.offset
@@ -1016,6 +1467,7 @@ handle_key_scroll :: proc "contextless" (
 	case .Home:
 		if is_virtual {
 			slot.selected_row = 0
+			slot.follow_tail  = false
 			sync_tree_selection_from_scroll(inp, node.id_hash, slot.selected_row)
 		}
 		apply_scroll_delta(inp, ctx, scroll_idx, -slot.max_offset - 1, false)
@@ -1023,6 +1475,7 @@ handle_key_scroll :: proc "contextless" (
 	case .End:
 		if is_virtual {
 			slot.selected_row = max(0, slot.total_rows - 1)
+			slot.follow_tail  = true
 			sync_tree_selection_from_scroll(inp, node.id_hash, slot.selected_row)
 		}
 		apply_scroll_delta(inp, ctx, scroll_idx, slot.max_offset + 1, false)
@@ -1034,6 +1487,11 @@ handle_key_scroll :: proc "contextless" (
 move_virtual_selection :: proc "contextless" (slot: ^Scroll_Slot, delta: i32) {
 	if slot.total_rows <= 0 {
 		return
+	}
+	if delta < 0 {
+		slot.follow_tail = false
+	} else if delta > 0 && slot.selected_row + delta >= slot.total_rows - 1 {
+		slot.follow_tail = true
 	}
 	slot.selected_row = clamp(slot.selected_row + delta, 0, slot.total_rows - 1)
 	v_rows := max(1, slot.viewport_rows)
@@ -1058,6 +1516,12 @@ apply_scroll_delta :: proc "contextless" (
 	old_offset := slot.offset
 	new_offset := clamp(old_offset + delta, 0, slot.max_offset)
 	actual_delta := new_offset - old_offset
+
+	if delta < 0 && new_offset < slot.max_offset {
+		slot.follow_tail = false
+	} else if delta > 0 && new_offset >= slot.max_offset {
+		slot.follow_tail = true
+	}
 
 	slot.offset                = new_offset
 	node.config.scroll_offset  = new_offset
@@ -1127,4 +1591,317 @@ shift_descendants_x :: proc "contextless" (ctx: ^Layout_Context, parent_idx: i32
 		}
 	}
 }
+
+// =============================================================================
+// Interactive `ui_table` Keyboard Shortcuts, Header Sort, Divider Resize & Scrollbar Scrubbing
+// =============================================================================
+
+cycle_table_sort_dir :: proc "contextless" (slot: ^Scroll_Slot, col_idx: i32) {
+	if slot.sort_col == i16(col_idx) {
+		switch slot.sort_dir {
+		case .None: slot.sort_dir = .Asc
+		case .Asc:  slot.sort_dir = .Desc
+		case .Desc:
+			slot.sort_dir = .None
+			slot.sort_col = -1
+		}
+	} else {
+		slot.sort_col = i16(col_idx)
+		slot.sort_dir = .Asc
+	}
+	slot.sort_changed = true
+}
+
+handle_table_key_shortcut :: proc "contextless" (
+	inp: ^Input_State,
+	node: ^Layout_Node,
+	slot: ^Scroll_Slot,
+	ch: rune,
+) -> bool {
+	cnt := int(min(slot.col_spec_count, MAX_TABLE_COLS))
+	if cnt <= 0 {
+		return false
+	}
+	sel := int(clamp(slot.selected_col, 0, i32(cnt - 1)))
+	avail_rect := table_avail_inner_rect(node.inner_rect, node.config.border, slot.total_rows, slot.viewport_rows)
+
+	switch ch {
+	case 's', 'S':
+		if !slot.sortable {
+			return false
+		}
+		_ = consume_repeat_count(inp)
+		cycle_table_sort_dir(slot, i32(sel))
+		_ = resolve_slot_table_columns(slot, avail_rect)
+		return true
+
+	case '+', '=':
+		if !slot.resizable {
+			return false
+		}
+		step := 2 * max(1, consume_repeat_count(inp))
+		cur_w := max(1, i32(slot.col_x_widths[sel]))
+		min_w := max(1, i32(slot.col_min_widths[sel]))
+		slot.col_user_widths[sel] = i16(clamp(max(min_w, cur_w + step), 1, 512))
+		_ = resolve_slot_table_columns(slot, avail_rect)
+		ensure_virtual_col_visible(slot, avail_rect.w)
+		node.config.scroll_offset_x = slot.offset_x
+		node.content_span[0]        = node.inner_rect.w + slot.max_offset_x
+		inp.scrolled_id             = node.id_hash
+		return true
+
+	case '-':
+		if !slot.resizable {
+			return false
+		}
+		step := 2 * max(1, consume_repeat_count(inp))
+		cur_w := max(1, i32(slot.col_x_widths[sel]))
+		min_w := max(1, i32(slot.col_min_widths[sel]))
+		slot.col_user_widths[sel] = i16(clamp(max(min_w, cur_w - step), 1, 512))
+		_ = resolve_slot_table_columns(slot, avail_rect)
+		ensure_virtual_col_visible(slot, avail_rect.w)
+		node.config.scroll_offset_x = slot.offset_x
+		node.content_span[0]        = node.inner_rect.w + slot.max_offset_x
+		inp.scrolled_id             = node.id_hash
+		return true
+
+	case '0':
+		if !slot.resizable {
+			return false
+		}
+		if inp.repeat_count == 0 && inp.suffix_count == 0 {
+			for i := 0; i < cnt; i += 1 {
+				slot.col_user_widths[i]  = 0
+				slot.col_max_observed[i] = slot.col_header_widths[i]
+			}
+			slot.auto_size_this_frame = true
+			_ = resolve_slot_table_columns(slot, avail_rect)
+			ensure_virtual_col_visible(slot, avail_rect.w)
+			node.config.scroll_offset_x = slot.offset_x
+			node.content_span[0]        = node.inner_rect.w + slot.max_offset_x
+			inp.scrolled_id             = node.id_hash
+			return true
+		}
+
+	case '^':
+		_ = consume_repeat_count(inp)
+		slot.selected_col = 0
+		slot.offset_x     = 0
+		_ = resolve_slot_table_columns(slot, avail_rect)
+		node.config.scroll_offset_x = slot.offset_x
+		node.content_span[0]        = node.inner_rect.w + slot.max_offset_x
+		inp.scrolled_id             = node.id_hash
+		return true
+
+	case '$':
+		_ = consume_repeat_count(inp)
+		slot.selected_col = i32(cnt - 1)
+		ensure_virtual_col_visible(slot, avail_rect.w)
+		_ = resolve_slot_table_columns(slot, avail_rect)
+		node.config.scroll_offset_x = slot.offset_x
+		node.content_span[0]        = node.inner_rect.w + slot.max_offset_x
+		inp.scrolled_id             = node.id_hash
+		return true
+	}
+	return false
+}
+
+scrub_vertical_scrollbar :: proc "contextless" (
+	inp: ^Input_State,
+	ctx: ^Layout_Context,
+	scroll_idx: i32,
+	slot: ^Scroll_Slot,
+	my: i32,
+) {
+	node := &ctx.nodes[scroll_idx]
+	hdr_h := i32(slot.header_rows)
+	track_y := node.inner_rect.y + hdr_h
+	track_h := max(1, node.inner_rect.h - hdr_h)
+	rel_y := clamp(my - track_y, 0, max(0, track_h - 1))
+	target_off: i32 = 0
+	if track_h > 1 && slot.max_offset > 0 {
+		target_off = i32((i64(rel_y) * i64(slot.max_offset) + i64(track_h - 1) / 2) / i64(track_h - 1))
+	}
+	target_off = clamp(target_off, 0, slot.max_offset)
+	delta := target_off - slot.offset
+	if node.config.virtual_total_rows > 0 {
+		slot.offset               = target_off
+		slot.follow_tail          = target_off >= slot.max_offset
+		node.config.scroll_offset = target_off
+		if slot.selected_row < target_off {
+			slot.selected_row = target_off
+		} else if slot.selected_row >= target_off + slot.viewport_rows {
+			slot.selected_row = clamp(target_off + slot.viewport_rows - 1, 0, max(0, slot.total_rows - 1))
+		}
+		sync_tree_selection_from_scroll(inp, node.id_hash, slot.selected_row)
+		inp.scrolled_id = node.id_hash
+	} else if delta != 0 {
+		apply_scroll_delta(inp, ctx, scroll_idx, delta, false)
+	}
+}
+
+scrub_horizontal_scrollbar :: proc "contextless" (
+	inp: ^Input_State,
+	ctx: ^Layout_Context,
+	scroll_idx: i32,
+	slot: ^Scroll_Slot,
+	mx: i32,
+) {
+	node := &ctx.nodes[scroll_idx]
+	track_x := node.inner_rect.x
+	track_w := max(1, node.inner_rect.w)
+	rel_x := clamp(mx - track_x, 0, max(0, track_w - 1))
+	target_off_x: i32 = 0
+	if track_w > 1 && slot.max_offset_x > 0 {
+		target_off_x = i32((i64(rel_x) * i64(slot.max_offset_x) + i64(track_w - 1) / 2) / i64(track_w - 1))
+	}
+	target_off_x = clamp(target_off_x, 0, slot.max_offset_x)
+	delta_x := target_off_x - slot.offset_x
+	if node.config.virtual_total_rows > 0 {
+		slot.offset_x               = target_off_x
+		node.config.scroll_offset_x = target_off_x
+		if slot.col_spec_count > 0 {
+			avail_rect := table_avail_inner_rect(node.inner_rect, node.config.border, slot.total_rows, slot.viewport_rows)
+			_ = resolve_slot_table_columns(slot, avail_rect)
+		}
+		inp.scrolled_id = node.id_hash
+	} else if delta_x != 0 {
+		apply_scroll_delta_x(inp, ctx, scroll_idx, delta_x)
+	}
+}
+
+handle_scroll_or_table_mouse_press :: proc(
+	inp: ^Input_State,
+	ctx: ^Layout_Context,
+	scroll_idx: i32,
+	capture_idx: i32,
+	mx, my: i32,
+) -> bool {
+	if scroll_idx < 0 || int(scroll_idx) >= len(ctx.nodes) {
+		return false
+	}
+	node := &ctx.nodes[scroll_idx]
+	slot := get_scroll_slot(inp, node.id_hash)
+	slot.dragging_col_idx     = -1
+	slot.dragging_v_scrollbar = false
+	slot.dragging_h_scrollbar = false
+
+	hdr_h := i32(slot.header_rows)
+	v_track_y := node.inner_rect.y + hdr_h
+	v_track_h := max(0, node.inner_rect.h - hdr_h)
+	sb_x := (node.rect.x + node.rect.w - 1) if node.rect.w > node.inner_rect.w else (node.inner_rect.x + node.inner_rect.w - 1)
+	if slot.max_offset > 0 && v_track_h > 0 && mx == sb_x && my >= v_track_y && my < v_track_y + v_track_h {
+		slot.dragging_v_scrollbar = true
+		scrub_vertical_scrollbar(inp, ctx, scroll_idx, slot, my)
+		return true
+	}
+
+	h_sb_active := slot.max_offset_x > 0 && node.inner_rect.w > 0 && (node.rect.h > node.inner_rect.h || node.inner_rect.h > hdr_h + 2)
+	sb_y := (node.rect.y + node.rect.h - 1) if node.rect.h > node.inner_rect.h else (node.inner_rect.y + node.inner_rect.h - 1)
+	if h_sb_active && my == sb_y && mx >= node.inner_rect.x && mx < node.inner_rect.x + node.inner_rect.w {
+		slot.dragging_h_scrollbar = true
+		scrub_horizontal_scrollbar(inp, ctx, scroll_idx, slot, mx)
+		return true
+	}
+
+	if node.config.virtual_total_rows <= 0 {
+		return false
+	}
+
+	if handle_tree_mouse_click(inp, ctx, scroll_idx, capture_idx, my) {
+		return true
+	}
+
+	// Check for column divider press (`│` / `║`) to start interactive column resize drag
+	if slot.resizable && slot.col_spec_count > 1 &&
+	   mx >= node.inner_rect.x && mx < node.inner_rect.x + node.inner_rect.w &&
+	   my >= node.inner_rect.y && my < node.inner_rect.y + node.inner_rect.h {
+		cnt := int(min(slot.col_spec_count, MAX_TABLE_COLS))
+		pinned := int(clamp(i32(slot.pinned_cols), 0, max(0, i32(cnt) - 1)))
+		pinned_right := node.inner_rect.x + i32(slot.pinned_area_w)
+		col_sp := max(1, i32(slot.col_spacing))
+		for c := 0; c + 1 < cnt; c += 1 {
+			if c >= pinned && !slot.col_is_visible[c] {
+				continue
+			}
+			div_x := table_col_divider_x(i32(slot.col_x_starts[c]), i32(slot.col_x_widths[c]), col_sp)
+			if c >= pinned && div_x < pinned_right {
+				continue
+			}
+			if mx == div_x {
+				slot.dragging_col_idx = i16(c)
+				slot.drag_col_start_x = i16(clamp(mx, -32768, 32767))
+				slot.drag_col_start_w = slot.col_x_widths[c]
+				return true
+			}
+		}
+	}
+
+	// Check for sticky header click (`my == node.inner_rect.y` when `hdr_h > 0`) to select column & cycle sort
+	if hdr_h > 0 && my == node.inner_rect.y && mx >= node.inner_rect.x && mx < node.inner_rect.x + node.inner_rect.w {
+		select_virtual_col_at_x(slot, node.inner_rect, mx)
+		if slot.sortable {
+			cycle_table_sort_dir(slot, slot.selected_col)
+		}
+		avail_rect := table_avail_inner_rect(node.inner_rect, node.config.border, slot.total_rows, slot.viewport_rows)
+		_ = resolve_slot_table_columns(slot, avail_rect)
+		node.config.scroll_offset_x = slot.offset_x
+		node.content_span[0]        = node.inner_rect.w + slot.max_offset_x
+		return true
+	}
+
+	if mx >= node.inner_rect.x && mx < node.inner_rect.x + node.inner_rect.w &&
+	   my >= node.inner_rect.y && my < node.inner_rect.y + node.inner_rect.h {
+		rel_y := my - node.inner_rect.y - hdr_h
+		data_h := max(0, node.inner_rect.h - hdr_h - (1 if (node.config.border == .None && h_sb_active) else 0))
+		if rel_y >= 0 && rel_y < data_h {
+			slot.selected_row = clamp(slot.offset + rel_y, 0, max(0, slot.total_rows - 1))
+			slot.follow_tail  = slot.selected_row >= slot.total_rows - 1
+		}
+		select_virtual_col_at_x(slot, node.inner_rect, mx)
+		if slot.col_spec_count > 0 {
+			avail_rect := table_avail_inner_rect(node.inner_rect, node.config.border, slot.total_rows, slot.viewport_rows)
+			_ = resolve_slot_table_columns(slot, avail_rect)
+			node.config.scroll_offset_x = slot.offset_x
+			node.content_span[0]        = node.inner_rect.w + slot.max_offset_x
+		}
+	}
+	return true
+}
+
+handle_scroll_or_table_mouse_drag :: proc "contextless" (
+	inp: ^Input_State,
+	ctx: ^Layout_Context,
+	scroll_idx: i32,
+	mx, my: i32,
+) -> bool {
+	if scroll_idx < 0 || int(scroll_idx) >= len(ctx.nodes) {
+		return false
+	}
+	node := &ctx.nodes[scroll_idx]
+	slot := get_scroll_slot(inp, node.id_hash)
+	if slot.dragging_v_scrollbar {
+		scrub_vertical_scrollbar(inp, ctx, scroll_idx, slot, my)
+		return true
+	}
+	if slot.dragging_h_scrollbar {
+		scrub_horizontal_scrollbar(inp, ctx, scroll_idx, slot, mx)
+		return true
+	}
+	if slot.dragging_col_idx >= 0 && int(slot.dragging_col_idx) < int(slot.col_spec_count) {
+		c := int(slot.dragging_col_idx)
+		dx := mx - i32(slot.drag_col_start_x)
+		min_w := max(1, i32(slot.col_min_widths[c]))
+		new_w := clamp(i32(slot.drag_col_start_w) + dx, min_w, 512)
+		slot.col_user_widths[c] = i16(new_w)
+		avail_rect := table_avail_inner_rect(node.inner_rect, node.config.border, slot.total_rows, slot.viewport_rows)
+		_ = resolve_slot_table_columns(slot, avail_rect)
+		node.config.scroll_offset_x = slot.offset_x
+		node.content_span[0]        = node.inner_rect.w + slot.max_offset_x
+		inp.scrolled_id             = node.id_hash
+		return true
+	}
+	return false
+}
+
 

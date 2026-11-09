@@ -507,31 +507,67 @@ handle_spatial_nav_at_level :: proc(
 		case .Left, .Right:
 			cols := max(1, slot.total_cols)
 			if cols > 1 {
+				avail_rect := table_avail_inner_rect(node.inner_rect, node.config.border, slot.total_rows, slot.viewport_rows)
 				delta_col: i32 = (-1 if dir == .Left else +1) * count
 				next_col := slot.selected_col + delta_col
 				if (dir == .Right && slot.selected_col < cols - 1) || (dir == .Left && slot.selected_col > 0) {
 					_ = consume_repeat_count(inp)
 					slot.selected_col = clamp(next_col, 0, cols - 1)
+					if slot.selected_col < i32(slot.pinned_cols) {
+						slot.offset_x = 0
+					} else {
+						ensure_virtual_col_visible(slot, avail_rect.w)
+					}
+					if slot.col_spec_count > 0 {
+						_ = resolve_slot_table_columns(slot, avail_rect)
+						node.content_span[0] = node.inner_rect.w + slot.max_offset_x
+					}
+					node.config.scroll_offset_x = slot.offset_x
+					inp.scrolled_id = node.id_hash
 					return .Consumed
 				}
 				if .Loop_Spatial in node.focus_flags {
 					_ = consume_repeat_count(inp)
 					slot.selected_col = ((next_col % cols) + cols) % cols
+					if slot.selected_col < i32(slot.pinned_cols) {
+						slot.offset_x = 0
+					} else {
+						ensure_virtual_col_visible(slot, avail_rect.w)
+					}
+					if slot.col_spec_count > 0 {
+						_ = resolve_slot_table_columns(slot, avail_rect)
+						node.content_span[0] = node.inner_rect.w + slot.max_offset_x
+					}
+					node.config.scroll_offset_x = slot.offset_x
+					inp.scrolled_id = node.id_hash
 					return .Consumed
 				}
 				if .Wrap_Spatial in node.focus_flags {
 					if dir == .Right && slot.selected_row + 1 < slot.total_rows {
 						_ = consume_repeat_count(inp)
 						slot.selected_col = 0
+						slot.offset_x     = 0
+						ensure_virtual_col_visible(slot, avail_rect.w)
+						if slot.col_spec_count > 0 {
+							_ = resolve_slot_table_columns(slot, avail_rect)
+							node.content_span[0] = node.inner_rect.w + slot.max_offset_x
+						}
 						move_virtual_selection(slot, +1)
-						node.config.scroll_offset = slot.offset
+						node.config.scroll_offset   = slot.offset
+						node.config.scroll_offset_x = slot.offset_x
 						inp.scrolled_id = node.id_hash
 						return .Consumed
 					} else if dir == .Left && slot.selected_row > 0 {
 						_ = consume_repeat_count(inp)
 						slot.selected_col = cols - 1
+						ensure_virtual_col_visible(slot, avail_rect.w)
+						if slot.col_spec_count > 0 {
+							_ = resolve_slot_table_columns(slot, avail_rect)
+							node.content_span[0] = node.inner_rect.w + slot.max_offset_x
+						}
 						move_virtual_selection(slot, -1)
-						node.config.scroll_offset = slot.offset
+						node.config.scroll_offset   = slot.offset
+						node.config.scroll_offset_x = slot.offset_x
 						inp.scrolled_id = node.id_hash
 						return .Consumed
 					}
@@ -777,11 +813,13 @@ scroll_container_by_page :: proc "contextless" (
 			sync_tree_selection_from_scroll(inp, node.id_hash, slot.selected_row)
 		case .Home:
 			slot.selected_row = 0
+			slot.follow_tail  = false
 			sync_tree_selection_from_scroll(inp, node.id_hash, slot.selected_row)
 			apply_scroll_delta(inp, ctx, scroll_idx, -slot.max_offset - 1, false)
 			return .Consumed
 		case .End:
 			slot.selected_row = max(0, slot.total_rows - 1)
+			slot.follow_tail  = true
 			sync_tree_selection_from_scroll(inp, node.id_hash, slot.selected_row)
 			apply_scroll_delta(inp, ctx, scroll_idx, slot.max_offset + 1, false)
 			return .Consumed

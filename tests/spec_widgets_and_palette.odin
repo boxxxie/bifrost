@@ -529,3 +529,93 @@ spec_ctrl_p_fuzzy_command_palette_and_shortcut_discovery :: proc(t: ^testing.T) 
 	bifrost.update_command_palette(&palette, &s.input)
 	then.focused_widget_is("workspace_btn")
 }
+
+@(test)
+@(scenario)
+spec_ui_table_million_row_csv_grid_frozen_columns_sort_resize_and_sanitization :: proc(t: ^testing.T) {
+	s := scenario(t, w = 84, h = 16)
+
+	csv_raw :=
+		"DealID,Company,ValuationUSD,Notes\n" +
+		"\"D-101\",\"Alpha, Inc.\",\"$2,500,000\",\"Multiline\nNote\tAlphaVeryLongDescriptionText\"\n" +
+		"\"D-102\",\"Beta Corp\",\"$450,000\",\"Clean Beta\"\n" +
+		"\"D-103\",\"Gamma LLC\",\"$12,000,000\",\"Gamma \"\"Prime\"\" Deal\"\n"
+
+	tbl: bifrost.CSV_Grid_Table
+	bifrost.csv_grid_init_from_bytes(&tbl, transmute([]u8)csv_raw, false, ',', s.alloc)
+	defer bifrost.csv_grid_destroy(&tbl)
+
+	// Scale virtually to 1,000,000 rows (`O(1)` modulo physical rows)
+	bifrost.csv_grid_set_virtual_rows(&tbl, 1_000_000)
+
+	Table_Test_Ctx :: struct {
+		tbl:   ^bifrost.CSV_Grid_Table,
+		slice: bifrost.Virtual_Slice,
+	}
+	t_ctx := Table_Test_Ctx{tbl = &tbl}
+	s.input.action_userdata = &t_ctx
+
+	render_csv_table :: proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen) {
+		sc := current_scenario()
+		tc := (^Table_Test_Ctx)(sc.input.action_userdata)
+
+		if bifrost.container(ctx, "root", {dir = .Column, width = bifrost.fixed(84), height = bifrost.fixed(16)}) {
+			cols := [4]bifrost.Table_Column_Spec{
+				0 = {header = tc.tbl.headers[0], kind = .Fixed, value = 8,  min_width = 6, align = .Left},
+				1 = {header = tc.tbl.headers[1], kind = .Fixed, value = 14, min_width = 8, align = .Left},
+				2 = {header = tc.tbl.headers[2], kind = .Fixed, value = 14, min_width = 8, align = .Right},
+				3 = {header = tc.tbl.headers[3], kind = .Fixed, value = 16, min_width = 8, align = .Left},
+			}
+			total_r := bifrost.csv_grid_visible_row_count(tc.tbl)
+			if bifrost.ui_table(ctx, scr, &sc.input, "csv_grid", cols[:], total_r, {
+				title       = "1M CSV Grid",
+				border      = .Rounded,
+				pinned_cols = 1,
+				sortable    = true,
+				resizable   = true,
+			}, &tc.slice) {
+				if tc.slice.sort_changed {
+					bifrost.csv_grid_set_sort(tc.tbl, tc.slice.sort_col, tc.slice.sort_dir)
+				}
+				fields_buf: [4]string
+				row_cells:  [4]string
+				for r := tc.slice.start_row; r < tc.slice.end_row; r += 1 {
+					n := bifrost.csv_grid_slice_row(tc.tbl, r, fields_buf[:], context.temp_allocator)
+					for c := 0; c < 4; c += 1 {
+						row_cells[c] = fields_buf[c] if (c < n && bifrost.ui_table_is_col_visible(tc.slice, c)) else ""
+					}
+					bifrost.ui_table_row(ctx, scr, r, row_cells[:])
+				}
+			}
+		}
+	}
+
+	// 1. Mount 1,000,000-row table with `pinned_cols = 1`
+	upon.rendering_frame(render_csv_table)
+	then.focused_widget_is("csv_grid")
+	then.table_cursor_and_scroll_are("csv_grid", 0, 0, 0, 0)
+	// Verify `║` freeze divider on header row (y = 1), `╫` on separator row (y = 2), and `…` ellipsis on data row 0 (y = 3)
+	then.row_contains_rune(1, '║', true)
+	then.row_contains_rune(2, '╫', true)
+	then.row_contains_rune(3, '…', true)
+
+	// 2. Navigate to column 2 (`ValuationUSD`) via `l` twice and press `s` to sort ascending (`$450,000` -> `$2,500,000` -> `$12,000,000`)
+	upon.pressing_key(.Rune, {}, 'l')
+	upon.pressing_key(.Rune, {}, 'l')
+	upon.pressing_key(.Rune, {}, 's')
+	upon.rendering_frame(render_csv_table)
+	then.table_cursor_and_scroll_are("csv_grid", 0, 2)
+	then.table_sort_state_is("csv_grid", 2, .Asc)
+	then.row_contains_rune(1, '▲', true)
+
+	// 3. Resize column 2 wider via `+` key (`14 -> 16`)
+	upon.pressing_key(.Rune, {}, '+')
+	upon.rendering_frame(render_csv_table)
+	then.table_col_width_is("csv_grid", 2, 16)
+
+	// 4. Jump to bottom of 1,000,000-row virtual dataset via `End` key in O(1) time
+	upon.pressing_key(.End)
+	upon.rendering_frame(render_csv_table)
+	then.table_cursor_and_scroll_are("csv_grid", 999_999, 2)
+}
+

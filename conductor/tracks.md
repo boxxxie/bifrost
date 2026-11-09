@@ -111,3 +111,8 @@ This file tracks all major tracks for the `bifrost` project. Each track has its 
 
 - [ ] **Track 20: Auto-Scrolling Log Stream Viewer, Table Column Controls & OSC 8 Hyperlinks (`bifrost/log_stream.odin`, `bifrost/scroll.odin`, `bifrost/renderer.odin`)**
   *Link: [./tracks/log_stream_and_table_controls_20261108/](./tracks/log_stream_and_table_controls_20261108/)*
+
+---
+
+- [x] **Track 21: Table UI Enhancements & High-Performance Data Grid (`bifrost/table.odin`, `bifrost/scroll.odin`, `bifrost/csv_grid.odin`)**
+  *Link: [./tracks/table_ui_enhancements_20261109/](./tracks/table_ui_enhancements_20261109/)*

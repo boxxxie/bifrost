@@ -1610,6 +1610,81 @@ then_heimdall_filtered_count_at_least :: proc(
 	)
 }
 
+// =============================================================================
+// Layer 2: Domain-Specific Language (Track 21: 2D Virtualized Table & CSV Grid)
+// =============================================================================
+
+then_table_cursor_and_scroll_are :: proc(
+	s: ^Suite_Ctx,
+	id: string,
+	expected_row: i32,
+	expected_col: i32,
+	expected_offset_y: i32 = -1,
+	expected_offset_x_min: i32 = -1,
+	loc := #caller_location,
+) {
+	testing.expect_value(s.t, bifrost.get_selected_row(&s.input, id), expected_row, loc = loc)
+	testing.expect_value(s.t, bifrost.get_selected_col(&s.input, id), expected_col, loc = loc)
+	if expected_offset_y >= 0 {
+		testing.expect_value(s.t, bifrost.get_scroll_offset(&s.input, id), expected_offset_y, loc = loc)
+	}
+	if expected_offset_x_min >= 0 {
+		actual_x := bifrost.get_scroll_offset_x(&s.input, id)
+		testing.expectf(
+			s.t,
+			actual_x >= expected_offset_x_min,
+			"Expected table %q scroll_offset_x >= %d, got %d",
+			id,
+			expected_offset_x_min,
+			actual_x,
+			loc = loc,
+		)
+	}
+}
+
+then_table_sort_state_is :: proc(
+	s: ^Suite_Ctx,
+	id: string,
+	expected_sort_col: i32,
+	expected_sort_dir: bifrost.Table_Sort_Dir,
+	loc := #caller_location,
+) {
+	slot := bifrost.get_scroll_slot(&s.input, bifrost.hash_id(id))
+	testing.expect_value(s.t, i32(slot.sort_col), expected_sort_col, loc = loc)
+	testing.expect_value(s.t, slot.sort_dir, expected_sort_dir, loc = loc)
+}
+
+then_table_col_width_is :: proc(
+	s: ^Suite_Ctx,
+	id: string,
+	col_idx: int,
+	expected_width: i32,
+	loc := #caller_location,
+) {
+	slot := bifrost.get_scroll_slot(&s.input, bifrost.hash_id(id))
+	testing.expect_value(s.t, i32(slot.col_x_widths[col_idx]), expected_width, loc = loc)
+}
+
+then_row_contains_rune :: proc(
+	s: ^Suite_Ctx,
+	y: i32,
+	expected_rune: rune,
+	expected_present: bool = true,
+	loc := #caller_location,
+) {
+	found := false
+	if y >= 0 && y < s.screen.height {
+		for x: i32 = 0; x < s.screen.width; x += 1 {
+			if s.screen.back[int(y * s.screen.width + x)].ch == expected_rune {
+				found = true
+				break
+			}
+		}
+	}
+	testing.expect_value(s.t, found, expected_present, loc = loc)
+}
+
+
 
 
 

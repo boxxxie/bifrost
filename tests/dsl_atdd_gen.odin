@@ -219,6 +219,10 @@ Suite_Ctx_VTable :: struct {
 	then_heimdall_has_record: proc(s: ^Suite_Ctx, expected_scope: string, expected_name: string, expected_kind: heimdall.Kind, loc := #caller_location),
 	then_heimdall_span_is_child_of: proc(s: ^Suite_Ctx, child_scope: string, child_name: string, parent_scope: string, parent_name: string, loc := #caller_location),
 	then_heimdall_filtered_count_at_least: proc(s: ^Suite_Ctx, min_expected: int, loc := #caller_location),
+	then_table_cursor_and_scroll_are: proc(s: ^Suite_Ctx, id: string, expected_row: i32, expected_col: i32, expected_offset_y: i32 = -1, expected_offset_x_min: i32 = -1, loc := #caller_location),
+	then_table_sort_state_is: proc(s: ^Suite_Ctx, id: string, expected_sort_col: i32, expected_sort_dir: bifrost.Table_Sort_Dir, loc := #caller_location),
+	then_table_col_width_is: proc(s: ^Suite_Ctx, id: string, col_idx: int, expected_width: i32, loc := #caller_location),
+	then_row_contains_rune: proc(s: ^Suite_Ctx, y: i32, expected_rune: rune, expected_present: bool = true, loc := #caller_location),
 }
 
 @(private)
@@ -368,6 +372,10 @@ _suite_ctx_vtable := Suite_Ctx_VTable{
 	then_heimdall_has_record = then_heimdall_has_record,
 	then_heimdall_span_is_child_of = then_heimdall_span_is_child_of,
 	then_heimdall_filtered_count_at_least = then_heimdall_filtered_count_at_least,
+	then_table_cursor_and_scroll_are = then_table_cursor_and_scroll_are,
+	then_table_sort_state_is = then_table_sort_state_is,
+	then_table_col_width_is = then_table_col_width_is,
+	then_row_contains_rune = then_row_contains_rune,
 }
 
 Given_DSL :: struct {
@@ -583,6 +591,10 @@ Then_DSL :: struct {
 	heimdall_has_record: proc(expected_scope: string, expected_name: string, expected_kind: heimdall.Kind, loc := #caller_location),
 	heimdall_span_is_child_of: proc(child_scope: string, child_name: string, parent_scope: string, parent_name: string, loc := #caller_location),
 	heimdall_filtered_count_at_least: proc(min_expected: int, loc := #caller_location),
+	table_cursor_and_scroll_are: proc(id: string, expected_row: i32, expected_col: i32, expected_offset_y: i32 = -1, expected_offset_x_min: i32 = -1, loc := #caller_location),
+	table_sort_state_is: proc(id: string, expected_sort_col: i32, expected_sort_dir: bifrost.Table_Sort_Dir, loc := #caller_location),
+	table_col_width_is: proc(id: string, col_idx: int, expected_width: i32, loc := #caller_location),
+	row_contains_rune: proc(y: i32, expected_rune: rune, expected_present: bool = true, loc := #caller_location),
 }
 
 @(rodata)
@@ -677,6 +689,10 @@ then := Then_DSL{
 	heimdall_has_record = then_heimdall_has_record_ambient,
 	heimdall_span_is_child_of = then_heimdall_span_is_child_of_ambient,
 	heimdall_filtered_count_at_least = then_heimdall_filtered_count_at_least_ambient,
+	table_cursor_and_scroll_are = then_table_cursor_and_scroll_are_ambient,
+	table_sort_state_is = then_table_sort_state_is_ambient,
+	table_col_width_is = then_table_col_width_is_ambient,
+	row_contains_rune = then_row_contains_rune_ambient,
 }
 
 // =============================================================================
@@ -1275,5 +1291,21 @@ then_heimdall_span_is_child_of_ambient :: #force_inline proc(child_scope: string
 
 then_heimdall_filtered_count_at_least_ambient :: #force_inline proc(min_expected: int, loc := #caller_location) {
 	then_heimdall_filtered_count_at_least(current_scenario(loc), min_expected, loc)
+}
+
+then_table_cursor_and_scroll_are_ambient :: #force_inline proc(id: string, expected_row: i32, expected_col: i32, expected_offset_y: i32 = -1, expected_offset_x_min: i32 = -1, loc := #caller_location) {
+	then_table_cursor_and_scroll_are(current_scenario(loc), id, expected_row, expected_col, expected_offset_y, expected_offset_x_min, loc)
+}
+
+then_table_sort_state_is_ambient :: #force_inline proc(id: string, expected_sort_col: i32, expected_sort_dir: bifrost.Table_Sort_Dir, loc := #caller_location) {
+	then_table_sort_state_is(current_scenario(loc), id, expected_sort_col, expected_sort_dir, loc)
+}
+
+then_table_col_width_is_ambient :: #force_inline proc(id: string, col_idx: int, expected_width: i32, loc := #caller_location) {
+	then_table_col_width_is(current_scenario(loc), id, col_idx, expected_width, loc)
+}
+
+then_row_contains_rune_ambient :: #force_inline proc(y: i32, expected_rune: rune, expected_present: bool = true, loc := #caller_location) {
+	then_row_contains_rune(current_scenario(loc), y, expected_rune, expected_present, loc)
 }
 

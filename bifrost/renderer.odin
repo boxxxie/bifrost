@@ -225,6 +225,41 @@ string_display_width :: proc "contextless" (str: string) -> i32 {
 	return total
 }
 
+// Measures single-line display width up to `max_cols`, treating ASCII control bytes (`< 0x20` or `0x7f`)
+// as single spaces and terminating immediately once `width > max_cols` (`O(max_cols)` time).
+string_display_width_bounded :: proc "contextless" (str: string, max_cols: i32) -> (width: i32, truncated: bool) {
+	if max_cols <= 0 || len(str) == 0 {
+		return 0, len(str) > 0
+	}
+	total: i32 = 0
+	idx := 0
+	for idx < len(str) {
+		b := str[idx]
+		if b < 0x20 || b == 0x7f {
+			if b == '\r' && idx + 1 < len(str) && str[idx + 1] == '\n' {
+				idx += 2
+			} else {
+				idx += 1
+			}
+			total += 1
+			if total > max_cols {
+				return max_cols, true
+			}
+			continue
+		}
+		next_idx, w, _ := next_grapheme_cluster(str, idx)
+		idx = next_idx
+		if w <= 0 {
+			continue
+		}
+		if total + w > max_cols {
+			return total, true
+		}
+		total += w
+	}
+	return total, false
+}
+
 // =============================================================================
 // Screen Double-Buffer Lifecycle & Widget Paint Helpers
 // =============================================================================
@@ -825,11 +860,13 @@ render_layout :: proc(s: ^Screen, ctx: ^Layout_Context, temp_alloc := context.te
 
 		t_entry, has_table := s.table_entries[node.id_hash]
 		table_hdr_rows := t_entry.header_rows if has_table else 0
+		h_sb_active := node.config.scrollable && node.content_span[0] > node.inner_rect.w && (node.rect.h > node.inner_rect.h || node.inner_rect.h > table_hdr_rows + 2)
+		h_sb_reserved := i32(1) if (node.config.border == .None && h_sb_active) else 0
 		eff_v_inner := Rect{
 			x = node.inner_rect.x,
 			y = node.inner_rect.y + table_hdr_rows,
 			w = node.inner_rect.w,
-			h = max(0, node.inner_rect.h - table_hdr_rows),
+			h = max(0, node.inner_rect.h - table_hdr_rows - h_sb_reserved),
 		}
 		if node.config.scrollable && node.content_span[1] > eff_v_inner.h && eff_v_inner.h > 0 {
 			sb_fg := paint.border_fg if paint.border_fg.kind != .Default else paint.fg
@@ -845,7 +882,7 @@ render_layout :: proc(s: ^Screen, ctx: ^Layout_Context, temp_alloc := context.te
 			)
 		}
 
-		if node.config.scrollable && node.content_span[0] > node.inner_rect.w {
+		if h_sb_active {
 			sb_fg := paint.border_fg if paint.border_fg.kind != .Default else paint.fg
 			draw_horizontal_scrollbar(
 				s,
@@ -989,7 +1026,9 @@ screen_diff_ansi :: proc(s: ^Screen, out: ^strings.Builder) -> int {
 				continue
 			}
 
-			if prev.width != 1 || next.width != 1 || prev.ch >= 0x2000 || next.ch >= 0x2000 {
+			if prev.width != 1 || next.width != 1 ||
+			   (prev.ch >= 0x2000 && !(prev.ch >= 0x2500 && prev.ch <= 0x259f) && !(prev.ch >= 0x2800 && prev.ch <= 0x28ff)) ||
+			   (next.ch >= 0x2000 && !(next.ch >= 0x2500 && next.ch <= 0x259f) && !(next.ch >= 0x2800 && next.ch <= 0x28ff)) {
 				force_row_flush = true
 			}
 
@@ -1029,8 +1068,8 @@ screen_diff_ansi :: proc(s: ^Screen, out: ^strings.Builder) -> int {
 				cur_y = -1
 				x += 2
 			} else {
-				// Also re-anchor after non-box-drawing astral/symbol glyphs (>= U+2300, excluding 2500..259F & 2800..28FF)
-				if ch >= 0x2300 && !(ch >= 0x2500 && ch <= 0x259f) && !(ch >= 0x2800 && ch <= 0x28ff) {
+				// Also re-anchor after non-box-drawing astral/symbol glyphs (>= U+2026 or >= U+2300, excluding 2500..259F & 2800..28FF)
+				if ch == 0x2026 || (ch >= 0x2300 && !(ch >= 0x2500 && ch <= 0x259f) && !(ch >= 0x2800 && ch <= 0x28ff)) {
 					cur_x = -1
 					cur_y = -1
 				} else {

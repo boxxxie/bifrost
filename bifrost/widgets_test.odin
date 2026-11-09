@@ -283,3 +283,138 @@ test_ui_table_sticky_header_alignment_and_2d_navigation :: proc(t: ^testing.T) {
 	testing.expect_value(t, get_selected_col(&inp, "telemetry_tbl"), 0)
 }
 
+@(test)
+test_ui_table_200_columns_pinned_freeze_divider_sort_resize_and_ellipsis :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	alloc := mem.tracking_allocator(&track)
+	defer {
+		testing.expect_value(t, len(track.allocation_map), 0)
+		testing.expect_value(t, len(track.bad_free_array), 0)
+		mem.tracking_allocator_destroy(&track)
+	}
+	defer free_all(context.temp_allocator)
+
+	ctx: Layout_Context
+	s: Screen
+	err := screen_init(&s, 80, 14, alloc)
+	testing.expect_value(t, err, nil)
+	defer screen_destroy(&s)
+
+	inp := new(Input_State, alloc)
+	defer free(inp, alloc)
+
+	last_slice: Virtual_Slice
+
+	render_wide_table :: proc(ctx: ^Layout_Context, s: ^Screen, inp: ^Input_State, total_rows: i32, out: ^Virtual_Slice) {
+		begin_frame(s)
+		begin_layout(ctx, 80, 14)
+
+		if container(ctx, "root", Box_Config{dir = .Column, width = fixed(80), height = fixed(14)}) {
+			cols: [200]Table_Column_Spec
+			for c := 0; c < 200; c += 1 {
+				cols[c] = Table_Column_Spec{
+					header    = "ID" if c == 0 else ("Name" if c == 1 else "MetricCol"),
+					kind      = .Fixed,
+					value     = 6 if c == 0 else 10,
+					min_width = 4,
+					max_width = 24,
+					align     = .Left,
+				}
+			}
+
+			if ui_table(ctx, s, inp, "wide_tbl", cols[:], total_rows, Table_Config{
+				title       = "Wide 200-Col Grid",
+				border      = .Rounded,
+				pinned_cols = 2,
+				sortable    = true,
+				resizable   = true,
+				follow_tail = true,
+			}, out) {
+				row_cells: [200]string
+				for r := out.start_row; r < out.end_row; r += 1 {
+					for c := 0; c < 200; c += 1 {
+						if !ui_table_is_col_visible(out^, c) {
+							row_cells[c] = ""
+							continue
+						}
+						if c == 0 {
+							row_cells[c] = "R001"
+						} else if c == 1 {
+							row_cells[c] = "Line1\nLine2_VeryLongNameExceeding10Cols"
+						} else {
+							row_cells[c] = "Val_1234567890"
+						}
+					}
+					ui_table_row(ctx, s, r, row_cells[:])
+				}
+			}
+		}
+
+		end_layout(ctx)
+		sync_scroll_viewports(inp, ctx)
+	}
+
+	// Frame 1: Mount 200-column table with 100 rows and `pinned_cols = 2`
+	render_wide_table(&ctx, &s, inp, 100, &last_slice)
+	resolve_input(inp, &ctx, Input_Event(Key_Event{code = .Tab, action = .Press}))
+	apply_input_highlights(&s, &ctx, inp)
+	render_layout(&s, &ctx)
+
+	testing.expect_value(t, last_slice.total_cols, 200)
+	testing.expect_value(t, last_slice.pinned_cols, 2)
+	// Horizontal virtualization must cull off-screen columns (end_col << 200)
+	testing.expect(t, last_slice.start_col == 2, "Expected start_col == 2 after 2 pinned columns")
+	testing.expect(t, last_slice.end_col > 2 && last_slice.end_col < 20, "Expected horizontal column culling (< 20 visible cols)")
+
+	// Verify `║` freeze divider on header row (y = 1) and `╫` on header separator row (y = 2)
+	found_freeze_hdr := false
+	found_freeze_sep := false
+	found_ellipsis   := false
+	for x := 1; x < int(s.width) - 1; x += 1 {
+		if s.back[1 * int(s.width) + x].ch == '║' {
+			found_freeze_hdr = true
+		}
+		if s.back[2 * int(s.width) + x].ch == '╫' {
+			found_freeze_sep = true
+		}
+		if s.back[3 * int(s.width) + x].ch == '…' {
+			found_ellipsis = true
+		}
+	}
+	testing.expect(t, found_freeze_hdr, "Expected '║' freeze divider after pinned columns in header")
+	testing.expect(t, found_freeze_sep, "Expected '╫' freeze junction on header separator row")
+	testing.expect(t, found_ellipsis, "Expected '…' ellipsis truncation on overflowing cell text")
+
+	// Frame 2: Jump to last column (199) via '$' key and verify horizontal auto-scroll (`offset_x > 0`)
+	render_wide_table(&ctx, &s, inp, 100, &last_slice)
+	resolve_input(inp, &ctx, Input_Event(Key_Event{code = .Rune, ch = '$', action = .Press}))
+	apply_input_highlights(&s, &ctx, inp)
+	render_layout(&s, &ctx)
+
+	testing.expect_value(t, get_selected_col(inp, "wide_tbl"), 199)
+	testing.expect(t, get_scroll_offset_x(inp, "wide_tbl") > 1000, "Expected offset_x to scroll to column 199")
+
+	// Frame 3: Jump back to column 0 via '^', then press 's' to cycle sort (`.None -> .Asc`) and '+' to widen col 0
+	render_wide_table(&ctx, &s, inp, 100, &last_slice)
+	resolve_input(inp, &ctx, Input_Event(Key_Event{code = .Rune, ch = '^', action = .Press}))
+	resolve_input(inp, &ctx, Input_Event(Key_Event{code = .Rune, ch = 's', action = .Press}))
+	slot := get_scroll_slot(inp, hash_id("wide_tbl"))
+	old_col0_w := slot.col_x_widths[0]
+	resolve_input(inp, &ctx, Input_Event(Key_Event{code = .Rune, ch = '+', action = .Press}))
+	apply_input_highlights(&s, &ctx, inp)
+	render_layout(&s, &ctx)
+
+	testing.expect_value(t, get_selected_col(inp, "wide_tbl"), 0)
+	testing.expect_value(t, get_scroll_offset_x(inp, "wide_tbl"), 0)
+	testing.expect_value(t, slot.sort_col, 0)
+	testing.expect_value(t, slot.sort_dir, Table_Sort_Dir.Asc)
+	testing.expect_value(t, slot.col_x_widths[0], old_col0_w + 2)
+
+	// Frame 4: Test `follow_tail` auto-scroll when `total_rows` grows from 100 -> 250
+	render_wide_table(&ctx, &s, inp, 250, &last_slice)
+	testing.expect_value(t, get_selected_row(inp, "wide_tbl"), 249)
+	testing.expect_value(t, get_scroll_offset(inp, "wide_tbl"), slot.max_offset)
+}
+
+
