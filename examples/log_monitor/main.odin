@@ -81,6 +81,7 @@ MONITOR_HEIMDALL_PREFIX :: ".tmp/log_monitor_heimdall/seg"
 Monitor_Telemetry_Ctx :: struct {
 	recorder:    heimdall.Recorder,
 	store:       bifrost.Heimdall_Segment_Store,
+	perf:        bifrost.Heimdall_Runtime_Metrics,
 	filter_kind: bifrost.Heimdall_Filter_Kind,
 	scope_buf:   [64]u8,
 	scope_len:   int,
@@ -111,7 +112,7 @@ flush_and_reload_monitor_heimdall :: proc(tctx: ^Monitor_Telemetry_Ctx) {
 		return
 	}
 	heimdall.recorder_flush(&tctx.recorder)
-	_, _ = bifrost.heimdall_store_load_prefix(&tctx.store, MONITOR_HEIMDALL_PREFIX)
+	_, _ = bifrost.heimdall_store_load_prefix_incremental(&tctx.store, MONITOR_HEIMDALL_PREFIX)
 	scope_filter := active_monitor_scope_filter(tctx)
 	if len(scope_filter) > 0 {
 		found := false
@@ -124,14 +125,9 @@ flush_and_reload_monitor_heimdall :: proc(tctx: ^Monitor_Telemetry_Ctx) {
 		if !found {
 			tctx.scope_len = 0
 			scope_filter   = ""
+			_ = bifrost.heimdall_store_apply_filter(&tctx.store, tctx.filter_kind, "", "")
 		}
 	}
-	_ = bifrost.heimdall_store_apply_filter(
-		&tctx.store,
-		tctx.filter_kind,
-		scope_filter,
-		"",
-	)
 }
 
 // =============================================================================
@@ -165,6 +161,7 @@ log_producer_receive :: proc(
 	self: ^actor.Actor(Log_Producer_State, Log_Producer_Msg),
 	msg: ^Log_Producer_Msg,
 ) {
+	defer free_all(context.temp_allocator)
 	state := &self.state
 	if state.shared == nil || state.shared.db == nil || msg == nil {
 		return
@@ -381,12 +378,21 @@ render_log_monitor_frame :: proc(coord: ^bifrost.UI_Coordinator_State) {
 		focus_scope = true,
 	}) {
 		// 1. Top Header Bar
+		tctx_hdr := (^Monitor_Telemetry_Ctx)(coord.user_ptr)
+		if tctx_hdr != nil {
+			bifrost.heimdall_sample_runtime_metrics(&tctx_hdr.perf, u64(coord.total_frames + 1))
+		}
+		fps_val := tctx_hdr.perf.fps if tctx_hdr != nil else 60.0
+		cpu_val := tctx_hdr.perf.cpu_percent if tctx_hdr != nil else 0.0
+		rss_mb  := f64(tctx_hdr.perf.rss_kb) / 1024.0 if tctx_hdr != nil else 0.0
 		mode_str := "PINNED" if coord.pinned_moment else "LIVE STREAM"
 		header_str := fmt.tprintf(
-			" BIFROST LOG & METRICS MONITOR | %s @%d (latest @%d) | Coalesced: %d | Frames: %d",
+			" BIFROST LOG & METRICS MONITOR | %s @%d | %.0f FPS | CPU %.1f%% | RSS %.1fMB | Coalesced: %d | Frames: %d",
 			mode_str,
 			coord.active_moment_idx,
-			coord.latest_moment_idx,
+			fps_val,
+			cpu_val,
+			rss_mb,
 			coord.coalesced_commits,
 			coord.total_frames + 1,
 		)
@@ -582,18 +588,26 @@ render_log_monitor_frame :: proc(coord: ^bifrost.UI_Coordinator_State) {
 			) {
 				switch cur_tab {
 				case 0:
-					// Zero-Copy xitdb Log Stream Slice
-					visible_rows := max(1, int(body_h) - 3)
+					// Zero-Copy xitdb Structured Log Stream Table
+					visible_rows := max(1, int(body_h) - 5)
 					slice := bifrost.ui_coordinator_slice_viewport(coord, "log_stream_pane", visible_rows)
 
+					log_cols := [4]bifrost.Table_Column_Spec{
+						0 = {header = "Key",     kind = .Fixed,        value = 10, min_width = 10, max_width = 12, align = .Left},
+						1 = {header = "Level",   kind = .Fixed,        value = 5,  min_width = 5,  max_width = 6,  align = .Left},
+						2 = {header = "Service", kind = .Auto_Content,             min_width = 11, max_width = 14, align = .Left},
+						3 = {header = "Message", kind = .Fill,         value = 2,  min_width = 16,                 align = .Left},
+					}
+
 					vslice: bifrost.Virtual_Slice
-					if bifrost.ui_virtual_list(
+					if bifrost.ui_table(
 						&coord.layout_ctx,
 						&coord.screen,
 						&coord.input,
 						"log_stream_pane",
+						log_cols[:],
 						i32(slice.total_rows),
-						bifrost.Virtual_List_Config{
+						bifrost.Table_Config{
 							title         = fmt.tprintf("Structured Log Stream (%d total in %s, showing %d)", slice.total_rows, coord.active_collection, len(slice.rows)),
 							width         = bifrost.grow(1),
 							height        = bifrost.grow(1),
@@ -602,6 +616,11 @@ render_log_monitor_frame :: proc(coord: ^bifrost.UI_Coordinator_State) {
 							bg            = panel_bg,
 							border_fg     = bifrost.rgb(75, 95, 125),
 							title_fg      = accent,
+							header_fg     = accent,
+							header_bg     = bar_bg,
+							sep_fg        = bifrost.rgb(75, 95, 125),
+							sel_fg        = bifrost.rgb(255, 240, 150),
+							sel_bg        = bifrost.rgb(42, 56, 82),
 							fallback_rows = i32(visible_rows),
 							focus_flags   = {.Focusable, .Default_Focus},
 						},
@@ -609,35 +628,37 @@ render_log_monitor_frame :: proc(coord: ^bifrost.UI_Coordinator_State) {
 					) {
 						for row_i in 0 ..< len(slice.rows) {
 							rv := slice.rows[row_i]
-							is_sel := int(rv.view_index) == coord.vlist.selected_row
-							row_id := fmt.tprintf("log_row_%d", row_i)
-							row_line := fmt.tprintf(
-								"%s %-10s | %s",
-								"▸" if is_sel else " ",
-								rv.key_text,
-								rv.val_text,
-							)
-
-							row_fg := text_fg
-							if strings.contains(rv.val_text, "ERROR") {
-								row_fg = bifrost.rgb(255, 120, 125)
-							} else if strings.contains(rv.val_text, "WARN") {
-								row_fg = bifrost.rgb(250, 205, 100)
-							} else if is_sel {
-								row_fg = bifrost.rgb(255, 240, 150)
+							lvl_txt := "INFO"
+							svc_txt := ""
+							msg_txt := rv.val_text
+							if p1 := strings.index(rv.val_text, " | "); p1 >= 0 {
+								lvl_txt = strings.trim_space(rv.val_text[:p1])
+								rest    := rv.val_text[p1 + 3:]
+								if p2 := strings.index(rest, " | "); p2 >= 0 {
+									svc_txt = strings.trim_space(rest[:p2])
+									msg_txt = strings.trim_space(rest[p2 + 3:])
+								} else {
+									msg_txt = strings.trim_space(rest)
+								}
 							}
 
-							bifrost.set_paint(&coord.screen, row_id, bifrost.Paint_Spec{
-								text    = row_line,
-								fg      = row_fg,
-								bg      = bifrost.rgb(42, 56, 82) if is_sel else panel_bg,
-								style   = {.Bold} if is_sel else {},
-								fill_bg = true,
-							})
-							bifrost.leaf(&coord.layout_ctx, row_id, 20, 1, bifrost.Box_Config{
-								width  = bifrost.grow(1),
-								height = bifrost.fixed(1),
-							})
+							lvl_fg := bifrost.rgb(130, 230, 165)
+							row_fg := text_fg
+							if lvl_txt == "ERROR" {
+								lvl_fg = bifrost.rgb(255, 120, 125)
+								row_fg = bifrost.rgb(255, 120, 125)
+							} else if lvl_txt == "WARN" {
+								lvl_fg = bifrost.rgb(250, 205, 100)
+								row_fg = bifrost.rgb(250, 205, 100)
+							}
+
+							cells := [4]bifrost.Table_Cell{
+								0 = {text = rv.key_text, fg = accent},
+								1 = {text = lvl_txt,     fg = lvl_fg, style = {.Bold}},
+								2 = {text = svc_txt,     fg = bifrost.rgb(185, 205, 235)},
+								3 = {text = msg_txt,     fg = row_fg},
+							}
+							bifrost.ui_table_row(&coord.layout_ctx, &coord.screen, i32(rv.view_index), cells[:], fg = row_fg)
 						}
 					}
 
@@ -672,7 +693,6 @@ render_log_monitor_frame :: proc(coord: ^bifrost.UI_Coordinator_State) {
 						bifrost.leaf(&coord.layout_ctx, "monitor_hd_summary", 24, 1, bifrost.Box_Config{
 							width  = bifrost.grow(1),
 							height = bifrost.fixed(1),
-							text   = hd_summary,
 						})
 
 						span_durs := bifrost.heimdall_store_extract_span_durations_us(&tctx.store, 32)
@@ -690,14 +710,16 @@ render_log_monitor_frame :: proc(coord: ^bifrost.UI_Coordinator_State) {
 
 						hd_vslice: bifrost.Virtual_Slice
 						total_hd := i32(len(tctx.store.filtered_idxs))
-						hd_rows  := max(i32(4), body_h - 7)
-						if bifrost.ui_virtual_list(
+						hd_rows  := max(i32(4), body_h - 9)
+						hd_cols  := bifrost.heimdall_table_columns(context.temp_allocator)
+						if bifrost.ui_table(
 							&coord.layout_ctx,
 							&coord.screen,
 							&coord.input,
 							"monitor_heimdall_pane",
+							hd_cols,
 							total_hd,
-							bifrost.Virtual_List_Config{
+							bifrost.Table_Config{
 								title         = fmt.tprintf("Heimdall Zero-Copy Arrow IPC Records (%d matching)", total_hd),
 								width         = bifrost.grow(1),
 								height        = bifrost.grow(1),
@@ -706,6 +728,11 @@ render_log_monitor_frame :: proc(coord: ^bifrost.UI_Coordinator_State) {
 								bg            = panel_bg,
 								border_fg     = bifrost.rgb(75, 95, 125),
 								title_fg      = accent,
+								header_fg     = accent,
+								header_bg     = bar_bg,
+								sep_fg        = bifrost.rgb(75, 95, 125),
+								sel_fg        = bifrost.rgb(255, 240, 150),
+								sel_bg        = bifrost.rgb(42, 56, 82),
 								fallback_rows = hd_rows,
 								focus_flags   = {.Focusable, .Default_Focus},
 							},
@@ -716,27 +743,8 @@ render_log_monitor_frame :: proc(coord: ^bifrost.UI_Coordinator_State) {
 								if !rec_ok {
 									continue
 								}
-								is_sel := row_idx == hd_vslice.selected_row
-								row_id := fmt.tprintf("mon_hd_row_%d", row_idx - hd_vslice.start_row)
-								line_str := fmt.tprintf(
-									"%s [%-9.9s] %-18.18s | %-18.18s | %s",
-									"▸" if is_sel else " ",
-									bifrost.heimdall_kind_label(rec.kind),
-									rec.scope,
-									rec.name,
-									bifrost.heimdall_format_record_value(rec),
-								)
-								bifrost.set_paint(&coord.screen, row_id, bifrost.Paint_Spec{
-									text    = line_str,
-									fg      = bifrost.rgb(255, 240, 150) if is_sel else text_fg,
-									bg      = bifrost.rgb(42, 56, 82) if is_sel else panel_bg,
-									style   = {.Bold} if is_sel else {},
-									fill_bg = true,
-								})
-								bifrost.leaf(&coord.layout_ctx, row_id, bifrost.string_display_width(line_str), 1, bifrost.Box_Config{
-									width  = bifrost.grow(1),
-									height = bifrost.fixed(1),
-								})
+								cells := bifrost.heimdall_record_table_cells(rec, context.temp_allocator)
+								bifrost.ui_table_row(&coord.layout_ctx, &coord.screen, row_idx, cells[:])
 							}
 						}
 					}
@@ -977,29 +985,60 @@ run_log_monitor :: proc(live_tty: bool) -> bool {
 		next_seq := 121
 		frame_counter := 0
 		boot_tick := time.tick_now()
+		last_tick := boot_tick
+		target_frame_interval := 33 * time.Millisecond // 30 FPS cap
+		queued_inputs         := make([dynamic]bifrost.Input_Event, 0, 64, context.allocator)
+		defer delete(queued_inputs)
 		for !ui_actor.state.quit_requested {
-			ev, has_ev, _ := bifrost.poll_next_event(&term, 16)
+			elapsed_since_frame := time.tick_diff(last_tick, time.tick_now())
+			wait_ms := max(i32(1), i32((target_frame_interval - elapsed_since_frame) / time.Millisecond))
+			ev, has_ev, _ := bifrost.poll_next_event(&term, wait_ms)
 			if has_ev {
-				actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Input{event = ev}))
+				append(&queued_inputs, ev)
+				for drain := 0; drain < 128; drain += 1 {
+					ev2, has_ev2, _ := bifrost.poll_next_event(&term, 0)
+					if !has_ev2 {
+						break
+					}
+					if m2, is_m2 := ev2.(bifrost.Mouse_Event); is_m2 && (m2.action == .Move || m2.action == .Drag) && len(queued_inputs) > 0 {
+						if m1, is_m1 := queued_inputs[len(queued_inputs) - 1].(bifrost.Mouse_Event); is_m1 && m1.action == m2.action {
+							queued_inputs[len(queued_inputs) - 1] = ev2
+							continue
+						}
+					}
+					append(&queued_inputs, ev2)
+				}
 			}
 
-			// Periodically stream new log batches in the background every ~60 ticks
-			frame_counter += 1
-			if frame_counter % 60 == 0 {
-				actor.send(&sched, producer_pid, Log_Producer_Msg(Log_Batch_Request{
-					start_seq = next_seq,
-					count     = 10,
-					tag_name  = "live-tick",
+			now := time.tick_now()
+			if time.tick_diff(last_tick, now) >= target_frame_interval {
+				last_tick = now
+				for q_ev in queued_inputs {
+					actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Input{event = q_ev}))
+				}
+				clear(&queued_inputs)
+				// Periodically stream new log batches in the background every ~30 ticks (~1s at 30 FPS)
+				frame_counter += 1
+				if frame_counter % 15 == 0 {
+					// 2 Hz HUD heartbeat so FPS / CPU / RSS in the header stay live between log batches
+					ui_actor.state.dirty = true
+				}
+				if frame_counter % 30 == 0 {
+					actor.send(&sched, producer_pid, Log_Producer_Msg(Log_Batch_Request{
+						start_seq = next_seq,
+						count     = 10,
+						tag_name  = "live-tick",
+					}))
+					next_seq += 10
+				}
+
+				actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Frame_Tick{
+					tick_ns = max(1, i64(time.tick_since(boot_tick))),
 				}))
-				next_seq += 10
-			}
-
-			actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Frame_Tick{
-				tick_ns = max(1, i64(time.tick_since(boot_tick))),
-			}))
-			actor.scheduler_wait_idle(&sched)
-			if ui_actor.state.last_ansi_bytes > 0 {
-				_, _ = os.write_string(os.stdout, strings.to_string(ui_actor.state.ansi_builder))
+				actor.scheduler_wait_idle(&sched)
+				if ui_actor.state.last_ansi_bytes > 0 {
+					_, _ = os.write_string(os.stdout, strings.to_string(ui_actor.state.ansi_builder))
+				}
 			}
 			free_all(context.temp_allocator)
 		}

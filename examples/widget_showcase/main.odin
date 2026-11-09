@@ -5,6 +5,7 @@ import "core:math"
 import "core:mem"
 import "core:os"
 import "core:strings"
+import "core:time"
 import "../../bifrost"
 import heimdall "../../deps/heimdall/heimdall"
 
@@ -395,7 +396,7 @@ set_heimdall_scope_filter :: proc(app: ^Showcase_App, scope: string) {
 
 flush_and_reload_showcase_heimdall :: proc(app: ^Showcase_App) {
 	heimdall.recorder_flush(&app.recorder)
-	_, _ = bifrost.heimdall_store_load_prefix(&app.heimdall_store, SHOWCASE_HEIMDALL_PREFIX)
+	_, _ = bifrost.heimdall_store_load_prefix_incremental(&app.heimdall_store, SHOWCASE_HEIMDALL_PREFIX)
 	scope_filter := active_heimdall_scope_filter(app)
 	if len(scope_filter) > 0 {
 		found := false
@@ -408,14 +409,9 @@ flush_and_reload_showcase_heimdall :: proc(app: ^Showcase_App) {
 		if !found {
 			app.heimdall_scope_len = 0
 			scope_filter           = ""
+			_ = bifrost.heimdall_store_apply_filter(&app.heimdall_store, app.heimdall_filter_kind, "", "")
 		}
 	}
-	_ = bifrost.heimdall_store_apply_filter(
-		&app.heimdall_store,
-		app.heimdall_filter_kind,
-		scope_filter,
-		"",
-	)
 }
 
 recompute_telemetry :: proc(app: ^Showcase_App) {
@@ -889,10 +885,9 @@ build_showcase_ui :: proc(app: ^Showcase_App, out_tree_slice: ^bifrost.Tree_Slic
 						style   = {.Bold},
 						fill_bg = true,
 					})
-					bifrost.leaf(&app.layout_ctx, "heimdall_summary_bar", 40, 1, bifrost.Box_Config{
+					bifrost.leaf(&app.layout_ctx, "heimdall_summary_bar", 24, 1, bifrost.Box_Config{
 						width  = bifrost.grow(1),
 						height = bifrost.fixed(1),
-						text   = stats_text,
 					})
 
 					span_durs := bifrost.heimdall_store_extract_span_durations_us(&app.heimdall_store, 32)
@@ -910,14 +905,16 @@ build_showcase_ui :: proc(app: ^Showcase_App, out_tree_slice: ^bifrost.Tree_Slic
 
 					vslice: bifrost.Virtual_Slice
 					total_filtered := i32(len(app.heimdall_store.filtered_idxs))
-					list_rows := max(i32(4), h - 14)
-					if bifrost.ui_virtual_list(
+					list_rows := max(i32(4), h - 15)
+					hd_cols   := bifrost.heimdall_table_columns(context.temp_allocator)
+					if bifrost.ui_table(
 						&app.layout_ctx,
 						&app.screen,
 						&app.input,
 						"heimdall_records_list",
+						hd_cols,
 						total_filtered,
-						bifrost.Virtual_List_Config{
+						bifrost.Table_Config{
 							title         = fmt.tprintf("Heimdall Zero-Copy Arrow IPC Records (%d matching)", total_filtered),
 							width         = bifrost.grow(1),
 							height        = bifrost.grow(1),
@@ -926,6 +923,11 @@ build_showcase_ui :: proc(app: ^Showcase_App, out_tree_slice: ^bifrost.Tree_Slic
 							bg            = pal.bg,
 							border_fg     = pal.border_fg,
 							title_fg      = pal.accent_fg,
+							header_fg     = pal.accent_fg,
+							header_bg     = pal.header_bg,
+							sep_fg        = pal.border_fg,
+							sel_fg        = pal.sel_fg,
+							sel_bg        = pal.sel_bg,
 							fallback_rows = list_rows,
 							focus_flags   = {.Focusable, .Default_Focus},
 						},
@@ -936,27 +938,8 @@ build_showcase_ui :: proc(app: ^Showcase_App, out_tree_slice: ^bifrost.Tree_Slic
 							if !rec_ok {
 								continue
 							}
-							is_sel := row_idx == vslice.selected_row
-							row_id := fmt.tprintf("hd_row_%d", row_idx - vslice.start_row)
-							line_str := fmt.tprintf(
-								"%s [%-9.9s] %-16.16s | %-18.18s | %s",
-								"▸" if is_sel else " ",
-								bifrost.heimdall_kind_label(rec.kind),
-								rec.scope,
-								rec.name,
-								bifrost.heimdall_format_record_value(rec),
-							)
-							bifrost.set_paint(&app.screen, row_id, bifrost.Paint_Spec{
-								text    = line_str,
-								fg      = pal.sel_fg if is_sel else pal.text_fg,
-								bg      = pal.sel_bg if is_sel else pal.bg,
-								style   = {.Bold} if is_sel else {},
-								fill_bg = true,
-							})
-							bifrost.leaf(&app.layout_ctx, row_id, bifrost.string_display_width(line_str), 1, bifrost.Box_Config{
-								width  = bifrost.grow(1),
-								height = bifrost.fixed(1),
-							})
+							cells := bifrost.heimdall_record_table_cells(rec, context.temp_allocator)
+							bifrost.ui_table_row(&app.layout_ctx, &app.screen, row_idx, cells[:])
 						}
 					}
 
@@ -1259,13 +1242,44 @@ run_showcase :: proc(live_tty: bool) -> bool {
 			_, _ = os.write_string(os.stdout, strings.to_string(app.ansi_builder))
 		}
 
+		last_tick := time.tick_now()
+		target_frame_interval := 33 * time.Millisecond // 30 FPS cap
+		pending_ev: bifrost.Input_Event
+		has_pending_ev := false
 		for !app.quit_requested {
-			ev, has_ev, _ := bifrost.poll_next_event(&term, 16)
+			elapsed_since_frame := time.tick_diff(last_tick, time.tick_now())
+			wait_ms := max(i32(1), i32((target_frame_interval - elapsed_since_frame) / time.Millisecond))
+			ev, has_ev, _ := bifrost.poll_next_event(&term, wait_ms)
 			if has_ev {
 				if res_ev, is_res := ev.(bifrost.Resize_Event); is_res {
 					_ = bifrost.screen_resize(&app.screen, max(80, res_ev.width), max(20, res_ev.height))
 				}
-				step_showcase_frame(&app, ev)
+				pending_ev     = ev
+				has_pending_ev = true
+				// Coalesce bursty mouse motion events within the 30 FPS window
+				for drain := 0; drain < 64; drain += 1 {
+					ev2, has_ev2, _ := bifrost.poll_next_event(&term, 0)
+					if !has_ev2 {
+						break
+					}
+					if res_ev2, is_res2 := ev2.(bifrost.Resize_Event); is_res2 {
+						_ = bifrost.screen_resize(&app.screen, max(80, res_ev2.width), max(20, res_ev2.height))
+					}
+					if m2, is_m2 := ev2.(bifrost.Mouse_Event); is_m2 && (m2.action == .Move || m2.action == .Drag) {
+						if m1, is_m1 := pending_ev.(bifrost.Mouse_Event); is_m1 && m1.action == m2.action {
+							pending_ev = ev2
+							continue
+						}
+					}
+					step_showcase_frame(&app, pending_ev)
+					pending_ev = ev2
+				}
+			}
+			now := time.tick_now()
+			if has_pending_ev && time.tick_diff(last_tick, now) >= target_frame_interval {
+				last_tick      = now
+				has_pending_ev = false
+				step_showcase_frame(&app, pending_ev)
 				if strings.builder_len(app.ansi_builder) > 0 {
 					_, _ = os.write_string(os.stdout, strings.to_string(app.ansi_builder))
 				}
