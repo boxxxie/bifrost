@@ -6,6 +6,7 @@ import "core:mem"
 import "core:os"
 import "core:slice"
 import "core:strings"
+import "core:time"
 import oa "../deps/heimdall/deps/OdinArrow/src"
 import "../deps/heimdall/heimdall"
 
@@ -165,7 +166,7 @@ heimdall_format_record_value :: proc(rec: heimdall.Record, allocator := context.
 // 3. Zero-Copy Columnar OdinArrow Segment Store & Filter/Analytics Engine
 // =============================================================================
 
-MAX_HEIMDALL_SEGMENTS :: 64
+MAX_HEIMDALL_SEGMENTS :: 4096
 
 Heimdall_Arrow_Segment :: struct {
 	loaded:   bool,
@@ -184,6 +185,11 @@ Heimdall_Filter_Kind :: enum u8 {
 	Errors_Only,
 }
 
+Heimdall_Op_Stat :: struct {
+	name:  string,
+	count: int,
+}
+
 Heimdall_Scope_Stat :: struct {
 	scope:         string,
 	total_records: int,
@@ -193,6 +199,7 @@ Heimdall_Scope_Stat :: struct {
 	error_count:   int,
 	total_dur_ns:  i64,
 	max_dur_ns:    i64,
+	ops:           [dynamic]Heimdall_Op_Stat,
 }
 
 Heimdall_Span_Tree_Item :: struct {
@@ -206,16 +213,18 @@ Heimdall_Span_Tree_Item :: struct {
 // `Heimdall_Segment_Store.records` and `Heimdall_Scope_Stat.scope` store zero-copy string slices
 // pointing directly into the Arrow IPC `oa.Record_Batch` buffers owned by `store.segments`.
 // Any `heimdall.Record` or `scope` / `name` string slice read from `store` is valid ONLY until
-// the next `heimdall_store_clear_segments`, `heimdall_store_load_prefix`, or `heimdall_store_destroy` call.
+// the next `heimdall_store_clear_segments`, `heimdall_store_load_prefix` (if cleared), or `heimdall_store_destroy` call.
 // Callers persisting a selected scope name or record across reloads MUST copy it into their own buffer.
 Heimdall_Segment_Store :: struct {
 	allocator:       mem.Allocator,
-	segments:        [MAX_HEIMDALL_SEGMENTS]Heimdall_Arrow_Segment,
+	segments:        [dynamic]Heimdall_Arrow_Segment,
 	segment_count:   int,
+	next_seg_idx:    int, // Incremental segment scan cursor so `heimdall_store_load_prefix` only reads newly flushed `.arrow` files
 	records:         [dynamic]heimdall.Record,
 	filtered_idxs:   [dynamic]int,
 	scope_stats:     [dynamic]Heimdall_Scope_Stat,
 	span_tree_items: [dynamic]Heimdall_Span_Tree_Item,
+	cached_tree:     [dynamic]Tree_Node, // Cached `ui_tree` slice rebuilt only when new segments load
 
 	// Aggregate summary counters
 	total_spans:     int,
@@ -246,11 +255,25 @@ heimdall_store_init :: proc(
 	defer if err != nil {
 		heimdall_store_destroy(store)
 	}
+	store.segments        = make([dynamic]Heimdall_Arrow_Segment, 0, 64, allocator) or_return
 	store.records         = make([dynamic]heimdall.Record, 0, 256, allocator) or_return
 	store.filtered_idxs   = make([dynamic]int, 0, 256, allocator) or_return
 	store.scope_stats     = make([dynamic]Heimdall_Scope_Stat, 0, 16, allocator) or_return
 	store.span_tree_items = make([dynamic]Heimdall_Span_Tree_Item, 0, 128, allocator) or_return
+	store.cached_tree     = make([dynamic]Tree_Node, 0, 32, allocator) or_return
 	return nil
+}
+
+@(private)
+heimdall_clear_cached_tree :: proc(store: ^Heimdall_Segment_Store) {
+	if store == nil {
+		return
+	}
+	for n in store.cached_tree {
+		delete(n.id, store.allocator)
+		delete(n.label, store.allocator)
+	}
+	clear(&store.cached_tree)
 }
 
 heimdall_store_clear_segments :: proc(store: ^Heimdall_Segment_Store) {
@@ -261,8 +284,12 @@ heimdall_store_clear_segments :: proc(store: ^Heimdall_Segment_Store) {
 	context.allocator = store.allocator
 	defer context.allocator = prev_alloc
 
-	for i := 0; i < store.segment_count; i += 1 {
-		seg := &store.segments[i]
+	heimdall_clear_cached_tree(store)
+	for &st in store.scope_stats {
+		delete(st.ops)
+	}
+
+	for &seg in store.segments {
 		if seg.loaded {
 			for &b in seg.batches {
 				oa.record_batch_free(&b)
@@ -274,10 +301,12 @@ heimdall_store_clear_segments :: proc(store: ^Heimdall_Segment_Store) {
 				free(seg.schema, store.allocator)
 			}
 			delete(seg.filename, store.allocator)
-			seg^ = {}
+			seg = {}
 		}
 	}
+	clear(&store.segments)
 	store.segment_count   = 0
+	store.next_seg_idx    = 0
 	store.total_spans     = 0
 	store.total_counters  = 0
 	store.total_gauges    = 0
@@ -296,10 +325,12 @@ heimdall_store_destroy :: proc(store: ^Heimdall_Segment_Store) {
 		return
 	}
 	heimdall_store_clear_segments(store)
+	delete(store.cached_tree)
 	delete(store.span_tree_items)
 	delete(store.scope_stats)
 	delete(store.filtered_idxs)
 	delete(store.records)
+	delete(store.segments)
 	store^ = {}
 }
 
@@ -310,7 +341,7 @@ heimdall_store_load_file :: proc(
 	filename: string,
 	rebuild_tree: bool = true,
 ) -> (rows_loaded: int, ok: bool) {
-	if store == nil || store.segment_count >= MAX_HEIMDALL_SEGMENTS || len(filename) == 0 {
+	if store == nil || len(filename) == 0 {
 		return 0, false
 	}
 	if !os.exists(filename) {
@@ -376,15 +407,26 @@ heimdall_store_load_file :: proc(
 	if c_err != nil {
 		cloned_name = ""
 	}
-	store.segments[store.segment_count] = Heimdall_Arrow_Segment{
+	if _, seg_err := append(&store.segments, Heimdall_Arrow_Segment{
 		loaded   = true,
 		filename = cloned_name,
 		schema   = sc,
 		batches  = batches,
 		readers  = readers,
 		row_cnt  = seg_rows,
+	}); seg_err != nil {
+		delete(cloned_name, store.allocator)
+		for &b in batches {
+			oa.record_batch_free(&b)
+		}
+		delete(batches, store.allocator)
+		delete(readers, store.allocator)
+		oa.schema_free(sc)
+		free(sc, store.allocator)
+		return 0, false
 	}
-	store.segment_count += 1
+	store.segment_count = len(store.segments)
+	heimdall_clear_cached_tree(store)
 	if rebuild_tree {
 		heimdall_rebuild_span_tree(store)
 	}
@@ -397,18 +439,21 @@ heimdall_store_load_file :: proc(
 heimdall_store_load_prefix :: proc(
 	store: ^Heimdall_Segment_Store,
 	file_prefix: string,
-	max_segments: int = MAX_HEIMDALL_SEGMENTS,
+	max_segments: int = 0,
 ) -> (segments_loaded: int, total_rows: int) {
 	if store == nil || len(file_prefix) == 0 {
 		return 0, 0
 	}
 	heimdall_store_clear_segments(store)
-	limit := clamp(max_segments, 1, MAX_HEIMDALL_SEGMENTS)
+	limit := max_segments > 0 ? max_segments : 1_000_000
 	name_buf: [512]u8
 	for seg_idx := 0; seg_idx < limit; seg_idx += 1 {
 		fname := fmt.bprintf(name_buf[:], "%s_%06d.arrow", file_prefix, seg_idx)
 		if !os.exists(fname) {
 			if segments_loaded > 0 {
+				break
+			}
+			if max_segments <= 0 && seg_idx >= MAX_HEIMDALL_SEGMENTS {
 				break
 			}
 			continue
@@ -417,12 +462,53 @@ heimdall_store_load_prefix :: proc(
 		if ok {
 			segments_loaded += 1
 			total_rows += rows
+			store.next_seg_idx = seg_idx + 1
 		}
 	}
 	if segments_loaded > 0 {
 		heimdall_rebuild_span_tree(store)
 	}
 	return segments_loaded, total_rows
+}
+
+// Incrementally loads only newly flushed `<file_prefix>_NNNNNN.arrow` segment files starting
+// at `store.next_seg_idx`, avoiding tearing down and re-parsing already loaded segments when
+// flushing repeatedly at high frequency. Falls back to `heimdall_store_load_prefix` if the first
+// loaded segment was rotated/deleted on disk.
+heimdall_store_load_prefix_incremental :: proc(
+	store: ^Heimdall_Segment_Store,
+	file_prefix: string,
+	max_segments: int = 0,
+) -> (new_segments: int, total_rows: int) {
+	if store == nil || len(file_prefix) == 0 {
+		return 0, 0
+	}
+	if len(store.segments) == 0 {
+		return heimdall_store_load_prefix(store, file_prefix, max_segments)
+	}
+	if !os.exists(store.segments[0].filename) {
+		return heimdall_store_load_prefix(store, file_prefix, max_segments)
+	}
+
+	limit := max_segments > 0 ? max_segments : 1_000_000
+	name_buf: [512]u8
+	for len(store.segments) < limit {
+		fname := fmt.bprintf(name_buf[:], "%s_%06d.arrow", file_prefix, store.next_seg_idx)
+		if !os.exists(fname) {
+			break
+		}
+		rows, ok := heimdall_store_load_file(store, fname, rebuild_tree = false)
+		store.next_seg_idx += 1
+		if ok {
+			new_segments += 1
+		} else {
+			_ = rows
+		}
+	}
+	if new_segments > 0 {
+		heimdall_rebuild_span_tree(store)
+	}
+	return new_segments, len(store.records)
 }
 
 @(private)
@@ -456,7 +542,11 @@ heimdall_accumulate_record_stats :: proc(store: ^Heimdall_Segment_Store, rec: he
 	}
 	if found_idx < 0 {
 		found_idx = len(store.scope_stats)
-		append(&store.scope_stats, Heimdall_Scope_Stat{scope = rec.scope})
+		ops_dyn := make([dynamic]Heimdall_Op_Stat, 0, 8, store.allocator)
+		append(&store.scope_stats, Heimdall_Scope_Stat{
+			scope = rec.scope,
+			ops   = ops_dyn,
+		})
 	}
 	stat := &store.scope_stats[found_idx]
 	stat.total_records += 1
@@ -474,6 +564,19 @@ heimdall_accumulate_record_stats :: proc(store: ^Heimdall_Segment_Store, rec: he
 		stat.metric_count += 1
 	case .Event:
 		stat.event_count += 1
+	}
+
+	op_idx := -1
+	for op, idx in stat.ops {
+		if op.name == rec.name {
+			op_idx = idx
+			break
+		}
+	}
+	if op_idx < 0 {
+		append(&stat.ops, Heimdall_Op_Stat{name = rec.name, count = 1})
+	} else {
+		stat.ops[op_idx].count += 1
 	}
 }
 
@@ -872,7 +975,8 @@ heimdall_free_scope_tree :: proc(nodes: []Tree_Node, allocator := context.alloca
 }
 
 // Builds a flattened `[]Tree_Node` hierarchy (Scopes at depth 0 -> Operations at depth 1) onto `allocator`
-// suitable for passing directly to `ui_tree`. Runs in a single O(N) pass over `store.records`.
+// suitable for passing directly to `ui_tree`. Uses the pre-aggregated `stat.ops` per scope in O(Scopes + Ops)
+// time (independent of `len(store.records)`).
 // When called with a general heap allocator (rather than `context.temp_allocator`), free with `heimdall_free_scope_tree`.
 heimdall_store_build_scope_tree :: proc(
 	store: ^Heimdall_Segment_Store,
@@ -881,38 +985,20 @@ heimdall_store_build_scope_tree :: proc(
 	if store == nil || len(store.scope_stats) == 0 {
 		return nil
 	}
-	// Group operation counts per scope in a single O(N) pass over `store.records`
-	scope_ops := make(map[string]map[string]int, len(store.scope_stats), allocator)
-	defer {
-		for _, ops_map in scope_ops {
-			delete(ops_map)
-		}
-		delete(scope_ops)
-	}
-	for rec in store.records {
-		ops_map, exists := scope_ops[rec.scope]
-		if !exists {
-			ops_map = make(map[string]int, 8, allocator)
-		}
-		ops_map[rec.name] += 1
-		scope_ops[rec.scope] = ops_map
-	}
 
 	nodes := make([dynamic]Tree_Node, 0, len(store.scope_stats) * 4, allocator)
 	for stat in store.scope_stats {
-		children := make([dynamic]Tree_Node, 0, 8, allocator)
+		children := make([dynamic]Tree_Node, 0, max(4, len(stat.ops)), allocator)
 		defer delete(children)
-		if seen_names, ok := scope_ops[stat.scope]; ok {
-			for op_name, cnt in seen_names {
-				child_id := fmt.aprintf("hm_op_%s_%s", stat.scope, op_name, allocator = allocator)
-				child_lbl := fmt.aprintf("%s (%d)", op_name, cnt, allocator = allocator)
-				append(&children, Tree_Node{
-					id         = child_id,
-					label      = child_lbl,
-					depth      = 1,
-					parent_idx = -1,
-				})
-			}
+		for op in stat.ops {
+			child_id := fmt.aprintf("hm_op_%s_%s", stat.scope, op.name, allocator = allocator)
+			child_lbl := fmt.aprintf("%s (%d)", op.name, op.count, allocator = allocator)
+			append(&children, Tree_Node{
+				id         = child_id,
+				label      = child_lbl,
+				depth      = 1,
+				parent_idx = -1,
+			})
 		}
 		// Sort child operations alphabetically for deterministic tree rendering
 		slice.sort_by(children[:], proc(a, b: Tree_Node) -> bool {
@@ -943,3 +1029,394 @@ heimdall_store_build_scope_tree :: proc(
 	}
 	return nodes[:]
 }
+
+// Returns a cached `[]Tree_Node` slice owned by `store.cached_tree`, rebuilding it only when
+// new segments have been loaded since the last call. Zero per-frame allocations during rendering.
+heimdall_store_get_cached_scope_tree :: proc(store: ^Heimdall_Segment_Store) -> []Tree_Node {
+	if store == nil || len(store.scope_stats) == 0 {
+		return nil
+	}
+	if len(store.cached_tree) > 0 {
+		return store.cached_tree[:]
+	}
+	built := heimdall_store_build_scope_tree(store, store.allocator)
+	for n in built {
+		append(&store.cached_tree, n)
+	}
+	delete(built, store.allocator)
+	return store.cached_tree[:]
+}
+
+// =============================================================================
+// 4. Runtime Performance & Process Resource Monitor (FPS, CPU %, RSS / Heap MB)
+// =============================================================================
+
+Heimdall_Runtime_Metrics :: struct {
+	last_sample_tick: time.Tick,
+	last_cpu_jiffies: u64,
+	last_frame_count: u64,
+	fps:              f32,
+	frame_time_us:    int,
+	cpu_percent:      f32,
+	rss_kb:           i64,
+	heap_bytes:       i64,
+	peak_heap_bytes:  i64,
+}
+
+@(private)
+heimdall_parse_leading_int :: proc "contextless" (s: string) -> (val: i64, ok: bool) {
+	started := false
+	for i := 0; i < len(s); i += 1 {
+		c := s[i]
+		if c >= '0' && c <= '9' {
+			val = val * 10 + i64(c - '0')
+			started = true
+		} else if started {
+			break
+		}
+	}
+	return val, started
+}
+
+// Samples `/proc/self/stat` (user + system CPU jiffies) and `/proc/self/status` (`VmRSS`) on Linux,
+// along with smoothed FPS, latest `flush_frame` duration in microseconds, and optional `Tracking_Allocator` heap usage.
+// Throttles `/proc` reads to at most once every `min_interval_ms` (default 250ms) so calling every frame is O(1).
+heimdall_sample_runtime_metrics :: proc(
+	m: ^Heimdall_Runtime_Metrics,
+	total_frames: u64,
+	latest_frame_dur_ns: i64 = 0,
+	track: ^mem.Tracking_Allocator = nil,
+	min_interval_ms: i64 = 200,
+) {
+	if m == nil {
+		return
+	}
+	if latest_frame_dur_ns > 0 {
+		m.frame_time_us = int((latest_frame_dur_ns + 500) / 1000)
+	}
+	if track != nil {
+		m.heap_bytes      = track.current_memory_allocated
+		m.peak_heap_bytes = track.peak_memory_allocated
+	}
+
+	now := time.tick_now()
+	if m.last_sample_tick._nsec == 0 {
+		m.last_sample_tick = now
+		m.last_frame_count = total_frames
+		m.fps              = 0.0
+	} else {
+		elapsed_ns := i64(time.tick_diff(m.last_sample_tick, now))
+		if elapsed_ns < min_interval_ms * 1_000_000 {
+			return
+		}
+		elapsed_s := f32(elapsed_ns) / 1e9
+		if elapsed_s > 0.001 {
+			df := total_frames - m.last_frame_count if total_frames >= m.last_frame_count else 0
+			inst_fps := f32(df) / elapsed_s
+			m.fps = m.fps * 0.5 + inst_fps * 0.5
+			if m.fps < 0.05 {
+				m.fps = 0.0
+			}
+		}
+		m.last_sample_tick = now
+		m.last_frame_count = total_frames
+
+		// Sample `/proc/self/stat` for utime (field 14) + stime (field 15) in 100Hz clock ticks
+		if stat_bytes, s_err := os.read_entire_file("/proc/self/stat", context.temp_allocator); s_err == nil {
+			stat_str := string(stat_bytes)
+			if rparen := strings.last_index_byte(stat_str, ')'); rparen >= 0 && rparen + 2 < len(stat_str) {
+				rest := stat_str[rparen + 2:]
+				field_idx := 3 // field 3 is state ('R'/'S') immediately after ") "
+				utime_j: i64 = 0
+				stime_j: i64 = 0
+				tok_start := 0
+				for i := 0; i <= len(rest); i += 1 {
+					if i == len(rest) || rest[i] == ' ' {
+						if i > tok_start {
+							tok := rest[tok_start:i]
+							if field_idx == 14 {
+								utime_j, _ = heimdall_parse_leading_int(tok)
+							} else if field_idx == 15 {
+								stime_j, _ = heimdall_parse_leading_int(tok)
+								break
+							}
+							field_idx += 1
+						}
+						tok_start = i + 1
+					}
+				}
+				total_j := u64(max(i64(0), utime_j + stime_j))
+				if m.last_cpu_jiffies > 0 && total_j >= m.last_cpu_jiffies && elapsed_s > 0.001 {
+					dj := f32(total_j - m.last_cpu_jiffies)
+					// Linux USER_HZ is 100 jiffies/sec -> (dj / 100.0) / elapsed_s * 100.0 == dj / elapsed_s
+					inst_cpu := clamp(dj / elapsed_s, 0.0, 800.0)
+					m.cpu_percent = m.cpu_percent * 0.4 + inst_cpu * 0.6
+					if m.cpu_percent < 0.05 {
+						m.cpu_percent = 0.0
+					}
+				}
+				m.last_cpu_jiffies = total_j
+			}
+		}
+	}
+
+	// Sample `/proc/self/status` for `VmRSS:` (resident set size in KB)
+	if status_bytes, st_err := os.read_entire_file("/proc/self/status", context.temp_allocator); st_err == nil {
+		status_str := string(status_bytes)
+		if idx := strings.index(status_str, "VmRSS:"); idx >= 0 {
+			line_rest := status_str[idx + 6:]
+			if nl := strings.index_byte(line_rest, '\n'); nl >= 0 {
+				line_rest = line_rest[:nl]
+			}
+			if rss, ok := heimdall_parse_leading_int(line_rest); ok && rss > 0 {
+				m.rss_kb = rss
+			}
+		}
+	}
+}
+
+// =============================================================================
+// Declarative `ui_table` Column Presets & Row Cell Builders for Heimdall Records
+// =============================================================================
+
+@(rodata)
+HEIMDALL_TABLE_COLUMNS := [7]Table_Column_Spec{
+	0 = {header = "Kind",      kind = .Fixed,        value = 7, min_width = 7, max_width = 9,  align = .Left},
+	1 = {header = "St",        kind = .Fixed,        value = 2, min_width = 2, max_width = 3,  align = .Center},
+	2 = {header = "Scope",     kind = .Auto_Content,            min_width = 11, max_width = 20, align = .Left},
+	3 = {header = "Operation", kind = .Fill,         value = 2, min_width = 11,                 align = .Left},
+	4 = {header = "Span",      kind = .Fixed,        value = 5, min_width = 5, max_width = 7,  align = .Right},
+	5 = {header = "Dur/Val",   kind = .Fixed,        value = 7, min_width = 7, max_width = 9,  align = .Right},
+	6 = {header = "Attr",      kind = .Fixed,        value = 4, min_width = 4, max_width = 6,  align = .Right},
+}
+
+@(rodata)
+HEIMDALL_INSPECTOR_TABLE_COLUMNS := [9]Table_Column_Spec{
+	0 = {header = "#",         kind = .Fixed,        value = 4, min_width = 4, max_width = 4,  align = .Right},
+	1 = {header = "Kind",      kind = .Fixed,        value = 7, min_width = 7, max_width = 9,  align = .Left},
+	2 = {header = "St",        kind = .Fixed,        value = 2, min_width = 2, max_width = 3,  align = .Center},
+	3 = {header = "Scope",     kind = .Auto_Content,            min_width = 11, max_width = 17, align = .Left},
+	4 = {header = "Operation", kind = .Fill,         value = 2, min_width = 11,                 align = .Left},
+	5 = {header = "Span",      kind = .Fixed,        value = 5, min_width = 5, max_width = 7,  align = .Right},
+	6 = {header = "Time",      kind = .Fixed,        value = 7, min_width = 7, max_width = 7,  align = .Right},
+	7 = {header = "Dur/Val",   kind = .Fixed,        value = 7, min_width = 7, max_width = 9,  align = .Right},
+	8 = {header = "Attr",      kind = .Fixed,        value = 4, min_width = 4, max_width = 6,  align = .Right},
+}
+
+heimdall_kind_color :: proc "contextless" (kind: heimdall.Kind) -> Color {
+	switch kind {
+	case .Span:      return rgb(125, 205, 255)
+	case .Counter:   return rgb(140, 230, 170)
+	case .Gauge:     return rgb(255, 205, 115)
+	case .Histogram: return rgb(215, 165, 255)
+	case .Event:     return rgb(255, 165, 145)
+	}
+	return rgb(200, 210, 225)
+}
+
+heimdall_status_color :: proc "contextless" (status: heimdall.Status) -> Color {
+	return rgb(255, 120, 120) if status == .Error else rgb(135, 225, 165)
+}
+
+heimdall_table_columns :: proc(alloc := context.temp_allocator) -> []Table_Column_Spec {
+	cols := make([]Table_Column_Spec, len(HEIMDALL_TABLE_COLUMNS), alloc)
+	for i in 0 ..< len(HEIMDALL_TABLE_COLUMNS) {
+		cols[i] = HEIMDALL_TABLE_COLUMNS[i]
+	}
+	return cols
+}
+
+heimdall_inspector_table_columns :: proc(alloc := context.temp_allocator) -> []Table_Column_Spec {
+	cols := make([]Table_Column_Spec, len(HEIMDALL_INSPECTOR_TABLE_COLUMNS), alloc)
+	for i in 0 ..< len(HEIMDALL_INSPECTOR_TABLE_COLUMNS) {
+		cols[i] = HEIMDALL_INSPECTOR_TABLE_COLUMNS[i]
+	}
+	return cols
+}
+
+// Formats a `heimdall.Record` into 7 aligned `Table_Cell` columns (`HEIMDALL_TABLE_COLUMNS`)
+// for `log_monitor` and `widget_showcase`.
+heimdall_record_table_cells :: proc(rec: heimdall.Record, alloc := context.temp_allocator) -> [7]Table_Cell {
+	span_str := "—"
+	val_str  := "—"
+	switch rec.kind {
+	case .Span:
+		dur_us := max(i64(0), rec.duration_ns) / 1000
+		span_str = fmt.aprintf("%02d<%02d", rec.span_id % 100, rec.parent_id % 100, allocator = alloc)
+		val_str  = fmt.aprintf("%dus", dur_us, allocator = alloc)
+	case .Counter, .Gauge, .Histogram:
+		if rec.value_f64 == f64(i64(rec.value_f64)) {
+			val_str = fmt.aprintf("%d", i64(rec.value_f64), allocator = alloc)
+		} else {
+			val_str = fmt.aprintf("%.1f", rec.value_f64, allocator = alloc)
+		}
+	case .Event:
+		val_str = "event"
+	}
+	attr_str := fmt.aprintf("%d", rec.attr_i64, allocator = alloc)
+
+	return [7]Table_Cell{
+		0 = {text = heimdall_kind_label(rec.kind), fg = heimdall_kind_color(rec.kind), style = {.Bold}},
+		1 = {text = heimdall_status_label(rec.status), fg = heimdall_status_color(rec.status)},
+		2 = {text = rec.scope},
+		3 = {text = rec.name},
+		4 = {text = span_str},
+		5 = {text = val_str},
+		6 = {text = attr_str},
+	}
+}
+
+// Formats a `heimdall.Record` into 9 aligned `Table_Cell` columns (`HEIMDALL_INSPECTOR_TABLE_COLUMNS`)
+// for `heimdall_inspector`.
+heimdall_inspector_record_cells :: proc(
+	row_idx: i32,
+	rec: heimdall.Record,
+	alloc := context.temp_allocator,
+) -> [9]Table_Cell {
+	base := heimdall_record_table_cells(rec, alloc)
+	ts_ms := (max(i64(0), rec.timestamp_ns) / 1_000_000) % 100_000
+	idx_str := fmt.aprintf("%04d", row_idx, allocator = alloc)
+	ts_str  := fmt.aprintf("+%05dms", ts_ms, allocator = alloc)
+
+	return [9]Table_Cell{
+		0 = {text = idx_str},
+		1 = base[0],
+		2 = base[1],
+		3 = base[2],
+		4 = base[3],
+		5 = base[4],
+		6 = {text = ts_str},
+		7 = base[5],
+		8 = base[6],
+	}
+}
+
+@(rodata)
+HEIMDALL_WATERFALL_TABLE_COLUMNS := [8]Table_Column_Spec{
+	0 = {header = "#",                        kind = .Fixed,        value = 4, min_width = 4, max_width = 4,  align = .Right},
+	1 = {header = "St",                       kind = .Fixed,        value = 2, min_width = 2, max_width = 3,  align = .Center},
+	2 = {header = "Scope",                    kind = .Auto_Content,            min_width = 11, max_width = 18, align = .Left},
+	3 = {header = "Span Hierarchy (Call Tree)", kind = .Fill,       value = 2, min_width = 18,                 align = .Left},
+	4 = {header = "Span",                     kind = .Fixed,        value = 5, min_width = 5, max_width = 7,  align = .Right},
+	5 = {header = "Dur",                      kind = .Fixed,        value = 7, min_width = 7, max_width = 9,  align = .Right},
+	6 = {header = "Heat",                     kind = .Fixed,        value = 8, min_width = 8, max_width = 8,  align = .Left},
+	7 = {header = "Kids",                     kind = .Fixed,        value = 4, min_width = 4, max_width = 4,  align = .Right},
+}
+
+@(rodata)
+HEIMDALL_SCOPE_STATS_TABLE_COLUMNS := [8]Table_Column_Spec{
+	0 = {header = "Scope",     kind = .Fill,  value = 2, min_width = 16,                align = .Left},
+	1 = {header = "Records",   kind = .Fixed, value = 7, min_width = 7, max_width = 8,  align = .Right},
+	2 = {header = "Spans",     kind = .Fixed, value = 6, min_width = 6, max_width = 7,  align = .Right},
+	3 = {header = "Metrics",   kind = .Fixed, value = 7, min_width = 7, max_width = 8,  align = .Right},
+	4 = {header = "Events",    kind = .Fixed, value = 6, min_width = 6, max_width = 7,  align = .Right},
+	5 = {header = "Errs",      kind = .Fixed, value = 4, min_width = 4, max_width = 5,  align = .Right},
+	6 = {header = "Avg us",    kind = .Fixed, value = 8, min_width = 8, max_width = 9,  align = .Right},
+	7 = {header = "Max us",    kind = .Fixed, value = 8, min_width = 8, max_width = 9,  align = .Right},
+}
+
+heimdall_waterfall_table_columns :: proc(alloc := context.temp_allocator) -> []Table_Column_Spec {
+	cols := make([]Table_Column_Spec, len(HEIMDALL_WATERFALL_TABLE_COLUMNS), alloc)
+	for i in 0 ..< len(HEIMDALL_WATERFALL_TABLE_COLUMNS) {
+		cols[i] = HEIMDALL_WATERFALL_TABLE_COLUMNS[i]
+	}
+	return cols
+}
+
+heimdall_scope_stats_table_columns :: proc(alloc := context.temp_allocator) -> []Table_Column_Spec {
+	cols := make([]Table_Column_Spec, len(HEIMDALL_SCOPE_STATS_TABLE_COLUMNS), alloc)
+	for i in 0 ..< len(HEIMDALL_SCOPE_STATS_TABLE_COLUMNS) {
+		cols[i] = HEIMDALL_SCOPE_STATS_TABLE_COLUMNS[i]
+	}
+	return cols
+}
+
+// Formats a `Heimdall_Span_Tree_Item` into 8 aligned `Table_Cell` columns (`HEIMDALL_WATERFALL_TABLE_COLUMNS`)
+// with indented tree connectors (`├─ `, `│  `) and proportional latency heatbar (`████░░░░`).
+heimdall_waterfall_row_cells :: proc(
+	row_idx: i32,
+	item: Heimdall_Span_Tree_Item,
+	max_dur_ns: i64,
+	alloc := context.temp_allocator,
+) -> [8]Table_Cell {
+	rec := item.record
+	idx_str  := fmt.aprintf("%04d", row_idx, allocator = alloc)
+	span_str := fmt.aprintf("%02d<%02d", rec.span_id % 100, rec.parent_id % 100, allocator = alloc)
+	dur_us   := max(i64(0), rec.duration_ns) / 1000
+	dur_str  := fmt.aprintf("%dus", dur_us, allocator = alloc)
+	kids_str := fmt.aprintf("%d", item.child_cnt, allocator = alloc)
+
+	// Indented call-tree label
+	tree_b := strings.builder_make(0, 32, alloc)
+	clamped_depth := clamp(item.depth, 0, 8)
+	for d := 0; d < clamped_depth; d += 1 {
+		if d + 1 == clamped_depth {
+			strings.write_string(&tree_b, "├─ ")
+		} else {
+			strings.write_string(&tree_b, "│  ")
+		}
+	}
+	if item.child_cnt > 0 {
+		strings.write_string(&tree_b, "▾ ")
+	} else if clamped_depth == 0 {
+		strings.write_string(&tree_b, "• ")
+	}
+	strings.write_string(&tree_b, rec.name)
+
+	// 8-cell proportional latency heat bar (`█` vs `░`)
+	denom := max(i64(1), max_dur_ns)
+	clamped_dur := max(i64(0), rec.duration_ns)
+	filled := int((clamped_dur * 8 + denom - 1) / denom)
+	if clamped_dur > 0 {
+		filled = clamp(filled, 1, 8)
+	} else {
+		filled = 0
+	}
+	heat_b := strings.builder_make(0, 24, alloc)
+	for i := 0; i < 8; i += 1 {
+		strings.write_rune(&heat_b, '█' if i < filled else '░')
+	}
+	heat_fg := rgb(125, 225, 165)
+	if filled >= 7 {
+		heat_fg = rgb(255, 125, 125)
+	} else if filled >= 4 {
+		heat_fg = rgb(255, 205, 110)
+	}
+
+	return [8]Table_Cell{
+		0 = {text = idx_str},
+		1 = {text = heimdall_status_label(rec.status), fg = heimdall_status_color(rec.status)},
+		2 = {text = rec.scope},
+		3 = {text = strings.to_string(tree_b), fg = rgb(140, 215, 255) if item.depth == 0 else rgb(215, 225, 240), style = {.Bold} if item.depth == 0 else {}},
+		4 = {text = span_str},
+		5 = {text = dur_str, fg = heat_fg},
+		6 = {text = strings.to_string(heat_b), fg = heat_fg},
+		7 = {text = kids_str},
+	}
+}
+
+// Formats a `Heimdall_Scope_Stat` into 8 aligned `Table_Cell` columns (`HEIMDALL_SCOPE_STATS_TABLE_COLUMNS`).
+heimdall_scope_stat_row_cells :: proc(
+	stat: Heimdall_Scope_Stat,
+	alloc := context.temp_allocator,
+) -> [8]Table_Cell {
+	avg_us: i64 = 0
+	if stat.span_count > 0 {
+		avg_us = (stat.total_dur_ns / i64(stat.span_count)) / 1000
+	}
+	max_us := stat.max_dur_ns / 1000
+
+	err_fg := rgb(255, 120, 120) if stat.error_count > 0 else rgb(135, 225, 165)
+	return [8]Table_Cell{
+		0 = {text = stat.scope, fg = rgb(130, 205, 255), style = {.Bold}},
+		1 = {text = fmt.aprintf("%d", stat.total_records, allocator = alloc)},
+		2 = {text = fmt.aprintf("%d", stat.span_count, allocator = alloc), fg = heimdall_kind_color(.Span)},
+		3 = {text = fmt.aprintf("%d", stat.metric_count, allocator = alloc), fg = heimdall_kind_color(.Gauge)},
+		4 = {text = fmt.aprintf("%d", stat.event_count, allocator = alloc), fg = heimdall_kind_color(.Event)},
+		5 = {text = fmt.aprintf("%d", stat.error_count, allocator = alloc), fg = err_fg},
+		6 = {text = fmt.aprintf("%dus", avg_us, allocator = alloc)},
+		7 = {text = fmt.aprintf("%dus", max_us, allocator = alloc), fg = rgb(255, 205, 115) if max_us >= 250 else Color{}},
+	}
+}
+
+

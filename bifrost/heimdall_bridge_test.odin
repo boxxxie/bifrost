@@ -337,8 +337,29 @@ test_heimdall_default_recorder_fallback :: proc(t: ^testing.T) {
 	testing.expect_value(t, heimdall_store_init(&store, context.allocator), nil)
 	defer heimdall_store_destroy(&store)
 
-	seg_cnt, total_rows := heimdall_store_load_prefix(&store, prefix)
+	seg_cnt, total_rows := heimdall_store_load_prefix_incremental(&store, prefix)
 	testing.expect(t, seg_cnt >= 1)
 	testing.expect(t, total_rows >= 5)
 	testing.expect(t, len(store.records) >= 5)
+
+	cached_tree_1 := heimdall_store_get_cached_scope_tree(&store)
+	testing.expect(t, len(cached_tree_1) >= 2)
+
+	// Emit a second segment and verify incremental load appends only the new segment and refreshes the cached scope tree
+	begin_frame(&scr)
+	begin_layout(&ctx, 60, 16)
+	if container(&ctx, "root", Box_Config{width = fixed(60), height = fixed(16)}) {
+		_ = ui_button(&ctx, &scr, "btn_ok", Button_Spec{label = "Confirm"})
+	}
+	end_layout(&ctx)
+	render_layout(&scr, &ctx)
+	heimdall.recorder_flush(&rec)
+
+	new_segs_2, total_rows_2 := heimdall_store_load_prefix_incremental(&store, prefix)
+	testing.expect_value(t, new_segs_2, 1)
+	testing.expect(t, store.segment_count > seg_cnt)
+	testing.expect(t, total_rows_2 > total_rows)
+
+	cached_tree_2 := heimdall_store_get_cached_scope_tree(&store)
+	testing.expect(t, len(cached_tree_2) >= len(cached_tree_1))
 }

@@ -14,8 +14,8 @@ import xitdb "../deps/xitdb/xitdb"
 
 Actor_System :: actor.Scheduler
 
-DEFAULT_FRAME_INTERVAL     :: 16 * time.Millisecond
-DEFAULT_MIN_FRAME_DURATION :: 4 * time.Millisecond
+DEFAULT_FRAME_INTERVAL     :: 33 * time.Millisecond // ~30 FPS default frame-pacing cap
+DEFAULT_MIN_FRAME_DURATION :: 33 * time.Millisecond // ~30 FPS cap during interactive input/mouse bursts
 DEFAULT_MAX_COALESCE_BATCH :: 2048
 DEFAULT_SCROLL_OVERSCAN    :: 4
 

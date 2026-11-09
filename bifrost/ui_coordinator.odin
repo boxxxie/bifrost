@@ -661,7 +661,7 @@ ui_reduce_single_msg :: proc(state: ^UI_Coordinator_State, msg: UI_Msg) -> (is_t
 		} else if m.button == 5 || m.action == .Scroll_Down {
 			btn = .Wheel_Down
 		}
-		append(&state.pending_inputs, Input_Event(Mouse_Event{
+		mev := Input_Event(Mouse_Event{
 			x      = m.x,
 			y      = m.y,
 			col    = i16(m.x),
@@ -669,11 +669,24 @@ ui_reduce_single_msg :: proc(state: ^UI_Coordinator_State, msg: UI_Msg) -> (is_t
 			action = m.action,
 			button = btn,
 			mods   = mods,
-		}))
+		})
+		if (m.action == .Move || m.action == .Drag) && len(state.pending_inputs) > 0 {
+			if prev_m, is_m := state.pending_inputs[len(state.pending_inputs) - 1].(Mouse_Event); is_m && prev_m.action == m.action {
+				state.pending_inputs[len(state.pending_inputs) - 1] = mev
+				break
+			}
+		}
+		append(&state.pending_inputs, mev)
 
 	case UI_Msg_Input:
 		state.dirty = true
 		state.urgent_input = true
+		if mev, is_m := m.event.(Mouse_Event); is_m && (mev.action == .Move || mev.action == .Drag) && len(state.pending_inputs) > 0 {
+			if prev_m, was_m := state.pending_inputs[len(state.pending_inputs) - 1].(Mouse_Event); was_m && prev_m.action == mev.action {
+				state.pending_inputs[len(state.pending_inputs) - 1] = m.event
+				break
+			}
+		}
 		append(&state.pending_inputs, m.event)
 		#partial switch ev in m.event {
 		case Resize_Event:
@@ -1104,6 +1117,7 @@ ui_post_resolve_step :: proc(state: ^UI_Coordinator_State) -> (mutated: bool) {
 }
 
 ui_coordinator_flush_frame :: proc(state: ^UI_Coordinator_State) {
+	free_all(context.temp_allocator)
 	state.screen.recorder     = state.recorder
 	state.layout_ctx.recorder = state.recorder
 	state.input.recorder      = state.recorder
