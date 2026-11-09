@@ -971,6 +971,7 @@ apply_input_highlights :: proc(s: ^Screen, ctx: ^Layout_Context, inp: ^Input_Sta
 	}
 
 	refresh_dynamic_bars(s, ctx, inp)
+	sync_table_highlights(s, inp)
 }
 
 
@@ -1494,11 +1495,14 @@ handle_mouse_event :: proc(inp: ^Input_State, ctx: ^Layout_Context, capture_idx:
 							break
 						}
 						slot := get_scroll_slot(inp, v_node.id_hash)
-						rel_y := ev.y - v_node.inner_rect.y
-						if rel_y >= 0 && rel_y < v_node.inner_rect.h {
+						hdr_h := i32(slot.header_rows)
+						rel_y := ev.y - v_node.inner_rect.y - hdr_h
+						if rel_y >= 0 && rel_y < v_node.inner_rect.h - hdr_h {
 							slot.selected_row = clamp(slot.offset + rel_y, 0, max(0, slot.total_rows - 1))
 						}
-						select_virtual_col_at_x(slot, v_node.inner_rect, ev.x)
+						if ev.y >= v_node.inner_rect.y && ev.y < v_node.inner_rect.y + v_node.inner_rect.h {
+							select_virtual_col_at_x(slot, v_node.inner_rect, ev.x)
+						}
 						break
 					}
 					if v_node.out_of_flow {

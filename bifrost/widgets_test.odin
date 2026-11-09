@@ -187,3 +187,99 @@ test_fuzzy_command_palette_scoring_and_shortcut_formatting :: proc(t: ^testing.T
 	testing.expect_value(t, cp.match_count, 1)
 	testing.expect_value(t, cp.commands[cp.matches[0].item_idx].action, "inspect_btree")
 }
+
+@(test)
+test_ui_table_sticky_header_alignment_and_2d_navigation :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	alloc := mem.tracking_allocator(&track)
+	defer {
+		testing.expect_value(t, len(track.allocation_map), 0)
+		testing.expect_value(t, len(track.bad_free_array), 0)
+		mem.tracking_allocator_destroy(&track)
+	}
+	defer free_all(context.temp_allocator)
+
+	ctx: Layout_Context
+	s: Screen
+	err := screen_init(&s, 60, 12, alloc)
+	testing.expect_value(t, err, nil)
+	defer screen_destroy(&s)
+
+	inp: Input_State
+
+	render_table_frame :: proc(ctx: ^Layout_Context, s: ^Screen, inp: ^Input_State) {
+		begin_frame(s)
+		begin_layout(ctx, 60, 12)
+
+		if container(ctx, "root", Box_Config{dir = .Column, width = fixed(60), height = fixed(12)}) {
+			cols := [3]Table_Column_Spec{
+				0 = {header = "Kind",      kind = .Fixed, value = 7, min_width = 7, align = .Left},
+				1 = {header = "Operation", kind = .Fill,  value = 1, min_width = 8, align = .Left},
+				2 = {header = "Dur/Val",   kind = .Fixed, value = 7, min_width = 7, align = .Right},
+			}
+			v_slice: Virtual_Slice
+			if ui_table(ctx, s, inp, "telemetry_tbl", cols[:], 4, Table_Config{
+				title  = "Telemetry",
+				border = .Rounded,
+			}, &v_slice) {
+				rows := [4][3]Table_Cell{
+					0 = {{text = "SPAN"},    {text = "end_layout"},    {text = "112us"}},
+					1 = {{text = "GAUGE"},   {text = "layout_nodes"},  {text = "42"}},
+					2 = {{text = "COUNTER"}, {text = "input_events"},  {text = "1"}},
+					3 = {{text = "EVENT"},   {text = "frame_flushed"}, {text = "event"}},
+				}
+				for r := v_slice.start_row; r < v_slice.end_row; r += 1 {
+					r_cells := rows[r]
+					ui_table_row(ctx, s, r, r_cells[:])
+				}
+			}
+		}
+
+		end_layout(ctx)
+		sync_scroll_viewports(inp, ctx)
+	}
+
+	// Frame 1: Initial mount & render (focus telemetry_tbl on first Tab)
+	render_table_frame(&ctx, &s, &inp)
+	resolve_input(&inp, &ctx, Input_Event(Key_Event{code = .Tab, action = .Press}))
+	apply_input_highlights(&s, &ctx, &inp)
+	render_layout(&s, &ctx)
+
+	testing.expect_value(t, get_selected_row(&inp, "telemetry_tbl"), 0)
+	testing.expect_value(t, get_selected_col(&inp, "telemetry_tbl"), 0)
+
+	// Sticky header is at y = 1 (inside top border y = 0), separator is at y = 2 ('├' ... '┼' ... '┤')
+	testing.expect_value(t, s.back[2 * int(s.width) + 0].ch, '├')
+	testing.expect_value(t, s.back[2 * int(s.width) + int(s.width) - 1].ch, '┤')
+
+	// Frame 2: Press 'j' (row 0 -> 1) and 'l' (col 0 -> 1)
+	render_table_frame(&ctx, &s, &inp)
+	resolve_input(&inp, &ctx, Input_Event(Key_Event{code = .Rune, ch = 'j', action = .Press}))
+	resolve_input(&inp, &ctx, Input_Event(Key_Event{code = .Rune, ch = 'l', action = .Press}))
+	apply_input_highlights(&s, &ctx, &inp)
+	render_layout(&s, &ctx)
+
+	testing.expect_value(t, get_selected_row(&inp, "telemetry_tbl"), 1)
+	testing.expect_value(t, get_selected_col(&inp, "telemetry_tbl"), 1)
+
+	// Frame 3: Mouse click on sticky header row (y = 1) at right-hand column (x = 52)
+	// Updates selected_col to 2 without changing selected_row (remains 1)
+	render_table_frame(&ctx, &s, &inp)
+	resolve_input(&inp, &ctx, Input_Event(Mouse_Event{action = .Press, button = .Left, x = 52, y = 1}))
+	apply_input_highlights(&s, &ctx, &inp)
+	render_layout(&s, &ctx)
+
+	testing.expect_value(t, get_selected_row(&inp, "telemetry_tbl"), 1)
+	testing.expect_value(t, get_selected_col(&inp, "telemetry_tbl"), 2)
+
+	// Frame 4: Mouse click on data row 2 (y = 1 + 2 header rows + 2 = 5) at first column (x = 3)
+	render_table_frame(&ctx, &s, &inp)
+	resolve_input(&inp, &ctx, Input_Event(Mouse_Event{action = .Press, button = .Left, x = 3, y = 5}))
+	apply_input_highlights(&s, &ctx, &inp)
+	render_layout(&s, &ctx)
+
+	testing.expect_value(t, get_selected_row(&inp, "telemetry_tbl"), 2)
+	testing.expect_value(t, get_selected_col(&inp, "telemetry_tbl"), 0)
+}
+

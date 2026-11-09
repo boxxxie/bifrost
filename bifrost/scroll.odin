@@ -48,6 +48,8 @@ ui_virtual_list :: proc(
 	if slot.viewport_rows <= 0 {
 		slot.viewport_rows = cfg.fallback_rows if cfg.fallback_rows > 0 else 10
 	}
+	slot.header_rows    = 0
+	slot.col_spec_count = 0
 	slot.total_rows     = max(0, total_rows)
 	slot.total_cols     = max(1, cfg.total_cols)
 	slot.max_offset     = max(0, slot.total_rows - slot.viewport_rows)
@@ -263,6 +265,7 @@ resolve_table_columns :: proc "contextless" (
 		case .Fill:
 			weight := spec.value if spec.value > 0 else spec.fill_weight
 			total_weight += max(1, weight)
+			w = min_w
 		}
 
 		out_spans[i] = Table_Column_Span{
@@ -272,6 +275,47 @@ resolve_table_columns :: proc "contextless" (
 	}
 
 	// Pass 2: Distribute remaining space across Fill columns
+	min_fill_w: i32 = 0
+	for i := 0; i < count; i += 1 {
+		if specs[i].kind == .Fill {
+			min_fill_w += max(1, specs[i].min_width)
+		}
+	}
+
+	// If Fixed + Auto_Content columns leave less than `min_fill_w` for Fill columns,
+	// proportionally compress Fixed/Auto_Content columns down toward their `min_width`
+	// so every column remains visible before horizontal clipping occurs.
+	if total_weight > 0 && used_w + min_fill_w > avail_w {
+		deficit := (used_w + min_fill_w) - avail_w
+		for pass := 0; pass < 4 && deficit > 0; pass += 1 {
+			shrinkable := 0
+			for i := 0; i < count; i += 1 {
+				if specs[i].kind != .Fill {
+					min_c := max(1, min(specs[i].min_width, out_spans[i].width))
+					if out_spans[i].width > min_c {
+						shrinkable += 1
+					}
+				}
+			}
+			if shrinkable == 0 {
+				break
+			}
+			step := max(1, deficit / i32(shrinkable))
+			for i := 0; i < count && deficit > 0; i += 1 {
+				if specs[i].kind != .Fill {
+					min_c := max(1, min(specs[i].min_width, out_spans[i].width))
+					avail_cut := out_spans[i].width - min_c
+					if avail_cut > 0 {
+						cut := min(avail_cut, min(step, deficit))
+						out_spans[i].width -= cut
+						used_w             -= cut
+						deficit            -= cut
+					}
+				}
+			}
+		}
+	}
+
 	rem_w := max(0, avail_w - used_w)
 	if total_weight > 0 && rem_w > 0 {
 		distributed: i32 = 0
@@ -522,7 +566,13 @@ Scroll_Slot :: struct {
 	selected_col:    i32, // Highlighted cursor column index inside 2D virtual tables
 	total_cols:      i32, // Logical column count (> 1 enables h/l column stepping)
 	scroll_padding:  i32, // Lookahead padding rows maintained above/below selected_row
-	col_x_starts:    [MAX_TABLE_COLS]i16, // Relative x start of each column inside inner_rect
+	header_rows:     u8,  // Sticky header rows (0 for lists, 1..2 for `ui_table`)
+	col_spec_count:  u8,  // Declarative column count registered by `ui_table`
+	col_gutter_w:    i8,  // Left selection gutter width registered by `ui_table`
+	col_spacing:     i8,  // Inter-column spacing registered by `ui_table`
+	col_specs:       [MAX_TABLE_COLS]Table_Column_Spec,
+	col_max_observed: [MAX_TABLE_COLS]i16, // Monotonic high-water-mark widths per column
+	col_x_starts:    [MAX_TABLE_COLS]i16, // Relative/screen x start of each column
 	col_x_widths:    [MAX_TABLE_COLS]i16, // Cell width of each column
 	col_span_count:  u8,                  // Number of registered table column spans
 	col_spans_screen_space: bool,         // True when col_x_starts are in screen-space coordinates
@@ -712,12 +762,35 @@ sync_scroll_viewports :: proc "contextless" (inp: ^Input_State, ctx: ^Layout_Con
 			continue
 		}
 		slot := get_scroll_slot(inp, node.id_hash)
-		slot.viewport_rows   = max(1, node.inner_rect.h)
+		hdr_h := i32(slot.header_rows)
+		slot.viewport_rows   = max(1, node.inner_rect.h - hdr_h)
 		slot.viewport_cols   = max(1, node.inner_rect.w)
 		slot.total_rows      = node.content_span[1]
 		slot.total_content_w = node.content_span[0]
 		slot.max_offset      = max(0, slot.total_rows - slot.viewport_rows)
 		slot.max_offset_x    = max(0, slot.total_content_w - slot.viewport_cols)
+
+		if slot.col_spec_count > 0 && node.inner_rect.w > 0 {
+			cnt := int(min(slot.col_spec_count, MAX_TABLE_COLS))
+			spans_buf: [MAX_TABLE_COLS]Table_Column_Span
+			avail_rect := node.inner_rect
+			if slot.total_rows > slot.viewport_rows && node.config.border == .None && avail_rect.w > 2 {
+				avail_rect.w -= 1
+			}
+			resolved := int(resolve_table_columns(
+				slot.col_specs[:cnt],
+				spans_buf[:cnt],
+				avail_rect,
+				i32(slot.col_gutter_w),
+				i32(slot.col_spacing),
+			))
+			slot.col_span_count         = u8(resolved)
+			slot.col_spans_screen_space = true
+			for c := 0; c < resolved; c += 1 {
+				slot.col_x_starts[c] = i16(clamp(spans_buf[c].x, 0, 32767))
+				slot.col_x_widths[c] = i16(clamp(spans_buf[c].width, 1, 32767))
+			}
+		}
 
 		if node.config.virtual_total_rows == 0 {
 			was_consecutive := slot.last_layout_gen > 0 && ctx.layout_gen >= slot.last_layout_gen

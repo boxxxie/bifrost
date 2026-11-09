@@ -128,17 +128,19 @@ ANSI_16_DARK_TO_256 := [8]u8{
 }
 
 Screen :: struct {
-	width:          i32,
-	height:         i32,
-	front:          []Cell,
-	back:           []Cell,
-	paints:         map[u64]Paint_Spec,
-	text_areas:     map[u64]^Text_Area_State,
-	dynamic_bars:   [dynamic]Dynamic_Bar_Entry,
-	canvas_entries: map[u64]Canvas_Render_Entry,
-	first_frame:    bool,
-	allocator:      mem.Allocator,
-	recorder:       ^heimdall.Recorder,
+	width:           i32,
+	height:          i32,
+	front:           []Cell,
+	back:            []Cell,
+	paints:          map[u64]Paint_Spec,
+	text_areas:      map[u64]^Text_Area_State,
+	dynamic_bars:    [dynamic]Dynamic_Bar_Entry,
+	canvas_entries:  map[u64]Canvas_Render_Entry,
+	table_entries:   map[u64]Table_Render_Entry,
+	active_table_id: u64,
+	first_frame:     bool,
+	allocator:       mem.Allocator,
+	recorder:        ^heimdall.Recorder,
 }
 
 // =============================================================================
@@ -268,10 +270,12 @@ begin_frame :: proc(s: ^Screen, default_bg: Color = {}, temp_alloc := context.te
 	for i in 0 ..< len(s.back) {
 		s.back[i] = clear_cell
 	}
-	s.paints         = make(map[u64]Paint_Spec, 128, temp_alloc)
-	s.text_areas     = make(map[u64]^Text_Area_State, 8, temp_alloc)
-	s.dynamic_bars   = make([dynamic]Dynamic_Bar_Entry, 0, 8, temp_alloc)
-	s.canvas_entries = make(map[u64]Canvas_Render_Entry, 16, temp_alloc)
+	s.paints          = make(map[u64]Paint_Spec, 128, temp_alloc)
+	s.text_areas      = make(map[u64]^Text_Area_State, 8, temp_alloc)
+	s.dynamic_bars    = make([dynamic]Dynamic_Bar_Entry, 0, 8, temp_alloc)
+	s.canvas_entries  = make(map[u64]Canvas_Render_Entry, 16, temp_alloc)
+	s.table_entries   = make(map[u64]Table_Render_Entry, 8, temp_alloc)
+	s.active_table_id = 0
 }
 
 set_paint :: proc(s: ^Screen, id: string, spec: Paint_Spec) {
@@ -819,12 +823,20 @@ render_layout :: proc(s: ^Screen, ctx: ^Layout_Context, temp_alloc := context.te
 			}
 		}
 
-		if node.config.scrollable && node.content_span[1] > node.inner_rect.h {
+		t_entry, has_table := s.table_entries[node.id_hash]
+		table_hdr_rows := t_entry.header_rows if has_table else 0
+		eff_v_inner := Rect{
+			x = node.inner_rect.x,
+			y = node.inner_rect.y + table_hdr_rows,
+			w = node.inner_rect.w,
+			h = max(0, node.inner_rect.h - table_hdr_rows),
+		}
+		if node.config.scrollable && node.content_span[1] > eff_v_inner.h && eff_v_inner.h > 0 {
 			sb_fg := paint.border_fg if paint.border_fg.kind != .Default else paint.fg
 			draw_vertical_scrollbar(
 				s,
 				node.rect,
-				node.inner_rect,
+				eff_v_inner,
 				node_clip,
 				node.config.scroll_offset,
 				node.content_span[1],
@@ -892,6 +904,9 @@ render_layout :: proc(s: ^Screen, ctx: ^Layout_Context, temp_alloc := context.te
 
 			if c_entry, has_canvas := s.canvas_entries[node.id_hash]; has_canvas {
 				render_canvas_entry(s, node, paint, c_entry, temp_alloc)
+			}
+			if has_table {
+				render_table_entry(s, node, paint, t_entry)
 			}
 		}
 

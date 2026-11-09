@@ -616,6 +616,8 @@ ui_tree :: proc(
 	}
 	prev_total_rows := s_slot.total_rows
 	prev_sel_row    := s_slot.selected_row
+	s_slot.header_rows    = 0
+	s_slot.col_spec_count = 0
 	s_slot.total_rows     = t_slot.total_visible_rows
 	s_slot.total_cols     = 1
 	s_slot.max_offset     = max(0, s_slot.total_rows - s_slot.viewport_rows)
