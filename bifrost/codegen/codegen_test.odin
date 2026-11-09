@@ -415,3 +415,73 @@ spec_impure_layer1_scenario :: proc(t: ^testing.T) {
 	testing.expect(t, !broken_ok)
 	testing.expect_value(t, len(syntax_diags), 2)
 }
+
+@(test)
+test_opt_in_temp_allocator_hygiene_linter_catches_missing_free_all :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	context.allocator = mem.tracking_allocator(&track)
+	defer {
+		free_all(context.temp_allocator)
+		testing.expect_value(t, len(track.allocation_map), 0)
+		testing.expect_value(t, len(track.bad_free_array), 0)
+		mem.tracking_allocator_destroy(&track)
+	}
+
+	// 1. Clean actor receive (delegating to a flush helper that calls `free_all(context.temp_allocator)`)
+	//    and clean `poll_next_event` loop must pass with 0 diagnostics.
+	clean_src :: `package sample_lint
+
+import "core:fmt"
+
+flush_ui_frame :: proc() {
+	free_all(context.temp_allocator)
+	_ = fmt.tprintf("frame_ok")
+}
+
+ui_actor_receive :: proc(ctx: ^actor.Context, self: ^actor.Actor(UI_State, UI_Msg), msg: ^UI_Msg) {
+	flush_ui_frame()
+}
+
+run_loop :: proc() {
+	for {
+		ev, ok, _ := bifrost.poll_next_event(&term, 33)
+		_ = ev
+		_ = ok
+		free_all(context.temp_allocator)
+	}
+}
+`
+	clean_diags := make([dynamic]Codegen_Diagnostic)
+	defer destroy_diagnostics(&clean_diags)
+	testing.expect(t, check_temp_allocator_hygiene_sources({clean_src}, {"clean.odin"}, &clean_diags))
+	testing.expect_value(t, len(clean_diags), 0)
+
+	// 2. Leaky actor receive (using `fmt.tprintf` without `free_all(context.temp_allocator)`)
+	//    and leaky `poll_next_event` loop must both be caught with exact file:line diagnostics.
+	leaky_src :: `package sample_lint
+
+import "core:fmt"
+
+leaky_worker_receive :: proc(ctx: ^actor.Context, self: ^actor.Actor(Worker_State, Worker_Msg), msg: ^Worker_Msg) {
+	s := fmt.tprintf("msg=%v", msg)
+	_ = s
+}
+
+leaky_tty_loop :: proc() {
+	for !quit {
+		ev, ok, _ := bifrost.poll_next_event(&term, 33)
+		_ = ev
+		_ = ok
+	}
+}
+`
+	leaky_diags := make([dynamic]Codegen_Diagnostic)
+	defer destroy_diagnostics(&leaky_diags)
+	testing.expect(t, !check_temp_allocator_hygiene_sources({leaky_src}, {"leaky.odin"}, &leaky_diags))
+	testing.expect_value(t, len(leaky_diags), 2)
+	if len(leaky_diags) == 2 {
+		testing.expect(t, strings.contains(leaky_diags[0].message, "leaky_tty_loop"))
+		testing.expect(t, strings.contains(leaky_diags[1].message, "leaky_worker_receive"))
+	}
+}

@@ -308,6 +308,24 @@ on_move_left :: proc(app: ^App_State) {
 
 Running `odin run tools/bifrost_gen -- my_app` validates all chord strings at compile time (reporting `file(line:col)` diagnostics on invalid chords or duplicate scope conflicts) and emits `my_app/ui_actions_gen.odin` with `init_app_state_keymap_and_palette(&inp, &cp)` and an FNV-1a switch dispatcher `dispatch_ui_actions(&app, &inp)`. Compile packages using custom attributes with `-custom-attribute:ui_actions,ui_action,ui_scope`.
 
+### Opt-In AST `temp_allocator` Hygiene Linter (`--lint-temp`)
+
+Because Odin's `context.temp_allocator` is a thread-local arena per OS thread (`main` thread and Sleipnir worker pool threads), any long-lived interactive event loop (`poll_next_event` / `poll_terminal_event`) or Sleipnir actor `receive :: proc(state: ^S, msg: M, ctx: actor.Actor_Context)` callback that allocates temporary strings or layout nodes (`fmt.tprintf`, `begin_layout`, etc.) without resetting `context.temp_allocator` will steadily grow resident memory (`VmRSS`).
+
+ Note: Bifrost's built-in `ui_coordinator_flush_frame` already calls `free_all(context.temp_allocator)` at the start of every frame on the UI actor's worker thread, so standard UI coordinators are protected automatically.
+
+For custom actors and event loops, `tools/bifrost_gen` includes an **opt-in** static AST linter (`--lint-temp`, backed by `codegen.check_temp_allocator_hygiene_directory` / `codegen.check_temp_allocator_hygiene_sources`):
+
+```bash
+odin run tools/bifrost_gen -- --lint-temp bifrost examples/heimdall_inspector examples/log_monitor
+```
+
+* **Why Opt-In (`--lint-temp`):** Automatic `free_all(context.temp_allocator)` inside generic actor runtimes can surprise developers who intentionally cache `fmt.tprintf` slices across messages on a single-actor thread, and running the lint on every codegen pass could flag one-shot test loops. Keeping `--lint-temp` explicit lets you run it in CI or during memory audits without unexpected behavior.
+* **What It Checks (`core:odin/parser` AST walk):**
+  1. **Interactive Event Loops:** Any `for` loop calling `poll_next_event` or `poll_terminal_event` coupled with per-frame `context.temp_allocator` allocations (`tprintf`, `begin_layout`, `ui_coordinator_flush_frame`, etc.) must call `free_all(context.temp_allocator)` inside the loop body (or in an enclosing outer event loop).
+  2. **Sleipnir Actor `receive` Callbacks:** Any 3-parameter procedure whose final parameter is `actor.Actor_Context` (`proc(state: ^S, msg: M, ctx: actor.Actor_Context)`) that performs temporary allocations must either call `free_all(context.temp_allocator)` directly or delegate to `ui_coordinator_flush_frame` / `ui_coordinator_receive`.
+* **Suppressing Intentional Cases (`@(no_temp_lint)`):** Annotate a procedure with `@(no_temp_lint)` (and pass `-custom-attribute:no_temp_lint` to `odin`) to silence the check when a procedure intentionally manages its own temp lifetime.
+
 ---
 
 ## 6. Contextual Breadcrumb, Hint Bar & Which-Key Overlay

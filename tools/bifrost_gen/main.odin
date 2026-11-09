@@ -12,9 +12,15 @@
 //      RAII `scenario(t, ...)` constructors, `s->step(...)` vtables, and `given.*` /
 //      `upon.*` / `then.*` ambient DSL namespaces.
 //
+//   3. Opt-In `temp_allocator` Hygiene Linter (`--lint-temp` — disabled by default):
+//      Audits `.odin` files in one or more package directories for `poll_next_event`
+//      loops or Sleipnir actor `receive` callbacks that allocate on `temp_allocator`
+//      without resetting `free_all(context.temp_allocator)`.
+//
 // Usage:
 //   odin run tools/bifrost_gen -- <package_dir> [<package_dir2> ...]
 //   odin run tools/bifrost_gen -- --atdd <tests_dir>
+//   odin run tools/bifrost_gen -- --lint-temp <package_dir> [<package_dir2> ...]
 // =============================================================================
 
 package main
@@ -25,18 +31,26 @@ import "core:os"
 
 main :: proc() {
 	if len(os.args) < 2 {
-		fmt.eprintln("Usage: odin run tools/bifrost_gen -- [--atdd] <package_dir> [<package_dir2> ...]")
+		fmt.eprintln("Usage: odin run tools/bifrost_gen -- [--atdd | --lint-temp] <package_dir> [<package_dir2> ...]")
 		os.exit(1)
 	}
 
-	atdd_mode := false
+	atdd_mode      := false
+	lint_temp_mode := false
 	args := os.args[1:]
-	if len(args) > 0 && args[0] == "--atdd" {
-		atdd_mode = true
-		args = args[1:]
+	for len(args) > 0 {
+		if args[0] == "--atdd" {
+			atdd_mode = true
+			args = args[1:]
+		} else if args[0] == "--lint-temp" {
+			lint_temp_mode = true
+			args = args[1:]
+		} else {
+			break
+		}
 	}
 	if len(args) == 0 {
-		fmt.eprintln("Usage: odin run tools/bifrost_gen -- [--atdd] <package_dir> [<package_dir2> ...]")
+		fmt.eprintln("Usage: odin run tools/bifrost_gen -- [--atdd | --lint-temp] <package_dir> [<package_dir2> ...]")
 		os.exit(1)
 	}
 
@@ -44,7 +58,9 @@ main :: proc() {
 		diags := make([dynamic]codegen.Codegen_Diagnostic)
 		out_path: string
 		ok: bool
-		if atdd_mode {
+		if lint_temp_mode {
+			ok = codegen.check_temp_allocator_hygiene_directory(target_dir, &diags)
+		} else if atdd_mode {
 			out_path, ok = codegen.generate_atdd_directory(target_dir, "dsl_atdd_gen.odin", &diags)
 		} else {
 			out_path, ok = codegen.generate_directory(target_dir, "ui_actions_gen.odin", &diags)
@@ -61,11 +77,14 @@ main :: proc() {
 			os.exit(1)
 		}
 		codegen.destroy_diagnostics(&diags)
-		if atdd_mode {
+		if lint_temp_mode {
+			fmt.printfln("Verified temp_allocator hygiene -> %s (OK)", target_dir)
+		} else if atdd_mode {
 			fmt.printfln("Generated Bifrost ATDD DSL -> %s", out_path)
+			delete(out_path)
 		} else {
 			fmt.printfln("Generated Bifrost UI actions -> %s", out_path)
+			delete(out_path)
 		}
-		delete(out_path)
 	}
 }

@@ -128,13 +128,17 @@ main :: proc() {
 odin test bifrost -custom-attribute:telemetry_schema -vet -strict-style -vet-packages:bifrost
 
 # AST keymap & ATDD code generator tests
-odin test bifrost/codegen -vet -strict-style
+odin test bifrost/codegen -custom-attribute:ui_actions,ui_action,ui_scope,telemetry_schema,no_temp_lint -vet -strict-style
 
 # 4-layer ATDD executable specifications (@(scenario) + in-memory VT verification)
 odin test tests -custom-attribute:scenario,telemetry_schema -vet -strict-style -vet-packages:bifrost,bifrost_tests
 
 # Standalone AST keymap & ATDD code generator CLI
 odin run tools/bifrost_gen -- <target_dir>
+odin run tools/bifrost_gen -- --atdd <target_dir>
+
+# Opt-in AST temp_allocator hygiene linter (checks interactive loops & Sleipnir actor callbacks)
+odin run tools/bifrost_gen -- --lint-temp bifrost examples/heimdall_inspector examples/log_monitor
 ```
 
 ---
@@ -214,8 +218,8 @@ odin run examples/xitdb_explorer -- --live-tty [optional/path/to/db.xit]
 **Tab 3: Structural Moment Diff (`diff_moments`) & Braille Storage Telemetry**
 ![Bifrost xitdb Explorer Tab 3 — Structural Diff & Storage](docs/assets/screenshots/xitdb_explorer_diff.png)
 
-### 7. Interactive Heimdall Columnar Telemetry Inspector (`examples/heimdall_inspector`)
-Live telemetry capture and `.arrow` segment inspector combining `Heimdall_Segment_Store` with `ui_sparkline` (span durations in microseconds), `ui_canvas` (Braille ANSI diff byte series), `ui_tree` (collapsible scopes and operations), and `ui_virtual_list` (11-column Arrow records with parent-child span linkage).
+### 7. Interactive Heimdall Telemetry Studio (`examples/heimdall_inspector`)
+3-tab columnar `.arrow` telemetry workbench (`1:Arrow IPC Records`, `2:Span Call-Tree & Heat`, `3:Scope Latency Stats`) combining unbounded dynamic `Heimdall_Segment_Store` loading with sticky-header [`ui_table`](docs/widget/virtual_list_and_table.md) views, `ui_tree` span heat bars, `ui_sparkline` duration curves, `ui_canvas` Braille ANSI diff curves, and a live 30 FPS-capped runtime HUD (`FPS`, frame latency, `%CPU`, `VmRSS`, and Odin tracking-allocator heap usage).
 
 ```bash
 odin run examples/heimdall_inspector -custom-attribute:ui_actions,ui_action,ui_scope,telemetry_schema -vet -strict-style -vet-packages:bifrost,main
@@ -235,7 +239,7 @@ odin run examples/heimdall_inspector -custom-attribute:ui_actions,ui_action,ui_s
   * [`docs/widget/primitives_and_scopes.md`](docs/widget/primitives_and_scopes.md) — `container`, `leaf`, `ui_scope`, `ui_label`, `ui_button`, `ui_modal`
   * [`docs/widget/text_input.md`](docs/widget/text_input.md) — `ui_text_input` & `Xitdb_Filter`
   * [`docs/widget/text_area.md`](docs/widget/text_area.md) — `ui_text_area` (Odin & CUE syntax highlighting)
-  * [`docs/widget/virtual_list_and_table.md`](docs/widget/virtual_list_and_table.md) — `ui_virtual_list`, `resolve_table_columns`, & `xitdb_slice_viewport`
+  * [`docs/widget/virtual_list_and_table.md`](docs/widget/virtual_list_and_table.md) — `ui_table`, `ui_virtual_table`, `ui_table_row`, `ui_virtual_list`, `resolve_table_columns`, & `xitdb_slice_viewport`
   * [`docs/widget/tree.md`](docs/widget/tree.md) — `ui_tree`
   * [`docs/widget/tabs.md`](docs/widget/tabs.md) — `ui_tabs` & `ui_tab_bar`
   * [`docs/widget/splitter.md`](docs/widget/splitter.md) — `ui_splitter`

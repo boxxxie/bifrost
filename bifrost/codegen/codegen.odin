@@ -1045,3 +1045,337 @@ generate_directory :: proc(
 	}
 	return out_full, true
 }
+
+// =============================================================================
+// Opt-In AST `temp_allocator` Hygiene Linter (`--lint-temp` — Disabled by Default)
+//
+// Audits a package's `.odin` files (without modifying or generating code) for:
+//   1. Interactive `poll_next_event` loops that allocate on `temp_allocator` (or
+//      call procedures that do) without resetting `free_all(context.temp_allocator)`
+//      or `DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD`.
+//   2. Sleipnir actor `receive` callbacks (`proc(ctx: ^actor.Context, self: ^actor.Actor(...), msg: ^...)`)
+//      that allocate on `temp_allocator` directly (or via `fmt.tprint*` / `context.temp_allocator`)
+//      without calling `free_all(context.temp_allocator)` (directly or inside a callee
+//      in the same package such as `ui_coordinator_flush_frame`).
+// =============================================================================
+
+@(private)
+Temp_Lint_Proc_Info :: struct {
+	name:           string,
+	file:           string,
+	line:           int,
+	col:            int,
+	is_actor_recv:  bool,
+	has_temp_reset: bool,
+	has_temp_use:   bool,
+	callees:        [dynamic]string,
+}
+
+@(private)
+ast_node_has_temp_reset :: proc(src: string, node: ^ast.Node) -> bool {
+	text := node_source(src, node)
+	if len(text) == 0 {
+		return false
+	}
+	return (strings.contains(text, "free_all") && strings.contains(text, "temp_allocator")) ||
+	       strings.contains(text, "DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD")
+}
+
+@(private)
+ast_node_has_temp_use :: proc(src: string, node: ^ast.Node) -> bool {
+	text := node_source(src, node)
+	if len(text) == 0 {
+		return false
+	}
+	if strings.contains(text, "fmt.tprint") || strings.contains(text, "fmt.taprint") {
+		return true
+	}
+	// Check for `context.temp_allocator` usages that are not `free_all(context.temp_allocator)`
+	search := text
+	for {
+		idx := strings.index(search, "temp_allocator")
+		if idx < 0 {
+			break
+		}
+		prefix := search[:idx]
+		if !strings.has_suffix(prefix, "free_all(context.") && !strings.has_suffix(prefix, "mem.free_all(context.") {
+			return true
+		}
+		search = search[idx + len("temp_allocator"):]
+	}
+	return false
+}
+
+@(private)
+is_actor_receive_proc_type :: proc(src: string, pt: ^ast.Proc_Type) -> bool {
+	if pt == nil || pt.params == nil || len(pt.params.list) < 2 {
+		return false
+	}
+	sig_txt := node_source(src, pt.params)
+	return strings.contains(sig_txt, "Context") && strings.contains(sig_txt, "Actor(")
+}
+
+@(private)
+collect_call_names_and_lint_loops :: proc(
+	src: string,
+	filename: string,
+	proc_name: string,
+	stmt: ^ast.Stmt,
+	callees: ^[dynamic]string,
+	diags: ^[dynamic]Codegen_Diagnostic,
+	enclosing_has_reset: bool = false,
+) -> (loops_ok: bool) {
+	if stmt == nil {
+		return true
+	}
+	loops_ok = true
+	#partial switch s in stmt.derived {
+	case ^ast.Block_Stmt:
+		for child in s.stmts {
+			if !collect_call_names_and_lint_loops(src, filename, proc_name, child, callees, diags, enclosing_has_reset) {
+				loops_ok = false
+			}
+		}
+	case ^ast.For_Stmt:
+		body_txt := node_source(src, s.body)
+		this_has_reset := enclosing_has_reset || ast_node_has_temp_reset(src, s.body)
+		if strings.contains(body_txt, "poll_next_event") && !this_has_reset {
+			msg := fmt.tprintf(
+				"interactive event loop in `%s` calls `poll_next_event` without `free_all(context.temp_allocator)` inside the loop body (causes unbounded VmRSS growth)",
+				proc_name,
+			)
+			append_diagnostic(diags, filename, s.pos.line, s.pos.column, msg)
+			loops_ok = false
+		}
+		if !collect_call_names_and_lint_loops(src, filename, proc_name, s.body, callees, diags, this_has_reset) {
+			loops_ok = false
+		}
+	case ^ast.If_Stmt:
+		if !collect_call_names_and_lint_loops(src, filename, proc_name, s.init, callees, diags, enclosing_has_reset) {
+			loops_ok = false
+		}
+		if !collect_call_names_and_lint_loops(src, filename, proc_name, s.body, callees, diags, enclosing_has_reset) {
+			loops_ok = false
+		}
+		if !collect_call_names_and_lint_loops(src, filename, proc_name, s.else_stmt, callees, diags, enclosing_has_reset) {
+			loops_ok = false
+		}
+	case ^ast.Switch_Stmt:
+		if !collect_call_names_and_lint_loops(src, filename, proc_name, s.body, callees, diags, enclosing_has_reset) {
+			loops_ok = false
+		}
+	case ^ast.Type_Switch_Stmt:
+		if !collect_call_names_and_lint_loops(src, filename, proc_name, s.body, callees, diags, enclosing_has_reset) {
+			loops_ok = false
+		}
+	case ^ast.Case_Clause:
+		for child in s.body {
+			if !collect_call_names_and_lint_loops(src, filename, proc_name, child, callees, diags, enclosing_has_reset) {
+				loops_ok = false
+			}
+		}
+	case ^ast.Defer_Stmt:
+		if !collect_call_names_and_lint_loops(src, filename, proc_name, s.stmt, callees, diags, enclosing_has_reset) {
+			loops_ok = false
+		}
+	case ^ast.Expr_Stmt:
+		collect_expr_callees(s.expr, callees)
+	case ^ast.Assign_Stmt:
+		for rhs in s.rhs {
+			collect_expr_callees(rhs, callees)
+		}
+	case ^ast.Value_Decl:
+		for v in s.values {
+			collect_expr_callees(v, callees)
+		}
+	}
+	return loops_ok
+}
+
+@(private)
+collect_expr_callees :: proc(expr: ^ast.Expr, callees: ^[dynamic]string) {
+	if expr == nil || callees == nil {
+		return
+	}
+	#partial switch e in expr.derived {
+	case ^ast.Call_Expr:
+		if ident, ok := e.expr.derived.(^ast.Ident); ok {
+			append(callees, ident.name)
+		} else if sel, sel_ok := e.expr.derived.(^ast.Selector_Expr); sel_ok {
+			if f_ident, f_ok := sel.field.derived.(^ast.Ident); f_ok {
+				append(callees, f_ident.name)
+			}
+		}
+		for arg in e.args {
+			collect_expr_callees(arg, callees)
+		}
+	case ^ast.Binary_Expr:
+		collect_expr_callees(e.left, callees)
+		collect_expr_callees(e.right, callees)
+	case ^ast.Unary_Expr:
+		collect_expr_callees(e.expr, callees)
+	case ^ast.Paren_Expr:
+		collect_expr_callees(e.expr, callees)
+	}
+}
+
+check_temp_allocator_hygiene_sources :: proc(
+	sources: []string,
+	filenames: []string = nil,
+	diagnostics: ^[dynamic]Codegen_Diagnostic = nil,
+) -> bool {
+	arena: mem.Dynamic_Arena
+	mem.dynamic_arena_init(&arena)
+	defer mem.dynamic_arena_destroy(&arena)
+	arena_alloc := mem.dynamic_arena_allocator(&arena)
+
+	procs := make([dynamic]Temp_Lint_Proc_Info)
+	defer {
+		for &pi in procs {
+			delete(pi.callees)
+		}
+		delete(procs)
+	}
+
+	all_ok := true
+	for src, idx in sources {
+		fname := filenames[idx] if idx < len(filenames) else "input.odin"
+		p := parser.default_parser()
+		file: ^ast.File
+		parse_ok := false
+		{
+			context.allocator = arena_alloc
+			file = ast.new(ast.File, tokenizer.Pos{}, tokenizer.Pos{})
+			file.src      = src
+			file.fullpath = fname
+			parse_ok = parser.parse_file(&p, file) && p.error_count == 0
+		}
+		if !parse_ok {
+			append_diagnostic(diagnostics, fname, 1, 1, "failed to parse Odin file during temp_allocator lint")
+			return false
+		}
+
+		for decl_stmt in file.decls {
+			d, is_val := decl_stmt.derived.(^ast.Value_Decl)
+			if !is_val || d.is_mutable || len(d.names) == 0 || len(d.values) == 0 {
+				continue
+			}
+			ident, id_ok := d.names[0].derived.(^ast.Ident)
+			if !id_ok {
+				continue
+			}
+			proc_lit, is_proc := d.values[0].derived.(^ast.Proc_Lit)
+			if !is_proc || proc_lit.body == nil {
+				continue
+			}
+
+			_, _, no_temp_lint := get_decl_attribute(d, "no_temp_lint")
+			if no_temp_lint {
+				continue
+			}
+
+			callees := make([dynamic]string)
+			if !collect_call_names_and_lint_loops(src, fname, ident.name, proc_lit.body, &callees, diagnostics) {
+				all_ok = false
+			}
+
+			append(&procs, Temp_Lint_Proc_Info{
+				name           = ident.name,
+				file           = fname,
+				line           = ident.pos.line,
+				col            = ident.pos.column,
+				is_actor_recv  = is_actor_receive_proc_type(src, proc_lit.type),
+				has_temp_reset = ast_node_has_temp_reset(src, proc_lit.body),
+				has_temp_use   = ast_node_has_temp_use(src, proc_lit.body),
+				callees        = callees,
+			})
+		}
+	}
+
+	// Propagate `has_temp_reset` and `has_temp_use` one hop across same-package callees
+	// (e.g. `ui_coordinator_receive` -> `ui_coordinator_flush_frame`).
+	for &pi in procs {
+		if !pi.is_actor_recv {
+			continue
+		}
+		effective_reset := pi.has_temp_reset
+		effective_use   := pi.has_temp_use
+		for c_name in pi.callees {
+			for other in procs {
+				if other.name == c_name {
+					if other.has_temp_reset {
+						effective_reset = true
+					}
+					if other.has_temp_use {
+						effective_use = true
+					}
+				}
+			}
+		}
+		if effective_use && !effective_reset {
+			msg := fmt.tprintf(
+				"actor receive procedure `%s` allocates on `context.temp_allocator` without calling `free_all(context.temp_allocator)` (causes worker thread temp arena VmRSS growth)",
+				pi.name,
+			)
+			append_diagnostic(diagnostics, pi.file, pi.line, pi.col, msg)
+			all_ok = false
+		}
+	}
+
+	return all_ok
+}
+
+check_temp_allocator_hygiene_directory :: proc(
+	dir_path: string,
+	diagnostics: ^[dynamic]Codegen_Diagnostic = nil,
+) -> bool {
+	entries, rerr := os.read_all_directory_by_path(dir_path, context.allocator)
+	if rerr != nil {
+		append_diagnostic(diagnostics, dir_path, 0, 0, "failed to read package directory")
+		return false
+	}
+	defer os.file_info_slice_delete(entries, context.allocator)
+
+	filenames := make([dynamic]string)
+	defer delete(filenames)
+
+	for entry in entries {
+		if entry.type == .Regular &&
+		   strings.has_suffix(entry.name, ".odin") &&
+		   !strings.has_suffix(entry.name, "_gen.odin") &&
+		   !strings.has_suffix(entry.name, "_test.odin") {
+			append(&filenames, entry.name)
+		}
+	}
+	slice.sort(filenames[:])
+
+	sources    := make([dynamic]string)
+	full_names := make([dynamic]string)
+	file_bufs  := make([dynamic][]byte)
+	defer {
+		for b in file_bufs {
+			delete(b)
+		}
+		delete(file_bufs)
+		for f in full_names {
+			delete(f)
+		}
+		delete(full_names)
+		delete(sources)
+	}
+
+	for name in filenames {
+		full, _ := filepath.join({dir_path, name}, context.allocator)
+		data, read_err := os.read_entire_file(full, context.allocator)
+		if read_err != nil {
+			delete(full)
+			append_diagnostic(diagnostics, dir_path, 0, 0, "failed to read source file")
+			return false
+		}
+		append(&full_names, full)
+		append(&file_bufs, data)
+		append(&sources, string(data))
+	}
+
+	return check_temp_allocator_hygiene_sources(sources[:], full_names[:], diagnostics)
+}
