@@ -518,3 +518,175 @@ test_actor_bridge_filtered_slice_reslices_when_scrolled_and_multi_event_burst_re
 	set_keymap_style(&inp_load, .Vim)
 	testing.expect_value(t, inp_load.action_specs[0].chord_spec, "<C-o>")
 }
+
+@(test)
+test_actor_bridge_mouse_motion_coalescing_and_single_pass_hover_unit :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer {
+		for _, entry in track.allocation_map {
+			testing.expect(t, false, fmt.tprintf("Leak: %v bytes at %v", entry.size, entry.location))
+		}
+		mem.tracking_allocator_destroy(&track)
+	}
+	context.allocator = mem.tracking_allocator(&track)
+	defer free_all(context.temp_allocator)
+
+	// 1. SGR 1003 any-event mouse tracking (`\x1b[<35;x;yM`) decodes as `Mouse_Action.Motion`
+	//    and coalesces with both `.Motion` and `.Move` in `append_or_coalesce_input_event`.
+	queued := make([dynamic]Input_Event, 0, 16, context.allocator)
+	defer delete(queued)
+
+	for step := 1; step <= 25; step += 1 {
+		seq := fmt.tprintf("\x1b[<35;%d;%dM", step + 5, 10)
+		ev, _, st := parse_ansi_input(transmute([]byte)seq, false)
+		testing.expect_value(t, st, Parse_Status.Ok)
+		mev, is_m := ev.(Mouse_Event)
+		testing.expect(t, is_m)
+		testing.expect_value(t, mev.action, Mouse_Action.Motion)
+		_ = append_or_coalesce_input_event(&queued, ev)
+	}
+	testing.expect_value(t, len(queued), 1)
+	if last_m, ok := queued[0].(Mouse_Event); ok {
+		testing.expect_value(t, last_m.x, i32(29))
+		testing.expect_value(t, last_m.y, i32(9))
+	}
+
+	// 2. `UI_Coordinator_State` coalesces consecutive `.Motion` / `.Move` events into a single pending input,
+	//    ignores duplicate hover positions at the exact same cell, skips `render_pass` entirely when
+	//    `hovered_id` / `hover_path` do not change, and executes 1 `render_pass` AFTER `resolve_input` when `hovered_id` changes.
+	coord := new(UI_Coordinator_State)
+	defer free(coord)
+	render_passes := 0
+	coord.user_ptr = &render_passes
+	testing.expect(t, ui_coordinator_init(
+		coord,
+		80,
+		24,
+		nil,
+		proc(c: ^UI_Coordinator_State) {
+			(^int)(c.user_ptr)^ += 1
+			ui_render_inspector_frame(c)
+		},
+		context.allocator,
+	))
+	defer ui_coordinator_destroy(coord)
+
+	// Initial frame
+	ui_coordinator_flush_frame(coord)
+	render_passes = 0
+
+	// First move into `sidebar_pane` (e.g. x = 3, y = 5) changes `hovered_id` from 0 -> `sidebar_pane`,
+	// so `ui_coordinator_flush_frame` runs 1 `render_pass` after `resolve_input`.
+	_ = ui_reduce_single_msg(coord, UI_Msg(UI_Msg_Input{
+		event = Mouse_Event{x = 3, y = 5, col = 3, row = 5, action = .Motion, button = .None},
+	}))
+	ui_coordinator_flush_frame(coord)
+	testing.expect_value(t, render_passes, 1)
+	testing.expect_value(t, coord.input.hovered_id, hash_id("sidebar_pane"))
+
+	// Now move across cells inside `records_pane` (x = 30 ..< 70, y = 8):
+	// The first move into `records_pane` (x = 30) changes `hovered_id` to `records_pane` (1 render pass).
+	render_passes = 0
+	_ = ui_reduce_single_msg(coord, UI_Msg(UI_Msg_Input{
+		event = Mouse_Event{x = 30, y = 8, col = 30, row = 8, action = .Motion, button = .None},
+	}))
+	ui_coordinator_flush_frame(coord)
+	testing.expect_value(t, render_passes, 1)
+	testing.expect_value(t, coord.input.hovered_id, hash_id("records_pane"))
+
+	// Subsequent moves across 35 cells inside `records_pane` (x = 31 ..< 66, y = 8) keep `hovered_id == records_pane`,
+	// so `ui_coordinator_flush_frame` must run 0 render passes and emit 0 ANSI bytes!
+	render_passes = 0
+	for x: i32 = 31; x < 66; x += 1 {
+		_ = ui_reduce_single_msg(coord, UI_Msg(UI_Msg_Input{
+			event = Mouse_Event{x = x, y = 8, col = i16(x), row = 8, action = .Motion, button = .None},
+		}))
+	}
+	testing.expect_value(t, len(coord.pending_inputs), 1)
+	ui_coordinator_flush_frame(coord)
+	testing.expect_value(t, render_passes, 0)
+	testing.expect_value(t, coord.last_ansi_bytes, 0)
+	testing.expect_value(t, coord.input.mouse_pos, [2]i32{65, 8})
+
+	// Sending another hover `.Motion` at the exact same cell `(65, 8)` is dropped by `append_or_coalesce_input_event`
+	// and `ui_reduce_single_msg` before queueing.
+	coord.dirty = false
+	_ = append_or_coalesce_input_event(
+		&queued,
+		Mouse_Event{x = 29, y = 9, col = 29, row = 9, action = .Motion, button = .None},
+		&coord.input,
+	)
+	clear(&queued)
+	testing.expect(t, append_or_coalesce_input_event(
+		&queued,
+		Mouse_Event{x = 65, y = 8, col = 65, row = 8, action = .Motion, button = .None},
+		&coord.input,
+	), "Same-cell hover motion must be dropped when queue is empty")
+	testing.expect_value(t, len(queued), 0)
+
+	_ = ui_reduce_single_msg(coord, UI_Msg(UI_Msg_Input{
+		event = Mouse_Event{x = 65, y = 8, col = 65, row = 8, action = .Motion, button = .None},
+	}))
+	testing.expect(t, !coord.dirty, "Duplicate hover motion at identical cell should not mark coordinator dirty")
+	testing.expect_value(t, len(coord.pending_inputs), 0)
+
+	// 3. One-shot edge triggers (`activated_id`, `clicked_id`, etc.) set during Frame N must be cleared
+	//    before Pass #1 of Frame N+1 so a subsequent heartbeat/commit frame does not re-read a stale `activated_id`.
+	seen_activated: u64 = 0
+	coord.user_ptr = &seen_activated
+	coord.render_pass = proc(c: ^UI_Coordinator_State) {
+		if c.input.activated_id != 0 {
+			(^u64)(c.user_ptr)^ = c.input.activated_id
+		}
+		ui_render_inspector_frame(c)
+	}
+	_ = ui_reduce_single_msg(coord, UI_Msg(UI_Msg_Input{
+		event = Mouse_Event{x = 30, y = 8, col = 30, row = 8, action = .Press, button = .Left},
+	}))
+	_ = ui_reduce_single_msg(coord, UI_Msg(UI_Msg_Input{
+		event = Mouse_Event{x = 30, y = 8, col = 30, row = 8, action = .Release, button = .Left},
+	}))
+	ui_coordinator_flush_frame(coord)
+	testing.expect_value(t, coord.input.activated_id, hash_id("records_pane"))
+	testing.expect_value(t, seen_activated, hash_id("records_pane"))
+
+	// Next frame (e.g. heartbeat tick with 0 input events): Pass #1 must NOT see stale `activated_id` from prior frame
+	seen_activated = 0
+	coord.dirty = true
+	coord.layout_dirty = true
+	ui_coordinator_flush_frame(coord)
+	testing.expect_value(t, seen_activated, u64(0))
+	testing.expect_value(t, coord.input.activated_id, u64(0))
+
+	// 4. `poll_next_event` (`terminal_poll_event`) automatically coalesces consecutive buffered SGR 1003
+	//    hover motion sequences inside `term.read_buf` into a single `Mouse_Event` while preserving any
+	//    trailing non-motion event (e.g. a click `.Press` or keystroke).
+	term: Terminal
+	burst_seq := "\x1b[<35;10;5M\x1b[<35;11;5M\x1b[<35;12;5M\x1b[<0;12;5M"
+	copy(term.read_buf[:], transmute([]byte)burst_seq)
+	term.read_len = len(burst_seq)
+
+	ev1, has1, err1 := poll_next_event(&term, 0)
+	testing.expect_value(t, err1, Terminal_Error.None)
+	testing.expect(t, has1)
+	if m1, ok := ev1.(Mouse_Event); ok {
+		testing.expect_value(t, m1.action, Mouse_Action.Motion)
+		testing.expect_value(t, m1.x, i32(11))
+		testing.expect_value(t, m1.y, i32(4))
+	} else {
+		testing.expect(t, false, "Expected coalesced Mouse_Event(.Motion) from poll_next_event")
+	}
+
+	ev2, has2, err2 := poll_next_event(&term, 0)
+	testing.expect_value(t, err2, Terminal_Error.None)
+	testing.expect(t, has2)
+	if m2, ok := ev2.(Mouse_Event); ok {
+		testing.expect_value(t, m2.action, Mouse_Action.Press)
+		testing.expect_value(t, m2.x, i32(11))
+		testing.expect_value(t, m2.y, i32(4))
+	} else {
+		testing.expect(t, false, "Expected trailing Mouse_Event(.Press) after coalesced motion burst")
+	}
+	testing.expect_value(t, term.read_len, 0)
+}

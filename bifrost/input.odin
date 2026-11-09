@@ -174,6 +174,58 @@ Mouse_Action :: enum u8 {
 	Scroll_Right = 9,
 }
 
+is_mouse_hover_motion :: #force_inline proc "contextless" (action: Mouse_Action) -> bool {
+	return action == .Move || action == .Motion
+}
+
+is_mouse_coalesceable_motion :: #force_inline proc "contextless" (action: Mouse_Action) -> bool {
+	return action == .Move || action == .Motion || action == .Drag
+}
+
+can_coalesce_mouse_events :: #force_inline proc "contextless" (prev, next: Mouse_Event) -> bool {
+	if is_mouse_hover_motion(prev.action) && is_mouse_hover_motion(next.action) {
+		return true
+	}
+	return prev.action == .Drag && next.action == .Drag && prev.button == next.button
+}
+
+append_or_coalesce_input_event :: proc(
+	queue: ^[dynamic]Input_Event,
+	ev: Input_Event,
+	inp: ^Input_State = nil,
+) -> (coalesced: bool) {
+	if m2, is_m2 := ev.(Mouse_Event); is_m2 && is_mouse_coalesceable_motion(m2.action) {
+		if len(queue^) > 0 {
+			if m1, is_m1 := queue^[len(queue^) - 1].(Mouse_Event); is_m1 && can_coalesce_mouse_events(m1, m2) {
+				queue^[len(queue^) - 1] = ev
+				return true
+			}
+		} else if inp != nil && is_mouse_hover_motion(m2.action) &&
+		          !inp.mouse_down && inp.active_splitter_id == 0 && inp.event_handler == nil &&
+		          inp.mouse_initialized && inp.mouse_pos[0] == m2.x && inp.mouse_pos[1] == m2.y {
+			// Ignore duplicate same-cell hover motion before queueing
+			return true
+		}
+	}
+	append(queue, ev)
+	return false
+}
+
+// Returns true when `events` is non-empty and every event is a pure mouse hover/leave motion
+// with no active mouse drag, splitter drag, or custom 3-phase event handler.
+is_pure_hover_event_batch :: proc "contextless" (inp: ^Input_State, events: []Input_Event) -> bool {
+	if len(events) == 0 || inp.mouse_down || inp.active_splitter_id != 0 || inp.event_handler != nil {
+		return false
+	}
+	for ev in events {
+		if mev, is_m := ev.(Mouse_Event); is_m && (is_mouse_hover_motion(mev.action) || mev.action == .Leave) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 Mouse_Button :: enum u8 {
 	Left        = 0,
 	Middle      = 1,
@@ -1259,6 +1311,15 @@ handle_key_event :: proc(inp: ^Input_State, ctx: ^Layout_Context, capture_idx: i
 				inp.activated_id = node.id_hash
 				return
 			}
+			// 2D `ui_table` column & sort keyboard shortcuts (`s` sort, `+`/`=`/`-` resize, `0` auto-fit, `^`/`$` first/last col)
+			if inp.editing_id == 0 && node.config.virtual_total_rows > 0 && ev.code == .Rune && (eff_mods == {} || eff_mods == {.Shift}) {
+				slot := get_scroll_slot(inp, node.id_hash)
+				if slot.col_spec_count > 0 {
+					if handle_table_key_shortcut(inp, &ctx.nodes[node_idx], slot, ev.ch) {
+						return
+					}
+				}
+			}
 		}
 
 		// 2. Fallback `.Root_And_Scopes` keybindings upon reaching root `p == 0`
@@ -1404,6 +1465,7 @@ handle_mouse_event :: proc(inp: ^Input_State, ctx: ^Layout_Context, capture_idx:
 		if inp.mouse_down && inp.active_press_id != 0 {
 			inp.drag_delta = {ev.x - prev_pos[0], ev.y - prev_pos[1]}
 			if p_idx, ok := ctx.id_map[inp.active_press_id]; ok {
+				handle_scroll_or_table_mouse_drag(inp, ctx, p_idx, ev.x, ev.y)
 				var_path: [MAX_HIT_DEPTH]u64
 				p_len := build_ancestor_path(ctx, p_idx, &var_path)
 				dispatch_three_phase(ctx, var_path[:p_len], ev, inp.event_handler, inp.event_userdata)
@@ -1423,6 +1485,7 @@ handle_mouse_event :: proc(inp: ^Input_State, ctx: ^Layout_Context, capture_idx:
 		if inp.active_press_id != 0 {
 			inp.drag_delta = {ev.x - prev_pos[0], ev.y - prev_pos[1]}
 			if p_idx, ok := ctx.id_map[inp.active_press_id]; ok {
+				handle_scroll_or_table_mouse_drag(inp, ctx, p_idx, ev.x, ev.y)
 				var_path: [MAX_HIT_DEPTH]u64
 				p_len := build_ancestor_path(ctx, p_idx, &var_path)
 				dispatch_three_phase(ctx, var_path[:p_len], ev, inp.event_handler, inp.event_userdata)
@@ -1487,23 +1550,18 @@ handle_mouse_event :: proc(inp: ^Input_State, ctx: ^Layout_Context, capture_idx:
 						handle_text_input_click(inp, ctx, hit_idx, ev.x)
 					}
 				}
-				// Virtual list / 2D virtual table / collapsible tree click row & column selection
+				// Scrollable / Virtual list / 2D virtual table / collapsible tree click & drag handling
 				for v_curr := hit_idx; v_curr >= 0; v_curr = ctx.nodes[v_curr].parent_idx {
 					v_node := ctx.nodes[v_curr]
-					if v_node.config.virtual_total_rows > 0 && is_node_allowed(ctx, v_curr, capture_idx) {
-						if handle_tree_mouse_click(inp, ctx, v_curr, capture_idx, ev.y) {
+					if v_node.config.scrollable && is_node_allowed(ctx, v_curr, capture_idx) {
+						if handle_scroll_or_table_mouse_press(inp, ctx, v_curr, capture_idx, ev.x, ev.y) {
+							slot := get_scroll_slot(inp, v_node.id_hash)
+							if slot.dragging_v_scrollbar || slot.dragging_h_scrollbar || slot.dragging_col_idx >= 0 || inp.active_press_id == 0 {
+								inp.active_press_id = v_node.id_hash
+								inp.active_id       = v_node.id_hash
+							}
 							break
 						}
-						slot := get_scroll_slot(inp, v_node.id_hash)
-						hdr_h := i32(slot.header_rows)
-						rel_y := ev.y - v_node.inner_rect.y - hdr_h
-						if rel_y >= 0 && rel_y < v_node.inner_rect.h - hdr_h {
-							slot.selected_row = clamp(slot.offset + rel_y, 0, max(0, slot.total_rows - 1))
-						}
-						if ev.y >= v_node.inner_rect.y && ev.y < v_node.inner_rect.y + v_node.inner_rect.h {
-							select_virtual_col_at_x(slot, v_node.inner_rect, ev.x)
-						}
-						break
 					}
 					if v_node.out_of_flow {
 						break
@@ -1528,6 +1586,12 @@ handle_mouse_event :: proc(inp: ^Input_State, ctx: ^Layout_Context, capture_idx:
 			inp.mouse_down = false
 			inp.active_splitter_id = 0
 			pressed_id := inp.active_press_id
+			if pressed_id != 0 {
+				slot := get_scroll_slot(inp, pressed_id)
+				slot.dragging_col_idx     = -1
+				slot.dragging_v_scrollbar = false
+				slot.dragging_h_scrollbar = false
+			}
 			inp.active_press_id = 0
 			inp.active_id       = 0
 

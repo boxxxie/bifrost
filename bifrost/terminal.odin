@@ -129,6 +129,31 @@ terminal_poll_event :: proc(
 					ev = paste
 				}
 				consume_buffer_prefix(term, consumed)
+				if mev, is_m := ev.(Mouse_Event); is_m && (is_mouse_hover_motion(mev.action) || mev.action == .Drag) {
+					cur_m := mev
+					for term.read_len > 0 {
+						next_ev, next_consumed, next_status := parse_ansi_input(term.read_buf[:term.read_len], false)
+						if next_status == .Ignored || next_status == .Malformed {
+							consume_buffer_prefix(term, max(next_consumed, 1))
+							continue
+						}
+						if next_status != .Ok {
+							break
+						}
+						next_m, next_is_m := next_ev.(Mouse_Event)
+						if !next_is_m {
+							break
+						}
+						same_kind := (is_mouse_hover_motion(cur_m.action) && is_mouse_hover_motion(next_m.action)) ||
+						             (cur_m.action == .Drag && next_m.action == .Drag && cur_m.button == next_m.button)
+						if !same_kind {
+							break
+						}
+						cur_m = next_m
+						consume_buffer_prefix(term, next_consumed)
+					}
+					ev = cur_m
+				}
 				return ev, true, .None
 			case .Ignored, .Malformed:
 				consume_buffer_prefix(term, max(consumed, 1))

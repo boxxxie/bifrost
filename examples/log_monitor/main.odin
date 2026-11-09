@@ -994,34 +994,25 @@ run_log_monitor :: proc(live_tty: bool) -> bool {
 			wait_ms := max(i32(1), i32((target_frame_interval - elapsed_since_frame) / time.Millisecond))
 			ev, has_ev, _ := bifrost.poll_next_event(&term, wait_ms)
 			if has_ev {
-				append(&queued_inputs, ev)
+				_ = bifrost.append_or_coalesce_input_event(&queued_inputs, ev, &ui_actor.state.input)
 				for drain := 0; drain < 128; drain += 1 {
 					ev2, has_ev2, _ := bifrost.poll_next_event(&term, 0)
 					if !has_ev2 {
 						break
 					}
-					if m2, is_m2 := ev2.(bifrost.Mouse_Event); is_m2 && (m2.action == .Move || m2.action == .Drag) && len(queued_inputs) > 0 {
-						if m1, is_m1 := queued_inputs[len(queued_inputs) - 1].(bifrost.Mouse_Event); is_m1 && m1.action == m2.action {
-							queued_inputs[len(queued_inputs) - 1] = ev2
-							continue
-						}
-					}
-					append(&queued_inputs, ev2)
+					_ = bifrost.append_or_coalesce_input_event(&queued_inputs, ev2, &ui_actor.state.input)
 				}
 			}
 
 			now := time.tick_now()
 			if time.tick_diff(last_tick, now) >= target_frame_interval {
 				last_tick = now
-				for q_ev in queued_inputs {
-					actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Input{event = q_ev}))
-				}
-				clear(&queued_inputs)
 				// Periodically stream new log batches in the background every ~30 ticks (~1s at 30 FPS)
 				frame_counter += 1
 				if frame_counter % 15 == 0 {
 					// 2 Hz HUD heartbeat so FPS / CPU / RSS in the header stay live between log batches
-					ui_actor.state.dirty = true
+					ui_actor.state.dirty        = true
+					ui_actor.state.layout_dirty = true
 				}
 				if frame_counter % 30 == 0 {
 					actor.send(&sched, producer_pid, Log_Producer_Msg(Log_Batch_Request{
@@ -1032,15 +1023,22 @@ run_log_monitor :: proc(live_tty: bool) -> bool {
 					next_seq += 10
 				}
 
-				actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Frame_Tick{
-					tick_ns = max(1, i64(time.tick_since(boot_tick))),
-				}))
-				actor.scheduler_wait_idle(&sched)
-				if ui_actor.state.last_ansi_bytes > 0 {
-					_, _ = os.write_string(os.stdout, strings.to_string(ui_actor.state.ansi_builder))
+				if len(queued_inputs) > 0 || ui_actor.state.dirty || ui_actor.state.input.pending_chord.active || frame_counter % 30 == 0 {
+					bifrost.ui_send_inputs_and_tick(
+						&sched,
+						ui_pid,
+						queued_inputs[:],
+						max(1, i64(time.tick_since(boot_tick))),
+						context.temp_allocator,
+					)
+					clear(&queued_inputs)
+					actor.scheduler_wait_idle(&sched)
+					if ui_actor.state.last_ansi_bytes > 0 {
+						_, _ = os.write_string(os.stdout, strings.to_string(ui_actor.state.ansi_builder))
+					}
+					free_all(context.temp_allocator)
 				}
 			}
-			free_all(context.temp_allocator)
 		}
 		_ = bifrost.save_ui_workspace_to_xitdb(&shared, &ui_actor.state, "monitor_default")
 	} else {

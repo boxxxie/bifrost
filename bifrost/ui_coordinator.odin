@@ -121,6 +121,25 @@ UI_Msg :: union {
 	UI_Msg_Quit,
 }
 
+ui_send_inputs_and_tick :: proc(
+	sched: ^actor.Scheduler,
+	ui_pid: actor.PID(UI_Msg),
+	inputs: []Input_Event,
+	tick_ns: i64,
+	alloc := context.temp_allocator,
+) {
+	if len(inputs) == 0 {
+		actor.send(sched, ui_pid, UI_Msg(UI_Msg_Frame_Tick{tick_ns = tick_ns}))
+		return
+	}
+	msgs := make([]UI_Msg, len(inputs) + 1, alloc)
+	for ev, i in inputs {
+		msgs[i] = UI_Msg(UI_Msg_Input{event = ev})
+	}
+	msgs[len(inputs)] = UI_Msg(UI_Msg_Frame_Tick{tick_ns = tick_ns})
+	actor.send(sched, ui_pid, UI_Msg(UI_Msg_Batch{msgs = msgs}))
+}
+
 ui_batch_cmds :: proc(
 	ui_pid: actor.PID(UI_Msg),
 	cmds: []UI_Cmd,
@@ -228,6 +247,7 @@ UI_Coordinator_State :: struct {
 
 	// Frame-Pacing & Mailbox Coalescing State
 	dirty:                 bool,
+	layout_dirty:          bool,
 	urgent_input:          bool,
 	quit_requested:        bool,
 	quit_filter:           UI_Quit_Filter_Fn,
@@ -350,6 +370,7 @@ ui_coordinator_init :: proc(
 	}
 	coord.filter.hide_tx       = true
 	coord.dirty                = true
+	coord.layout_dirty         = true
 	coord.render_pass          = render_pass
 	coord.input.wants_focus_id = hash_id("records_pane")
 	return true
@@ -605,6 +626,7 @@ ui_reduce_single_msg :: proc(state: ^UI_Coordinator_State, msg: UI_Msg) -> (is_t
 	switch m in msg {
 	case UI_Msg_Key:
 		state.dirty = true
+		state.layout_dirty = true
 		state.urgent_input = true
 
 		mods: Modifiers
@@ -637,7 +659,17 @@ ui_reduce_single_msg :: proc(state: ^UI_Coordinator_State, msg: UI_Msg) -> (is_t
 		append(&state.pending_inputs, Input_Event(ke))
 
 	case UI_Msg_Mouse:
+		is_pure_hover := (is_mouse_hover_motion(m.action) || m.action == .Leave) &&
+		                 !state.input.mouse_down && state.input.active_splitter_id == 0 && state.input.event_handler == nil
+		if is_pure_hover && is_mouse_hover_motion(m.action) &&
+		   len(state.pending_inputs) == 0 && state.input.mouse_initialized &&
+		   state.input.mouse_pos[0] == m.x && state.input.mouse_pos[1] == m.y {
+			break
+		}
 		state.dirty = true
+		if !is_pure_hover {
+			state.layout_dirty = true
+		}
 		state.urgent_input = true
 		mods: Modifiers
 		if m.shift {
@@ -670,24 +702,25 @@ ui_reduce_single_msg :: proc(state: ^UI_Coordinator_State, msg: UI_Msg) -> (is_t
 			button = btn,
 			mods   = mods,
 		})
-		if (m.action == .Move || m.action == .Drag) && len(state.pending_inputs) > 0 {
-			if prev_m, is_m := state.pending_inputs[len(state.pending_inputs) - 1].(Mouse_Event); is_m && prev_m.action == m.action {
-				state.pending_inputs[len(state.pending_inputs) - 1] = mev
-				break
-			}
-		}
-		append(&state.pending_inputs, mev)
+		_ = append_or_coalesce_input_event(&state.pending_inputs, mev, &state.input)
 
 	case UI_Msg_Input:
-		state.dirty = true
-		state.urgent_input = true
-		if mev, is_m := m.event.(Mouse_Event); is_m && (mev.action == .Move || mev.action == .Drag) && len(state.pending_inputs) > 0 {
-			if prev_m, was_m := state.pending_inputs[len(state.pending_inputs) - 1].(Mouse_Event); was_m && prev_m.action == mev.action {
-				state.pending_inputs[len(state.pending_inputs) - 1] = m.event
+		is_pure_hover := false
+		if mev, is_m := m.event.(Mouse_Event); is_m {
+			is_pure_hover = (is_mouse_hover_motion(mev.action) || mev.action == .Leave) &&
+			                !state.input.mouse_down && state.input.active_splitter_id == 0 && state.input.event_handler == nil
+			if is_pure_hover && is_mouse_hover_motion(mev.action) &&
+			   len(state.pending_inputs) == 0 && state.input.mouse_initialized &&
+			   state.input.mouse_pos[0] == mev.x && state.input.mouse_pos[1] == mev.y {
 				break
 			}
 		}
-		append(&state.pending_inputs, m.event)
+		state.dirty = true
+		if !is_pure_hover {
+			state.layout_dirty = true
+		}
+		state.urgent_input = true
+		_ = append_or_coalesce_input_event(&state.pending_inputs, m.event, &state.input)
 		#partial switch ev in m.event {
 		case Resize_Event:
 			cols := int(ev.width)
@@ -715,6 +748,7 @@ ui_reduce_single_msg :: proc(state: ^UI_Coordinator_State, msg: UI_Msg) -> (is_t
 			state.vlist.viewport_rows = max(1, rows - 6)
 			ui_virtual_list_clamp(&state.vlist)
 			state.dirty = true
+			state.layout_dirty = true
 			state.urgent_input = true
 		}
 
@@ -727,6 +761,7 @@ ui_reduce_single_msg :: proc(state: ^UI_Coordinator_State, msg: UI_Msg) -> (is_t
 			state.active_moment_idx = m.moment_idx
 		}
 		state.dirty = true
+		state.layout_dirty = true
 
 	case UI_Msg_Select_Moment:
 		state.pinned_moment = m.pin
@@ -736,6 +771,7 @@ ui_reduce_single_msg :: proc(state: ^UI_Coordinator_State, msg: UI_Msg) -> (is_t
 			state.active_moment_idx = state.latest_moment_idx
 		}
 		state.dirty = true
+		state.layout_dirty = true
 		state.urgent_input = true
 
 	case UI_Msg_Scroll_Viewport:
@@ -750,12 +786,14 @@ ui_reduce_single_msg :: proc(state: ^UI_Coordinator_State, msg: UI_Msg) -> (is_t
 			slot.offset       = i32(state.vlist.scroll_offset)
 		}
 		state.dirty = true
+		state.layout_dirty = true
 		state.urgent_input = true
 
 	case UI_Msg_Search_Input:
 		ui_apply_search_query(state, m.query, true)
 		set_text(&state.input, "search_box", string(state.search_buf[:state.search_len]))
 		state.dirty        = true
+		state.layout_dirty = true
 		state.urgent_input = true
 
 	case UI_Msg_Palette_Toggle:
@@ -768,6 +806,7 @@ ui_reduce_single_msg :: proc(state: ^UI_Coordinator_State, msg: UI_Msg) -> (is_t
 			state.input.wants_focus_id = hash_id(state.palette.input_id)
 		}
 		state.dirty        = true
+		state.layout_dirty = true
 		state.urgent_input = true
 
 	case UI_Msg_Datalog_Ready:
@@ -784,10 +823,12 @@ ui_reduce_single_msg :: proc(state: ^UI_Coordinator_State, msg: UI_Msg) -> (is_t
 			state.last_datalog_summary = string(state.last_datalog_buf[:n])
 		}
 		state.dirty = true
+		state.layout_dirty = true
 
 	case UI_Msg_Diff_Ready:
 		state.last_diff_summary = m
 		state.dirty = true
+		state.layout_dirty = true
 
 	case UI_Msg_Batch:
 		for sub in m.msgs {
@@ -817,6 +858,7 @@ ui_reduce_single_msg :: proc(state: ^UI_Coordinator_State, msg: UI_Msg) -> (is_t
 			if state.input.clock_ns > 0 && state.input.pending_chord.started_tick_ns > 0 &&
 			   (state.input.clock_ns - state.input.pending_chord.started_tick_ns) >= timeout {
 				state.dirty = true
+				state.layout_dirty = true
 			}
 		}
 		is_tick = true
@@ -1117,18 +1159,98 @@ ui_post_resolve_step :: proc(state: ^UI_Coordinator_State) -> (mutated: bool) {
 }
 
 ui_coordinator_flush_frame :: proc(state: ^UI_Coordinator_State) {
-	free_all(context.temp_allocator)
 	state.screen.recorder     = state.recorder
 	state.layout_ctx.recorder = state.recorder
 	state.input.recorder      = state.recorder
-	rec := resolve_recorder(state.recorder)
-	heimdall.scoped_span(rec, TELEMETRY_SCOPE_COORDINATOR, "flush_frame", i64(state.total_frames + 1))
 
 	ui_rebind_internal_slices(state)
 	strings.builder_reset(&state.ansi_builder)
-	_ = ui_drain_side_effects(state, &state.ansi_builder)
+	has_pre_fx := ui_drain_side_effects(state, &state.ansi_builder)
+
+	has_existing_layout := state.use_widget_pipeline && len(state.layout_ctx.nodes) > 0 && state.cols > 0 && state.rows > 0
+	if !state.layout_dirty && !has_pre_fx && has_existing_layout && !state.input.pending_chord.active &&
+	   is_pure_hover_event_batch(&state.input, state.pending_inputs[:]) {
+		frame_start_focused_id     := state.input.focused_id
+		frame_start_hovered_id     := state.input.hovered_id
+		frame_start_hover_path     := state.input.hover_path
+		frame_start_hover_path_len := state.input.hover_path_len
+
+		for ev in state.pending_inputs {
+			resolve_input(&state.input, &state.layout_ctx, ev)
+		}
+		clear(&state.pending_inputs)
+
+		hover_same := state.input.hovered_id == frame_start_hovered_id &&
+		              state.input.hover_path_len == frame_start_hover_path_len &&
+		              state.input.hover_path == frame_start_hover_path
+
+		state.input.prev_focused_id     = frame_start_focused_id
+		state.input.prev_hovered_id     = frame_start_hovered_id
+		state.input.prev_hover_path     = frame_start_hover_path
+		state.input.prev_hover_path_len = frame_start_hover_path_len
+
+		if hover_same {
+			// Cursor moved to a different cell inside the same widget (e.g. `csv_main_table`):
+			// zero layout passes, zero CSV slicing, zero screen diffing.
+			// IMPORTANT: Do NOT call `free_all(context.temp_allocator)` here so `state.layout_ctx`
+			// remains intact for subsequent hover hit-tests until the next full render pass!
+			state.last_diff_cells = 0
+			state.last_ansi_bytes = 0
+			state.dirty           = false
+			state.urgent_input    = false
+			state.batch_drained   = 0
+			return
+		}
+
+		// Hover target changed: now reset temp_allocator and run 1 render pass with the updated `hovered_id`.
+		free_all(context.temp_allocator)
+		rec := resolve_recorder(state.recorder)
+		heimdall.scoped_span(rec, TELEMETRY_SCOPE_COORDINATOR, "flush_frame", i64(state.total_frames + 1))
+
+		state.use_widget_pipeline = false
+		state_store_begin_frame(&state.state_store)
+		ui_invoke_render_pass(state)
+		_ = ui_drain_side_effects(state, &state.ansi_builder)
+		if state.use_widget_pipeline {
+			state_store_sync_from_layout(&state.state_store, &state.layout_ctx, &state.input)
+			apply_input_highlights(&state.screen, &state.layout_ctx, &state.input)
+			render_layout(&state.screen, &state.layout_ctx)
+		}
+		state.last_diff_cells = screen_diff_ansi(&state.screen, &state.ansi_builder)
+		state.last_ansi_bytes = strings.builder_len(state.ansi_builder)
+		state.front_buf       = state.screen.front
+		state.back_buf        = state.screen.back
+		state.dirty           = false
+		state.urgent_input    = false
+		state.batch_drained   = 0
+		state.total_frames    += 1
+		state.last_frame_tick = time.tick_now()
+		heimdall.counter_add(rec, TELEMETRY_SCOPE_COORDINATOR, "frames_rendered", 1.0, i64(state.total_frames))
+		heimdall.gauge_set(rec, TELEMETRY_SCOPE_COORDINATOR, "diff_cells", f64(state.last_diff_cells), i64(state.last_ansi_bytes))
+		return
+	}
+
+	free_all(context.temp_allocator)
+	state.layout_dirty = false
+	rec := resolve_recorder(state.recorder)
+	heimdall.scoped_span(rec, TELEMETRY_SCOPE_COORDINATOR, "flush_frame", i64(state.total_frames + 1))
 
 	state.use_widget_pipeline = false
+	// Clear one-shot per-frame edge triggers from the previous frame before Pass #1
+	// so `render_pass` never observes stale `activated_id` / `clicked_id` / `escape_modal_id`
+	// values left over at the end of the prior frame.
+	state.input.activated_id          = 0
+	state.input.clicked_id            = 0
+	state.input.scrolled_id           = 0
+	state.input.text_changed_id       = 0
+	state.input.tab_changed_id        = 0
+	state.input.backdrop_clicked_id   = 0
+	state.input.escape_modal_id       = 0
+	state.input.triggered_action_id   = 0
+	state.input.triggered_action_name = ""
+	state.input.triggered_enum_val    = 0
+	state.input.has_triggered_enum    = false
+	state.input.last_disabled_reason  = ""
 	state_store_begin_frame(&state.state_store)
 	ui_invoke_render_pass(state)
 	_ = ui_drain_side_effects(state, &state.ansi_builder)
@@ -1184,16 +1306,46 @@ ui_coordinator_flush_frame :: proc(state: ^UI_Coordinator_State) {
 			last_text_changed: u64
 			last_disabled_msg: string
 
+			prev_focus   := state.input.focused_id
+			prev_edit    := state.input.editing_id
+			prev_pending := state.input.pending_chord.active
+			needs_rebuild := false
+
 			for ev, ev_idx in events {
+				is_pure_hover := false
+				if mev, is_m := ev.(Mouse_Event); is_m && (is_mouse_hover_motion(mev.action) || mev.action == .Leave) &&
+				   !state.input.mouse_down && state.input.active_splitter_id == 0 && state.input.event_handler == nil {
+					is_pure_hover = true
+				}
+				if !is_pure_hover {
+					needs_rebuild = true
+				}
+
 				resolve_input(&state.input, &state.layout_ctx, ev)
 				ui_pull_slot_to_vlist(state)
 
 				palette_changed := update_command_palette(&state.palette, &state.input)
 				if palette_changed {
 					state.palette_open = state.palette.is_open
+					needs_rebuild      = true
 				}
 
 				state_changed := ui_post_resolve_step(state)
+				if state_changed ||
+				   state.input.focused_id != prev_focus ||
+				   state.input.editing_id != prev_edit ||
+				   state.input.pending_chord.active != prev_pending ||
+				   state.input.wants_focus_id != 0 ||
+				   state.input.triggered_action_id != 0 ||
+				   state.input.activated_id != 0 ||
+				   state.input.clicked_id != 0 ||
+				   state.input.scrolled_id != 0 ||
+				   state.input.text_changed_id != 0 ||
+				   state.input.tab_changed_id != 0 ||
+				   state.input.backdrop_clicked_id != 0 ||
+				   state.input.escape_modal_id != 0 {
+					needs_rebuild = true
+				}
 
 				if state.input.triggered_action_id != 0 {
 					last_act_id   = state.input.triggered_action_id
@@ -1228,6 +1380,9 @@ ui_coordinator_flush_frame :: proc(state: ^UI_Coordinator_State) {
 					resolve_input(&state.input, &state.layout_ctx)
 					state.layout_ctx.recorder = saved_lay_rec
 					state.input.recorder      = saved_inp_rec
+					prev_focus   = state.input.focused_id
+					prev_edit    = state.input.editing_id
+					prev_pending = state.input.pending_chord.active
 				}
 			}
 
@@ -1235,6 +1390,8 @@ ui_coordinator_flush_frame :: proc(state: ^UI_Coordinator_State) {
 			// `.Trap_Focus` modals (e.g. `Command_Palette`) or `wants_focus_id` targets acquire focus on the same frame.
 			// Suppress telemetry on the internal post-action layout/focus reconciliation pass so a single
 			// `flush_frame` emits exactly one `end_layout` / `resolve_input` span for the frame.
+			// When the frame only processed pure mouse hover motion with zero state/focus mutations, skip the
+			// redundant second layout rebuild and input reconciliation pass.
 			state.input.triggered_action_id   = last_act_id
 			state.input.triggered_action_name = last_act_name
 			state.input.has_triggered_enum    = last_has_enum
@@ -1245,25 +1402,27 @@ ui_coordinator_flush_frame :: proc(state: ^UI_Coordinator_State) {
 			state.input.text_changed_id       = last_text_changed
 			state.input.last_disabled_reason  = last_disabled_msg
 
-			saved_lay_rec := state.layout_ctx.recorder
-			saved_inp_rec := state.input.recorder
-			state.layout_ctx.recorder = disabled_recorder()
-			state.input.recorder      = disabled_recorder()
-			ui_invoke_render_pass(state)
-			_ = ui_drain_side_effects(state, &state.ansi_builder)
-			resolve_input(&state.input, &state.layout_ctx)
-			state.layout_ctx.recorder = saved_lay_rec
-			state.input.recorder      = saved_inp_rec
+			if needs_rebuild {
+				saved_lay_rec := state.layout_ctx.recorder
+				saved_inp_rec := state.input.recorder
+				state.layout_ctx.recorder = disabled_recorder()
+				state.input.recorder      = disabled_recorder()
+				ui_invoke_render_pass(state)
+				_ = ui_drain_side_effects(state, &state.ansi_builder)
+				resolve_input(&state.input, &state.layout_ctx)
+				state.layout_ctx.recorder = saved_lay_rec
+				state.input.recorder      = saved_inp_rec
 
-			state.input.triggered_action_id   = last_act_id
-			state.input.triggered_action_name = last_act_name
-			state.input.has_triggered_enum    = last_has_enum
-			state.input.triggered_enum_val    = last_enum_val
-			state.input.activated_id          = last_activated_id
-			state.input.clicked_id            = last_clicked_id
-			state.input.scrolled_id           = last_scrolled_id
-			state.input.text_changed_id       = last_text_changed
-			state.input.last_disabled_reason  = last_disabled_msg
+				state.input.triggered_action_id   = last_act_id
+				state.input.triggered_action_name = last_act_name
+				state.input.has_triggered_enum    = last_has_enum
+				state.input.triggered_enum_val    = last_enum_val
+				state.input.activated_id          = last_activated_id
+				state.input.clicked_id            = last_clicked_id
+				state.input.scrolled_id           = last_scrolled_id
+				state.input.text_changed_id       = last_text_changed
+				state.input.last_disabled_reason  = last_disabled_msg
+			}
 		}
 
 		state.input.prev_focused_id     = frame_start_focused_id

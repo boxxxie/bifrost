@@ -671,15 +671,44 @@ handle_workbench_interactions :: proc(app: ^Workbench_App, slice: bifrost.Virtua
 }
 
 step_workbench_frame :: proc(app: ^Workbench_App, events: ..bifrost.Input_Event) {
-	bifrost.state_store_begin_frame(&app.state_store)
-
-	slice: bifrost.Virtual_Slice
-	build_workbench_ui(app, &slice)
-
-	bifrost.resolve_input(&app.input, &app.layout_ctx, ..events)
-	if handle_workbench_interactions(app, slice) || len(events) > 0 {
+	if len(events) > 0 && len(app.layout_ctx.nodes) > 0 && !app.input.pending_chord.active &&
+	   bifrost.is_pure_hover_event_batch(&app.input, events) {
+		frame_start_hovered_id     := app.input.hovered_id
+		frame_start_hover_path     := app.input.hover_path
+		frame_start_hover_path_len := app.input.hover_path_len
+		bifrost.resolve_input(&app.input, &app.layout_ctx, ..events)
+		if app.input.hovered_id == frame_start_hovered_id &&
+		   app.input.hover_path_len == frame_start_hover_path_len &&
+		   app.input.hover_path == frame_start_hover_path {
+			strings.builder_reset(&app.ansi_builder)
+			return
+		}
+		free_all(context.temp_allocator)
+		bifrost.state_store_begin_frame(&app.state_store)
+		slice: bifrost.Virtual_Slice
 		build_workbench_ui(app, &slice)
-		bifrost.resolve_input(&app.input, &app.layout_ctx)
+	} else {
+		free_all(context.temp_allocator)
+		bifrost.state_store_begin_frame(&app.state_store)
+
+		slice: bifrost.Virtual_Slice
+		build_workbench_ui(app, &slice)
+
+		bifrost.resolve_input(&app.input, &app.layout_ctx, ..events)
+		if handle_workbench_interactions(app, slice) || (len(events) > 0 && !bifrost.is_pure_hover_event_batch(&app.input, events)) {
+			build_workbench_ui(app, &slice)
+			bifrost.resolve_input(&app.input, &app.layout_ctx)
+		}
+	}
+
+	slice := bifrost.Virtual_Slice{}
+	if slot := bifrost.get_scroll_slot(&app.input, bifrost.hash_id("keymap_table")); slot != nil {
+		slice.total_rows    = slot.total_rows
+		slice.viewport_rows = slot.viewport_rows
+		slice.scroll_offset = slot.offset
+		slice.selected_row  = slot.selected_row
+		slice.start_row     = clamp(slot.offset, 0, slot.total_rows)
+		slice.end_row       = clamp(slice.start_row + slot.viewport_rows, slice.start_row, slot.total_rows)
 	}
 
 	bifrost.state_store_sync_from_layout(&app.state_store, &app.layout_ctx, &app.input)
@@ -774,23 +803,39 @@ run_workbench :: proc(live_tty: bool) -> bool {
 			_, _ = os.write_string(os.stdout, strings.to_string(app.ansi_builder))
 		}
 
+		last_tick := time.tick_now()
+		target_frame_interval := 33 * time.Millisecond
+		queued_inputs := make([dynamic]bifrost.Input_Event, 0, 64, context.allocator)
+		defer delete(queued_inputs)
 		for !app.quit_requested {
-			ev, has_ev, _ := bifrost.poll_next_event(&term, 16)
-			app.input.clock_ns = time.tick_now()._nsec
-			if has_ev || app.input.pending_chord.active {
-				if has_ev {
-					if res_ev, is_res := ev.(bifrost.Resize_Event); is_res {
+			elapsed := time.tick_diff(last_tick, time.tick_now())
+			wait_ms := max(i32(1), i32((target_frame_interval - elapsed) / time.Millisecond))
+			ev, has_ev, _ := bifrost.poll_next_event(&term, wait_ms)
+			if has_ev {
+				_ = bifrost.append_or_coalesce_input_event(&queued_inputs, ev, &app.input)
+				for drain := 0; drain < 128; drain += 1 {
+					ev2, has_ev2, _ := bifrost.poll_next_event(&term, 0)
+					if !has_ev2 {
+						break
+					}
+					_ = bifrost.append_or_coalesce_input_event(&queued_inputs, ev2, &app.input)
+				}
+			}
+			now := time.tick_now()
+			app.input.clock_ns = now._nsec
+			if (len(queued_inputs) > 0 || app.input.pending_chord.active) && time.tick_diff(last_tick, now) >= target_frame_interval {
+				last_tick = now
+				for q_ev in queued_inputs {
+					if res_ev, is_res := q_ev.(bifrost.Resize_Event); is_res {
 						_ = bifrost.screen_resize(&app.screen, max(64, res_ev.width), max(18, res_ev.height))
 					}
-					step_workbench_frame(&app, ev)
-				} else {
-					step_workbench_frame(&app)
 				}
+				step_workbench_frame(&app, ..queued_inputs[:])
+				clear(&queued_inputs)
 				if strings.builder_len(app.ansi_builder) > 0 {
 					_, _ = os.write_string(os.stdout, strings.to_string(app.ansi_builder))
 				}
 			}
-			free_all(context.temp_allocator)
 		}
 	} else {
 		// =========================================================================

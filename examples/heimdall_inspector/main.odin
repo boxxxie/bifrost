@@ -1026,51 +1026,50 @@ run_heimdall_inspector :: proc(live_tty: bool, track: ^mem.Tracking_Allocator = 
 			wait_ms := max(i32(1), i32((target_frame_interval - elapsed_since_frame) / time.Millisecond))
 			ev, has_ev, _ := bifrost.poll_next_event(&term, wait_ms)
 			if has_ev {
-				append(&queued_inputs, ev)
+				_ = bifrost.append_or_coalesce_input_event(&queued_inputs, ev, &ui_actor.state.input)
 				for drain := 0; drain < 128; drain += 1 {
 					ev2, has_ev2, _ := bifrost.poll_next_event(&term, 0)
 					if !has_ev2 {
 						break
 					}
-					if m2, is_m2 := ev2.(bifrost.Mouse_Event); is_m2 && (m2.action == .Move || m2.action == .Drag) && len(queued_inputs) > 0 {
-						if m1, is_m1 := queued_inputs[len(queued_inputs) - 1].(bifrost.Mouse_Event); is_m1 && m1.action == m2.action {
-							queued_inputs[len(queued_inputs) - 1] = ev2
-							continue
-						}
-					}
-					append(&queued_inputs, ev2)
+					_ = bifrost.append_or_coalesce_input_event(&queued_inputs, ev2, &ui_actor.state.input)
 				}
 			}
 			now := time.tick_now()
 			is_heartbeat := time.tick_diff(last_pulse, now) >= heartbeat_interval
 			if is_heartbeat {
 				last_pulse = now
-				ui_actor.state.dirty = true
+				ui_actor.state.dirty        = true
+				ui_actor.state.layout_dirty = true
 			}
 			if time.tick_diff(last_tick, now) >= target_frame_interval || app.pending_reload || is_heartbeat {
 				last_tick = now
-				for q_ev in queued_inputs {
-					actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Input{event = q_ev}))
-				}
-				clear(&queued_inputs)
-				actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Frame_Tick{
-					tick_ns = max(1, i64(time.tick_diff(boot_tick, now))),
-				}))
-				actor.scheduler_wait_idle(&sched)
-				if app.pending_reload {
-					app.pending_reload = false
-					refresh_inspector_store(&app)
-					ui_actor.state.dirty = true
-					actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Frame_Tick{
-						tick_ns = max(1, i64(time.tick_since(boot_tick))),
-					}))
+				if len(queued_inputs) > 0 || ui_actor.state.dirty || ui_actor.state.input.pending_chord.active || app.pending_reload {
+					bifrost.ui_send_inputs_and_tick(
+						&sched,
+						ui_pid,
+						queued_inputs[:],
+						max(1, i64(time.tick_diff(boot_tick, now))),
+						context.temp_allocator,
+					)
+					clear(&queued_inputs)
 					actor.scheduler_wait_idle(&sched)
-				}
-				if ui_actor.state.last_ansi_bytes > 0 {
-					_, _ = os.write_string(os.stdout, strings.to_string(ui_actor.state.ansi_builder))
+					if app.pending_reload {
+						app.pending_reload = false
+						refresh_inspector_store(&app)
+						ui_actor.state.dirty        = true
+						ui_actor.state.layout_dirty = true
+						actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Frame_Tick{
+							tick_ns = max(1, i64(time.tick_since(boot_tick))),
+						}))
+						actor.scheduler_wait_idle(&sched)
+					}
+					if ui_actor.state.last_ansi_bytes > 0 {
+						_, _ = os.write_string(os.stdout, strings.to_string(ui_actor.state.ansi_builder))
+					}
+					free_all(context.temp_allocator)
 				}
 			}
-			free_all(context.temp_allocator)
 		}
 	} else {
 		// Headless verification:

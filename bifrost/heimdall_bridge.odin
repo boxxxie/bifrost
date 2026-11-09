@@ -1091,16 +1091,11 @@ heimdall_sample_runtime_metrics :: proc(
 	if m == nil {
 		return
 	}
-	if latest_frame_dur_ns > 0 {
-		m.frame_time_us = int((latest_frame_dur_ns + 500) / 1000)
-	}
-	if track != nil {
-		m.heap_bytes      = track.current_memory_allocated
-		m.peak_heap_bytes = track.peak_memory_allocated
-	}
 
 	now := time.tick_now()
-	if m.last_sample_tick._nsec == 0 {
+	elapsed_s: f32 = 0.0
+	is_first_sample := m.last_sample_tick._nsec == 0
+	if is_first_sample {
 		m.last_sample_tick = now
 		m.last_frame_count = total_frames
 		m.fps              = 0.0
@@ -1109,7 +1104,7 @@ heimdall_sample_runtime_metrics :: proc(
 		if elapsed_ns < min_interval_ms * 1_000_000 {
 			return
 		}
-		elapsed_s := f32(elapsed_ns) / 1e9
+		elapsed_s = f32(elapsed_ns) / 1e9
 		if elapsed_s > 0.001 {
 			df := total_frames - m.last_frame_count if total_frames >= m.last_frame_count else 0
 			inst_fps := f32(df) / elapsed_s
@@ -1120,43 +1115,52 @@ heimdall_sample_runtime_metrics :: proc(
 		}
 		m.last_sample_tick = now
 		m.last_frame_count = total_frames
+	}
 
-		// Sample `/proc/self/stat` for utime (field 14) + stime (field 15) in 100Hz clock ticks
-		if stat_bytes, s_err := os.read_entire_file("/proc/self/stat", context.temp_allocator); s_err == nil {
-			stat_str := string(stat_bytes)
-			if rparen := strings.last_index_byte(stat_str, ')'); rparen >= 0 && rparen + 2 < len(stat_str) {
-				rest := stat_str[rparen + 2:]
-				field_idx := 3 // field 3 is state ('R'/'S') immediately after ") "
-				utime_j: i64 = 0
-				stime_j: i64 = 0
-				tok_start := 0
-				for i := 0; i <= len(rest); i += 1 {
-					if i == len(rest) || rest[i] == ' ' {
-						if i > tok_start {
-							tok := rest[tok_start:i]
-							if field_idx == 14 {
-								utime_j, _ = heimdall_parse_leading_int(tok)
-							} else if field_idx == 15 {
-								stime_j, _ = heimdall_parse_leading_int(tok)
-								break
-							}
-							field_idx += 1
+	// Update frame time and heap stats only when the 200ms sample gate opens
+	if latest_frame_dur_ns > 0 {
+		m.frame_time_us = int((latest_frame_dur_ns + 500) / 1000)
+	}
+	if track != nil {
+		m.heap_bytes      = track.current_memory_allocated
+		m.peak_heap_bytes = track.peak_memory_allocated
+	}
+
+	// Sample `/proc/self/stat` for utime (field 14) + stime (field 15) in 100Hz clock ticks
+	if stat_bytes, s_err := os.read_entire_file("/proc/self/stat", context.temp_allocator); s_err == nil {
+		stat_str := string(stat_bytes)
+		if rparen := strings.last_index_byte(stat_str, ')'); rparen >= 0 && rparen + 2 < len(stat_str) {
+			rest := stat_str[rparen + 2:]
+			field_idx := 3 // field 3 is state ('R'/'S') immediately after ") "
+			utime_j: i64 = 0
+			stime_j: i64 = 0
+			tok_start := 0
+			for i := 0; i <= len(rest); i += 1 {
+				if i == len(rest) || rest[i] == ' ' {
+					if i > tok_start {
+						tok := rest[tok_start:i]
+						if field_idx == 14 {
+							utime_j, _ = heimdall_parse_leading_int(tok)
+						} else if field_idx == 15 {
+							stime_j, _ = heimdall_parse_leading_int(tok)
+							break
 						}
-						tok_start = i + 1
+						field_idx += 1
 					}
+					tok_start = i + 1
 				}
-				total_j := u64(max(i64(0), utime_j + stime_j))
-				if m.last_cpu_jiffies > 0 && total_j >= m.last_cpu_jiffies && elapsed_s > 0.001 {
-					dj := f32(total_j - m.last_cpu_jiffies)
-					// Linux USER_HZ is 100 jiffies/sec -> (dj / 100.0) / elapsed_s * 100.0 == dj / elapsed_s
-					inst_cpu := clamp(dj / elapsed_s, 0.0, 800.0)
-					m.cpu_percent = m.cpu_percent * 0.4 + inst_cpu * 0.6
-					if m.cpu_percent < 0.05 {
-						m.cpu_percent = 0.0
-					}
-				}
-				m.last_cpu_jiffies = total_j
 			}
+			total_j := u64(max(i64(0), utime_j + stime_j))
+			if !is_first_sample && m.last_cpu_jiffies > 0 && total_j >= m.last_cpu_jiffies && elapsed_s > 0.001 {
+				dj := f32(total_j - m.last_cpu_jiffies)
+				// Linux USER_HZ is 100 jiffies/sec -> (dj / 100.0) / elapsed_s * 100.0 == dj / elapsed_s
+				inst_cpu := clamp(dj / elapsed_s, 0.0, 800.0)
+				m.cpu_percent = m.cpu_percent * 0.4 + inst_cpu * 0.6
+				if m.cpu_percent < 0.05 {
+					m.cpu_percent = 0.0
+				}
+			}
+			m.last_cpu_jiffies = total_j
 		}
 	}
 

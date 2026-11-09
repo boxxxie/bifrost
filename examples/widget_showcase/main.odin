@@ -1174,15 +1174,32 @@ handle_showcase_interactions :: proc(app: ^Showcase_App) -> bool {
 }
 
 step_showcase_frame :: proc(app: ^Showcase_App, events: ..bifrost.Input_Event) {
-	bifrost.state_store_begin_frame(&app.state_store)
-
 	tree_slice: bifrost.Tree_Slice
-	build_showcase_ui(app, &tree_slice)
-
-	bifrost.resolve_input(&app.input, &app.layout_ctx, ..events)
-	if handle_showcase_interactions(app) || len(events) > 0 {
+	if len(events) > 0 && len(app.layout_ctx.nodes) > 0 && bifrost.is_pure_hover_event_batch(&app.input, events) {
+		frame_start_hovered_id     := app.input.hovered_id
+		frame_start_hover_path     := app.input.hover_path
+		frame_start_hover_path_len := app.input.hover_path_len
+		bifrost.resolve_input(&app.input, &app.layout_ctx, ..events)
+		if app.input.hovered_id == frame_start_hovered_id &&
+		   app.input.hover_path_len == frame_start_hover_path_len &&
+		   app.input.hover_path == frame_start_hover_path {
+			strings.builder_reset(&app.ansi_builder)
+			return
+		}
+		free_all(context.temp_allocator)
+		bifrost.state_store_begin_frame(&app.state_store)
 		build_showcase_ui(app, &tree_slice)
-		bifrost.resolve_input(&app.input, &app.layout_ctx)
+	} else {
+		free_all(context.temp_allocator)
+		bifrost.state_store_begin_frame(&app.state_store)
+
+		build_showcase_ui(app, &tree_slice)
+
+		bifrost.resolve_input(&app.input, &app.layout_ctx, ..events)
+		if handle_showcase_interactions(app) || (len(events) > 0 && !bifrost.is_pure_hover_event_batch(&app.input, events)) {
+			build_showcase_ui(app, &tree_slice)
+			bifrost.resolve_input(&app.input, &app.layout_ctx)
+		}
 	}
 
 	bifrost.state_store_sync_from_layout(&app.state_store, &app.layout_ctx, &app.input)
@@ -1244,47 +1261,36 @@ run_showcase :: proc(live_tty: bool) -> bool {
 
 		last_tick := time.tick_now()
 		target_frame_interval := 33 * time.Millisecond // 30 FPS cap
-		pending_ev: bifrost.Input_Event
-		has_pending_ev := false
+		queued_inputs := make([dynamic]bifrost.Input_Event, 0, 64, context.allocator)
+		defer delete(queued_inputs)
 		for !app.quit_requested {
 			elapsed_since_frame := time.tick_diff(last_tick, time.tick_now())
 			wait_ms := max(i32(1), i32((target_frame_interval - elapsed_since_frame) / time.Millisecond))
 			ev, has_ev, _ := bifrost.poll_next_event(&term, wait_ms)
 			if has_ev {
-				if res_ev, is_res := ev.(bifrost.Resize_Event); is_res {
-					_ = bifrost.screen_resize(&app.screen, max(80, res_ev.width), max(20, res_ev.height))
-				}
-				pending_ev     = ev
-				has_pending_ev = true
-				// Coalesce bursty mouse motion events within the 30 FPS window
-				for drain := 0; drain < 64; drain += 1 {
+				_ = bifrost.append_or_coalesce_input_event(&queued_inputs, ev, &app.input)
+				for drain := 0; drain < 128; drain += 1 {
 					ev2, has_ev2, _ := bifrost.poll_next_event(&term, 0)
 					if !has_ev2 {
 						break
 					}
-					if res_ev2, is_res2 := ev2.(bifrost.Resize_Event); is_res2 {
-						_ = bifrost.screen_resize(&app.screen, max(80, res_ev2.width), max(20, res_ev2.height))
-					}
-					if m2, is_m2 := ev2.(bifrost.Mouse_Event); is_m2 && (m2.action == .Move || m2.action == .Drag) {
-						if m1, is_m1 := pending_ev.(bifrost.Mouse_Event); is_m1 && m1.action == m2.action {
-							pending_ev = ev2
-							continue
-						}
-					}
-					step_showcase_frame(&app, pending_ev)
-					pending_ev = ev2
+					_ = bifrost.append_or_coalesce_input_event(&queued_inputs, ev2, &app.input)
 				}
 			}
 			now := time.tick_now()
-			if has_pending_ev && time.tick_diff(last_tick, now) >= target_frame_interval {
-				last_tick      = now
-				has_pending_ev = false
-				step_showcase_frame(&app, pending_ev)
+			if len(queued_inputs) > 0 && time.tick_diff(last_tick, now) >= target_frame_interval {
+				last_tick = now
+				for q_ev in queued_inputs {
+					if res_ev, is_res := q_ev.(bifrost.Resize_Event); is_res {
+						_ = bifrost.screen_resize(&app.screen, max(80, res_ev.width), max(20, res_ev.height))
+					}
+				}
+				step_showcase_frame(&app, ..queued_inputs[:])
+				clear(&queued_inputs)
 				if strings.builder_len(app.ansi_builder) > 0 {
 					_, _ = os.write_string(os.stdout, strings.to_string(app.ansi_builder))
 				}
 			}
-			free_all(context.temp_allocator)
 		}
 	} else {
 		// Deterministic headless walkthrough exercising all 4 new components together:

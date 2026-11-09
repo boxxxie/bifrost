@@ -725,6 +725,32 @@ handle_kanban_interactions :: proc(app: ^Kanban_App, snap: Kanban_Snapshot) -> b
 }
 
 step_kanban_frame :: proc(app: ^Kanban_App, events: ..bifrost.Input_Event) {
+	if len(events) > 0 && len(app.layout_ctx.nodes) > 0 && bifrost.is_pure_hover_event_batch(&app.input, events) {
+		frame_start_hovered_id     := app.input.hovered_id
+		frame_start_hover_path     := app.input.hover_path
+		frame_start_hover_path_len := app.input.hover_path_len
+		bifrost.resolve_input(&app.input, &app.layout_ctx, ..events)
+		if app.input.hovered_id == frame_start_hovered_id &&
+		   app.input.hover_path_len == frame_start_hover_path_len &&
+		   app.input.hover_path == frame_start_hover_path {
+			strings.builder_reset(&app.ansi_builder)
+			return
+		}
+		free_all(context.temp_allocator)
+		bifrost.state_store_begin_frame(&app.state_store)
+		moment := app.active_moment if app.pinned_history else -1
+		snap := read_kanban_snapshot(app, moment)
+		build_kanban_ui(app, snap)
+		bifrost.state_store_sync_from_layout(&app.state_store, &app.layout_ctx, &app.input)
+		bifrost.apply_input_highlights(&app.screen, &app.layout_ctx, &app.input)
+		bifrost.render_layout(&app.screen, &app.layout_ctx)
+		strings.builder_reset(&app.ansi_builder)
+		_ = bifrost.screen_diff_ansi(&app.screen, &app.ansi_builder)
+		app.frames_rendered += 1
+		return
+	}
+
+	free_all(context.temp_allocator)
 	bifrost.state_store_begin_frame(&app.state_store)
 
 	moment := app.active_moment if app.pinned_history else -1
@@ -732,7 +758,7 @@ step_kanban_frame :: proc(app: ^Kanban_App, events: ..bifrost.Input_Event) {
 	build_kanban_ui(app, snap)
 
 	bifrost.resolve_input(&app.input, &app.layout_ctx, ..events)
-	if handle_kanban_interactions(app, snap) || len(events) > 0 {
+	if handle_kanban_interactions(app, snap) || (len(events) > 0 && !bifrost.is_pure_hover_event_batch(&app.input, events)) {
 		moment = app.active_moment if app.pinned_history else -1
 		snap = read_kanban_snapshot(app, moment)
 		build_kanban_ui(app, snap)
@@ -795,18 +821,38 @@ run_kanban :: proc(live_tty: bool) -> bool {
 			_, _ = os.write_string(os.stdout, strings.to_string(app.ansi_builder))
 		}
 
+		last_tick := time.tick_now()
+		target_frame_interval := 33 * time.Millisecond
+		queued_inputs := make([dynamic]bifrost.Input_Event, 0, 64, context.allocator)
+		defer delete(queued_inputs)
 		for !app.quit_requested {
-			ev, has_ev, _ := bifrost.poll_next_event(&term, 16)
+			elapsed := time.tick_diff(last_tick, time.tick_now())
+			wait_ms := max(i32(1), i32((target_frame_interval - elapsed) / time.Millisecond))
+			ev, has_ev, _ := bifrost.poll_next_event(&term, wait_ms)
 			if has_ev {
-				if res_ev, is_res := ev.(bifrost.Resize_Event); is_res {
-					_ = bifrost.screen_resize(&app.screen, max(72, res_ev.width), max(16, res_ev.height))
+				_ = bifrost.append_or_coalesce_input_event(&queued_inputs, ev, &app.input)
+				for drain := 0; drain < 128; drain += 1 {
+					ev2, has_ev2, _ := bifrost.poll_next_event(&term, 0)
+					if !has_ev2 {
+						break
+					}
+					_ = bifrost.append_or_coalesce_input_event(&queued_inputs, ev2, &app.input)
 				}
-				step_kanban_frame(&app, ev)
+			}
+			now := time.tick_now()
+			if len(queued_inputs) > 0 && time.tick_diff(last_tick, now) >= target_frame_interval {
+				last_tick = now
+				for q_ev in queued_inputs {
+					if res_ev, is_res := q_ev.(bifrost.Resize_Event); is_res {
+						_ = bifrost.screen_resize(&app.screen, max(72, res_ev.width), max(16, res_ev.height))
+					}
+				}
+				step_kanban_frame(&app, ..queued_inputs[:])
+				clear(&queued_inputs)
 				if strings.builder_len(app.ansi_builder) > 0 {
 					_, _ = os.write_string(os.stdout, strings.to_string(app.ansi_builder))
 				}
 			}
-			free_all(context.temp_allocator)
 		}
 	} else {
 		// Deterministic headless verification & board walkthrough:

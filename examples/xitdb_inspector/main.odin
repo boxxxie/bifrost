@@ -133,19 +133,43 @@ run_inspector :: proc(live_tty: bool) -> bool {
 			_, _ = os.write_string(os.stdout, strings.to_string(ui_actor.state.ansi_builder))
 		}
 
+		last_tick := time.tick_now()
+		target_frame_interval := 33 * time.Millisecond
+		queued_inputs := make([dynamic]bifrost.Input_Event, 0, 64, context.allocator)
+		defer delete(queued_inputs)
 		for !ui_actor.state.quit_requested {
-			ev, has_ev, _ := bifrost.poll_next_event(&term, 16)
+			elapsed := time.tick_diff(last_tick, time.tick_now())
+			wait_ms := max(i32(1), i32((target_frame_interval - elapsed) / time.Millisecond))
+			ev, has_ev, _ := bifrost.poll_next_event(&term, wait_ms)
 			if has_ev {
-				actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Input{event = ev}))
+				_ = bifrost.append_or_coalesce_input_event(&queued_inputs, ev, &ui_actor.state.input)
+				for drain := 0; drain < 128; drain += 1 {
+					ev2, has_ev2, _ := bifrost.poll_next_event(&term, 0)
+					if !has_ev2 {
+						break
+					}
+					_ = bifrost.append_or_coalesce_input_event(&queued_inputs, ev2, &ui_actor.state.input)
+				}
 			}
-			actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Frame_Tick{
-				tick_ns = time.tick_now()._nsec,
-			}))
-			actor.scheduler_wait_idle(&sched)
-			if ui_actor.state.last_ansi_bytes > 0 {
-				_, _ = os.write_string(os.stdout, strings.to_string(ui_actor.state.ansi_builder))
+			now := time.tick_now()
+			if time.tick_diff(last_tick, now) >= target_frame_interval {
+				last_tick = now
+				if len(queued_inputs) > 0 || ui_actor.state.dirty || ui_actor.state.input.pending_chord.active {
+					bifrost.ui_send_inputs_and_tick(
+						&sched,
+						ui_pid,
+						queued_inputs[:],
+						now._nsec,
+						context.temp_allocator,
+					)
+					clear(&queued_inputs)
+					actor.scheduler_wait_idle(&sched)
+					if ui_actor.state.last_ansi_bytes > 0 {
+						_, _ = os.write_string(os.stdout, strings.to_string(ui_actor.state.ansi_builder))
+					}
+					free_all(context.temp_allocator)
+				}
 			}
-			free_all(context.temp_allocator)
 		}
 		_ = bifrost.save_ui_workspace_to_xitdb(&shared, &ui_actor.state, "inspector_default")
 	} else {

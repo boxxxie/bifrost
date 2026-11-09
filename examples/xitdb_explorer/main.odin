@@ -1686,19 +1686,36 @@ handle_explorer_interactions :: proc(app: ^Explorer_App) -> bool {
 }
 
 step_explorer_frame :: proc(app: ^Explorer_App, events: ..bifrost.Input_Event) {
-	bifrost.state_store_begin_frame(&app.state_store)
-
 	tree_slice: bifrost.Tree_Slice
 	slot_slice: bifrost.Virtual_Slice
 	datalog_slice: bifrost.Virtual_Slice
 	diff_slice: bifrost.Virtual_Slice
 
-	build_explorer_ui(app, &tree_slice, &slot_slice, &datalog_slice, &diff_slice)
-	bifrost.resolve_input(&app.input, &app.layout_ctx, ..events)
-
-	if handle_explorer_interactions(app) || len(events) > 0 {
+	if len(events) > 0 && len(app.layout_ctx.nodes) > 0 && bifrost.is_pure_hover_event_batch(&app.input, events) {
+		frame_start_hovered_id     := app.input.hovered_id
+		frame_start_hover_path     := app.input.hover_path
+		frame_start_hover_path_len := app.input.hover_path_len
+		bifrost.resolve_input(&app.input, &app.layout_ctx, ..events)
+		if app.input.hovered_id == frame_start_hovered_id &&
+		   app.input.hover_path_len == frame_start_hover_path_len &&
+		   app.input.hover_path == frame_start_hover_path {
+			strings.builder_reset(&app.ansi_builder)
+			return
+		}
+		free_all(context.temp_allocator)
+		bifrost.state_store_begin_frame(&app.state_store)
 		build_explorer_ui(app, &tree_slice, &slot_slice, &datalog_slice, &diff_slice)
-		bifrost.resolve_input(&app.input, &app.layout_ctx)
+	} else {
+		free_all(context.temp_allocator)
+		bifrost.state_store_begin_frame(&app.state_store)
+
+		build_explorer_ui(app, &tree_slice, &slot_slice, &datalog_slice, &diff_slice)
+		bifrost.resolve_input(&app.input, &app.layout_ctx, ..events)
+
+		if handle_explorer_interactions(app) || (len(events) > 0 && !bifrost.is_pure_hover_event_batch(&app.input, events)) {
+			build_explorer_ui(app, &tree_slice, &slot_slice, &datalog_slice, &diff_slice)
+			bifrost.resolve_input(&app.input, &app.layout_ctx)
+		}
 	}
 
 	bifrost.state_store_sync_from_layout(&app.state_store, &app.layout_ctx, &app.input)
@@ -1825,18 +1842,38 @@ run_explorer :: proc(live_tty: bool, seed_only: bool, custom_db_path: string) ->
 			_, _ = os.write_string(os.stdout, strings.to_string(app.ansi_builder))
 		}
 
+		last_tick := time.tick_now()
+		target_frame_interval := 33 * time.Millisecond
+		queued_inputs := make([dynamic]bifrost.Input_Event, 0, 64, context.allocator)
+		defer delete(queued_inputs)
 		for !app.quit_requested {
-			ev, has_ev, _ := bifrost.poll_next_event(&term, 16)
+			elapsed := time.tick_diff(last_tick, time.tick_now())
+			wait_ms := max(i32(1), i32((target_frame_interval - elapsed) / time.Millisecond))
+			ev, has_ev, _ := bifrost.poll_next_event(&term, wait_ms)
 			if has_ev {
-				if res_ev, is_res := ev.(bifrost.Resize_Event); is_res {
-					_ = bifrost.screen_resize(&app.screen, max(80, res_ev.width), max(20, res_ev.height))
+				_ = bifrost.append_or_coalesce_input_event(&queued_inputs, ev, &app.input)
+				for drain := 0; drain < 128; drain += 1 {
+					ev2, has_ev2, _ := bifrost.poll_next_event(&term, 0)
+					if !has_ev2 {
+						break
+					}
+					_ = bifrost.append_or_coalesce_input_event(&queued_inputs, ev2, &app.input)
 				}
-				step_explorer_frame(app, ev)
+			}
+			now := time.tick_now()
+			if len(queued_inputs) > 0 && time.tick_diff(last_tick, now) >= target_frame_interval {
+				last_tick = now
+				for q_ev in queued_inputs {
+					if res_ev, is_res := q_ev.(bifrost.Resize_Event); is_res {
+						_ = bifrost.screen_resize(&app.screen, max(80, res_ev.width), max(20, res_ev.height))
+					}
+				}
+				step_explorer_frame(app, ..queued_inputs[:])
+				clear(&queued_inputs)
 				if strings.builder_len(app.ansi_builder) > 0 {
 					_, _ = os.write_string(os.stdout, strings.to_string(app.ansi_builder))
 				}
 			}
-			free_all(context.temp_allocator)
 		}
 	} else {
 		// Deterministic headless walkthrough exercising all 3 tabs + live transaction + Datalog + diff:
