@@ -441,7 +441,7 @@ render_log_monitor_frame :: proc(coord: ^bifrost.UI_Coordinator_State) {
 		}
 
 		// 3. Main Split Body (Filter Sidebar + Interactive Splitter + Virtualized Log Stream)
-		body_h := max(i32(6), h - 6)
+		body_h := max(i32(6), h - 7)
 		if bifrost.ui_scope(&coord.layout_ctx, &coord.screen, "monitor_body", bifrost.Scope_Config{
 			dir    = .Row,
 			width  = bifrost.grow(1),
@@ -531,6 +531,26 @@ render_log_monitor_frame :: proc(coord: ^bifrost.UI_Coordinator_State) {
 						p99_series := [8]f32{2.1, 3.4, 2.8, 5.2, 4.1, 6.8, 3.9, 2.4}
 						bifrost.canvas_draw_series(c, p99_series[:], 1.0, 8.0, bifrost.rgb(115, 195, 255))
 					},
+				})
+
+				// Track 20: Auto-Scrolling `ui_log_viewer` Alert Feed
+				alert_entries := [4]bifrost.Log_Entry{
+					{timestamp = "10:00:01", level = .Info,  target = "tls",   message = "TLS 1.3 handshake ready"},
+					{timestamp = "10:00:02", level = .Warn,  target = "shard", message = "Replica #2 tail p99=7ms"},
+					{timestamp = "10:00:03", level = .Error, target = "rpc",   message = "Peer heartbeat retry"},
+					{timestamp = "10:00:04", level = .Info,  target = "xitdb", message = fmt.tprintf("Moment @%d committed", coord.active_moment_idx)},
+				}
+				_ = bifrost.ui_log_viewer(&coord.layout_ctx, &coord.screen, &coord.input, "sidebar_alert_viewer", alert_entries[:], &coord.alert_log_state, bifrost.Log_Viewer_Config{
+					title         = "Alert Feed",
+					width         = bifrost.grow(1),
+					height        = bifrost.fixed(4),
+					border        = .Rounded,
+					fg            = text_fg,
+					bg            = bar_bg,
+					border_fg     = bifrost.rgb(75, 95, 125),
+					title_fg      = accent,
+					show_badge    = true,
+					fallback_rows = 2,
 				})
 			}
 
@@ -752,27 +772,63 @@ render_log_monitor_frame :: proc(coord: ^bifrost.UI_Coordinator_State) {
 			}
 		}
 
-		// 4. Worker Telemetry Row (Datalog Audit + Moment Diff) + Live Contextual Key-Hint Bar
-		footer_str := fmt.tprintf(
-			" Datalog: %s | Diff(@%d->@%d): +%d ~%d -%d",
-			coord.last_datalog_summary if len(coord.last_datalog_summary) > 0 else "ready",
-			coord.last_diff_summary.from_moment,
-			coord.last_diff_summary.to_moment,
-			coord.last_diff_summary.added,
-			coord.last_diff_summary.modified,
-			coord.last_diff_summary.removed,
-		)
-		bifrost.set_paint(&coord.screen, "footer_bar", bifrost.Paint_Spec{
-			text    = footer_str,
-			fg      = muted_fg,
-			bg      = bar_bg,
-			fill_bg = true,
-		})
-		bifrost.leaf(&coord.layout_ctx, "footer_bar", w, 1, bifrost.Box_Config{
+		// 3b. Activity & Progress Strip (Worker Spinner + Memory Gauge + Ingestion Bar)
+		if bifrost.container(&coord.layout_ctx, "progress_strip", bifrost.Box_Config{
+			dir    = .Row,
 			width  = bifrost.grow(1),
 			height = bifrost.fixed(1),
-			text   = footer_str,
-		})
+			gap    = 1,
+		}) {
+			bifrost.ui_spinner(&coord.layout_ctx, &coord.screen, "actor_spinner", bifrost.Spinner_Config{
+				kind     = .Dots,
+				tick     = int(coord.total_frames),
+				label    = "Sleipnir MPSC Active",
+				fg       = bifrost.rgb(130, 230, 165),
+				label_fg = muted_fg,
+			})
+			bifrost.ui_gauge(&coord.layout_ctx, &coord.screen, "buffer_gauge", bifrost.Gauge_Config{
+				ratio           = 0.42,
+				show_percentage = true,
+				label           = "Mailbox 42%",
+				width           = bifrost.fixed(24),
+				thresholds      = []bifrost.Gauge_Threshold{
+					{above = 0.0, fg = bifrost.rgb(80, 200, 120)},
+					{above = 0.7, fg = bifrost.rgb(255, 200, 40)},
+					{above = 0.9, fg = bifrost.rgb(255, 60, 60)},
+				},
+				unfilled_bg     = bar_bg,
+			})
+			bifrost.ui_progress_bar(&coord.layout_ctx, &coord.screen, "snapshot_progress", bifrost.Progress_Bar_Config{
+				ratio           = 0.78,
+				show_percentage = true,
+				width           = bifrost.grow(1),
+				filled_fg       = accent,
+				unfilled_bg     = bar_bg,
+			})
+		}
+
+		// 4. Worker Telemetry Row (Datalog Audit + Moment Diff) + Live Contextual Key-Hint Bar
+		if bifrost.ui_scope(&coord.layout_ctx, &coord.screen, "footer_row", bifrost.Scope_Config{
+			dir     = .Row,
+			width   = bifrost.grow(1),
+			height  = bifrost.fixed(1),
+			bg      = bar_bg,
+			fill_bg = true,
+		}) {
+			footer_str := fmt.tprintf(
+				" Datalog: %s | Diff(@%d->@%d): +%d ~%d -%d  ",
+				coord.last_datalog_summary if len(coord.last_datalog_summary) > 0 else "ready",
+				coord.last_diff_summary.from_moment,
+				coord.last_diff_summary.to_moment,
+				coord.last_diff_summary.added,
+				coord.last_diff_summary.modified,
+				coord.last_diff_summary.removed,
+			)
+			bifrost.ui_label(&coord.layout_ctx, &coord.screen, "footer_bar", footer_str, muted_fg, {}, bifrost.Box_Config{
+				width = bifrost.grow(1),
+			})
+			bifrost.ui_link(&coord.layout_ctx, &coord.screen, "footer_link", "[Docs: github.com/user/bifrost] ", "https://github.com/user/bifrost", bifrost.rgb(115, 195, 255))
+		}
 
 		bifrost.ui_key_hint_bar(&coord.layout_ctx, &coord.screen, &coord.input, "monitor_hint_bar", bifrost.Key_Hint_Bar_Config{
 			bg = bifrost.rgb(22, 28, 40),
@@ -1001,6 +1057,7 @@ run_log_monitor :: proc(live_tty: bool) -> bool {
 						break
 					}
 					_ = bifrost.append_or_coalesce_input_event(&queued_inputs, ev2, &ui_actor.state.input)
+					free_all(context.temp_allocator)
 				}
 			}
 

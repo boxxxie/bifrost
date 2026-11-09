@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:mem"
 import "core:os"
 import "core:strings"
+import "core:time"
 import "../../bifrost"
 
 Theme_Preset :: enum u8 {
@@ -133,6 +134,7 @@ Gallery_App :: struct {
 	theme:              Theme_Preset,
 	detail_modal_open:  bool,
 	confirm_modal_open: bool,
+	toasts:             bifrost.Toast_Manager,
 	quit_requested:     bool,
 	action_count:       int,
 	last_action:        string,
@@ -301,6 +303,7 @@ build_gallery_ui :: proc(app: ^Gallery_App, out_slice: ^bifrost.Virtual_Slice) {
 					fg     = pal.text_fg,
 					bg     = pal.header_bg,
 				})
+				bifrost.ui_tooltip(&app.layout_ctx, &app.screen, &app.input, "btn_theme", "Cycle palette: Nord / Tokyo Night / Gruvbox (^T)")
 				bifrost.ui_button(&app.layout_ctx, &app.screen, "btn_style", bifrost.Button_Spec{
 					label  = fmt.tprintf("Bindings: %s (F2)", bifrost.keymap_style_name(app.input.keymap_style)),
 					width  = bifrost.grow(1),
@@ -308,6 +311,7 @@ build_gallery_ui :: proc(app: ^Gallery_App, out_slice: ^bifrost.Virtual_Slice) {
 					fg     = pal.accent_fg,
 					bg     = pal.header_bg,
 				})
+				bifrost.ui_tooltip(&app.layout_ctx, &app.screen, &app.input, "btn_style", "Cycle keymap mode: Vim / Helix / Emacs (F2)")
 				bifrost.ui_button(&app.layout_ctx, &app.screen, "btn_modal", bifrost.Button_Spec{
 					label  = "Inspect Selected (m)",
 					width  = bifrost.grow(1),
@@ -315,6 +319,7 @@ build_gallery_ui :: proc(app: ^Gallery_App, out_slice: ^bifrost.Virtual_Slice) {
 					fg     = pal.text_fg,
 					bg     = pal.header_bg,
 				})
+				bifrost.ui_tooltip(&app.layout_ctx, &app.screen, &app.input, "btn_modal", "Open selected package inspector modal (m)")
 				bifrost.ui_button(&app.layout_ctx, &app.screen, "btn_palette", bifrost.Button_Spec{
 					label  = "Command Palette (^P)",
 					width  = bifrost.grow(1),
@@ -322,6 +327,7 @@ build_gallery_ui :: proc(app: ^Gallery_App, out_slice: ^bifrost.Virtual_Slice) {
 					fg     = pal.text_fg,
 					bg     = pal.header_bg,
 				})
+				bifrost.ui_tooltip(&app.layout_ctx, &app.screen, &app.input, "btn_palette", "Open fuzzy searchable command palette (^P)")
 
 				// Box-drawing junction preview placeholder
 				bifrost.set_paint(&app.screen, "junction_box", bifrost.Paint_Spec{
@@ -544,34 +550,37 @@ build_gallery_ui :: proc(app: ^Gallery_App, out_slice: ^bifrost.Virtual_Slice) {
 
 	// 5. Optional Nested Confirmation Modal (`z_layer = 25`, LIFO focus restoration)
 	if app.confirm_modal_open {
-		if bifrost.ui_modal(&app.layout_ctx, &app.screen, "confirm_modal", bifrost.Modal_Spec{
-			title     = "Nested LIFO Focus Shield (z=25)",
-			z_layer   = 25,
-			width     = bifrost.fixed(44),
-			height    = bifrost.fixed(7),
-			padding   = bifrost.pad_xy(2, 1),
-			gap       = 1,
-			border    = .Rounded,
-			fg        = pal.text_fg,
-			bg        = pal.header_bg,
-			border_fg = pal.sel_fg,
-			title_fg  = pal.sel_fg,
-			backdrop  = .Dim_Rect,
-		}) {
-			bifrost.ui_label(&app.layout_ctx, &app.screen, "cfm_lbl", "Focus restores to parent modal on Esc!", pal.text_fg)
-			bifrost.ui_button(&app.layout_ctx, &app.screen, "btn_close_confirm", bifrost.Button_Spec{
-				label  = "Confirm & Pop Scope (Enter/Esc)",
-				width  = bifrost.grow(1),
-				height = bifrost.fixed(1),
-				fg     = pal.sel_fg,
-				bg     = pal.panel_bg,
-			})
+		res := bifrost.ui_confirm_dialog(&app.layout_ctx, &app.screen, &app.input, "confirm_modal", bifrost.Confirm_Dialog_Config{
+			title           = "Confirm Package Re-Index",
+			message         = "Re-index package repository and verify hashes?",
+			confirm_label   = "Re-index",
+			cancel_label    = "Cancel",
+			default_confirm = true,
+			border          = .Rounded,
+			border_fg       = pal.sel_fg,
+			title_fg        = pal.sel_fg,
+			bg              = pal.header_bg,
+			fg              = pal.text_fg,
+		})
+		if res == .Confirmed {
+			app.confirm_modal_open = false
+			app.last_action = "modal.confirm.confirmed"
+			app.action_count += 1
+			_ = bifrost.toast_push(&app.toasts, "Re-index Verified", "All package hashes matched SHA-256", .Success, 60)
+		} else if res == .Cancelled {
+			app.confirm_modal_open = false
+			app.last_action = "modal.confirm.cancelled"
+			app.action_count += 1
+			_ = bifrost.toast_push(&app.toasts, "Operation Cancelled", "No changes made to repository", .Warning, 45)
 		}
 	}
 
 	// 6. Command Palette (`z_layer = 30`) & Pending Chord Which-Key Overlay (`z_layer = 28`)
 	bifrost.ui_command_palette(&app.layout_ctx, &app.screen, &app.input, &app.palette, 56, 6)
 	bifrost.ui_which_key_overlay(&app.layout_ctx, &app.screen, &app.input, "gallery_which_key")
+
+	// 7. Toast Notifications Stack (`z_layer = 25`)
+	bifrost.ui_toast_stack(&app.layout_ctx, &app.screen, &app.input, &app.toasts)
 
 	bifrost.end_layout(&app.layout_ctx)
 
@@ -753,12 +762,14 @@ handle_gallery_interactions :: proc(app: ^Gallery_App, slice: bifrost.Virtual_Sl
 		app.theme = Theme_Preset((int(app.theme) + 1) % len(Theme_Preset))
 		app.last_action = fmt.tprintf("theme:%s", THEMES[app.theme].name)
 		app.action_count += 1
+		_ = bifrost.toast_push(&app.toasts, "Theme Switched", fmt.tprintf("Active palette: %s", THEMES[app.theme].name), .Info, 60)
 		changed = true
 	}
 	if bifrost.was_activated(&app.input, "btn_style") || (has_act && act == .Style_Cycle) || bifrost.was_action_triggered(&app.input, "style.cycle") {
 		next_st := bifrost.cycle_keymap_style(&app.input)
 		app.last_action = fmt.tprintf("style:%s", bifrost.keymap_style_name(next_st))
 		app.action_count += 1
+		_ = bifrost.toast_push(&app.toasts, "Keymap Switched", fmt.tprintf("Navigation mode: %s", bifrost.keymap_style_name(next_st)), .Info, 60)
 		changed = true
 	}
 	if bifrost.was_activated(&app.input, "btn_modal") || (has_act && act == .Modal_Open) || bifrost.was_action_triggered(&app.input, "modal.open") {
@@ -861,6 +872,7 @@ step_gallery_frame :: proc(app: ^Gallery_App, events: ..bifrost.Input_Event) {
 		build_gallery_ui(app, &slice)
 	} else {
 		free_all(context.temp_allocator)
+		bifrost.toast_update(&app.toasts, 1)
 		bifrost.state_store_begin_frame(&app.state_store)
 
 		build_gallery_ui(app, &slice)
@@ -946,6 +958,7 @@ run_gallery :: proc(live_tty: bool) -> bool {
 						break
 					}
 					_ = bifrost.append_or_coalesce_input_event(&queued_inputs, ev2, &app.input)
+					free_all(context.temp_allocator)
 				}
 			}
 			now := time.tick_now()
@@ -962,6 +975,7 @@ run_gallery :: proc(live_tty: bool) -> bool {
 					_, _ = os.write_string(os.stdout, strings.to_string(app.ansi_builder))
 				}
 			}
+			free_all(context.temp_allocator)
 		}
 	} else {
 		// Deterministic headless showcase walkthrough:

@@ -412,6 +412,10 @@ Input_State :: struct {
 	tab_changed_id:      u64,
 	tabs_slots:          [MAX_TABS_SLOTS]Tabs_Slot,
 
+	// Fixed-capacity interactive slider slots
+	active_slider_id:    u64,
+	slider_slots:        [MAX_SLIDER_SLOTS]Slider_Slot,
+
 	// 3-tier scoped/global keybinding table & per-frame action dispatch
 	keybindings:           [MAX_KEYBINDINGS]Keybinding,
 	keybinding_count:      int,
@@ -700,6 +704,10 @@ was_activated :: #force_inline proc(inp: ^Input_State, id: string) -> bool {
 	return inp.activated_id != 0 && inp.activated_id == hash_id(id)
 }
 
+was_clicked :: #force_inline proc(inp: ^Input_State, id: string) -> bool {
+	return inp.clicked_id != 0 && inp.clicked_id == hash_id(id)
+}
+
 request_focus :: #force_inline proc(inp: ^Input_State, id: string) {
 	if inp != nil && len(id) > 0 {
 		inp.wants_focus_id = hash_id(id)
@@ -828,6 +836,7 @@ reset_pointer_on_focus_out :: proc "contextless" (inp: ^Input_State) {
 	inp.active_id          = 0
 	inp.active_press_id    = 0
 	inp.active_splitter_id = 0
+	inp.active_slider_id   = 0
 	inp.mouse_down         = false
 	inp.mouse_initialized  = false
 	inp.drag_delta         = {0, 0}
@@ -842,7 +851,8 @@ resolve_input :: proc(inp: ^Input_State, ctx: ^Layout_Context, events: ..Input_E
 		heimdall.counter_add(rec, TELEMETRY_SCOPE_INPUT, "input_events_total", f64(len(events)), i64(len(events)))
 	}
 
-	inp.prev_focused_id     = inp.focused_id
+	inp.frame_index       += 1
+	inp.prev_focused_id    = inp.focused_id
 	inp.prev_hovered_id     = inp.hovered_id
 	inp.prev_hover_path     = inp.hover_path
 	inp.prev_hover_path_len = inp.hover_path_len
@@ -982,6 +992,10 @@ apply_input_highlights :: proc(s: ^Screen, ctx: ^Layout_Context, inp: ^Input_Sta
 			sync_splitter_paint(s, inp, node)
 			continue
 		}
+		if node.config.slider {
+			sync_slider_paint(s, inp, node)
+			continue
+		}
 		if .Disabled in node.focus_flags {
 			if paint, ok := s.paints[node.id_hash]; ok {
 				paint.style += {.Dim}
@@ -996,10 +1010,16 @@ apply_input_highlights :: proc(s: ^Screen, ctx: ^Layout_Context, inp: ^Input_Sta
 		if !ok {
 			continue
 		}
-		is_container_scope := (.Focus_Scope in node.focus_flags) || node.config.virtual_total_rows > 0
+		_, has_canvas := s.canvas_entries[node.id_hash]
+		_, has_chart := s.chart_entries[node.id_hash]
+		_, has_para := s.paragraph_entries[node.id_hash]
+		_, has_table := s.table_entries[node.id_hash]
+		is_container_scope := (.Focus_Scope in node.focus_flags) || node.config.virtual_total_rows > 0 || has_canvas || has_chart || has_para || has_table
 		if node.id_hash == inp.focused_id {
-			if is_container_scope && (paint.fill_bg || paint.bg.kind != .Default) {
+			if is_container_scope && (paint.fill_bg || paint.bg.kind != .Default || node.config.border != .None) {
 				paint.title_style += {.Bold, .Reverse}
+			} else if len(paint.spans) > 0 {
+				paint.style += {.Reverse}
 			} else {
 				paint.style += {.Bold, .Reverse}
 			}
@@ -1007,13 +1027,13 @@ apply_input_highlights :: proc(s: ^Screen, ctx: ^Layout_Context, inp: ^Input_Sta
 				paint.border_fg = rgb(255, 215, 0)
 			}
 		} else if is_inactive_scope_leaf_selected(inp, ctx, i32(i)) {
-			if is_container_scope && (paint.fill_bg || paint.bg.kind != .Default) {
+			if is_container_scope && (paint.fill_bg || paint.bg.kind != .Default || node.config.border != .None) {
 				paint.title_style += {.Dim, .Reverse}
 			} else {
 				paint.style += {.Dim, .Reverse}
 			}
 		} else if node.id_hash == inp.hovered_id {
-			if is_container_scope && (paint.fill_bg || paint.bg.kind != .Default) {
+			if is_container_scope && (paint.fill_bg || paint.bg.kind != .Default || node.config.border != .None) {
 				paint.title_style += {.Underline}
 			} else {
 				paint.style += {.Underline}
@@ -1029,7 +1049,7 @@ apply_input_highlights :: proc(s: ^Screen, ctx: ^Layout_Context, inp: ^Input_Sta
 
 @(private)
 is_interactive_node :: #force_inline proc "contextless" (cfg: Box_Config) -> bool {
-	return cfg.focusable || cfg.clickable || cfg.hoverable || cfg.draggable || cfg.splitter || cfg.text_input || cfg.text_area
+	return cfg.focusable || cfg.clickable || cfg.hoverable || cfg.draggable || cfg.splitter || cfg.slider || cfg.text_input || cfg.text_area
 }
 
 
@@ -1090,6 +1110,10 @@ handle_key_event :: proc(inp: ^Input_State, ctx: ^Layout_Context, capture_idx: i
 					inp.editing_id = 0
 					clear_repeat_count(inp)
 					return
+				}
+				if capture_idx < 0 || !is_node_allowed(ctx, e_idx, capture_idx) {
+					inp.editing_id = 0
+					clear_repeat_count(inp)
 				}
 			}
 		}
@@ -1251,6 +1275,13 @@ handle_key_event :: proc(inp: ^Input_State, ctx: ^Layout_Context, capture_idx: i
 			inp.suffix_count    = 0
 			return
 		}
+
+		// Slider keyboard adjustment (`h`/`l`, `Left`/`Right`, `Home`/`End`, `+`/`-`)
+		if handle_slider_key(inp, ctx, capture_idx, ev) {
+			inp.has_last_motion = false
+			inp.suffix_count    = 0
+			return
+		}
 	}
 
 	if !is_nav {
@@ -1377,6 +1408,7 @@ handle_key_event :: proc(inp: ^Input_State, ctx: ^Layout_Context, capture_idx: i
 		if (.Trap_Focus in node.focus_flags) || node.config.capture_input {
 			if ev.code == .Escape && eff_mods == {} {
 				inp.escape_modal_id = node.id_hash
+				inp.editing_id      = 0
 			}
 			trapped = true
 			break
@@ -1390,6 +1422,7 @@ handle_key_event :: proc(inp: ^Input_State, ctx: ^Layout_Context, capture_idx: i
 	if capture_idx >= 0 {
 		if ev.code == .Escape && eff_mods == {} {
 			inp.escape_modal_id = ctx.nodes[capture_idx].id_hash
+			inp.editing_id      = 0
 		}
 		return
 	}
@@ -1462,6 +1495,9 @@ handle_mouse_event :: proc(inp: ^Input_State, ctx: ^Layout_Context, capture_idx:
 		if inp.active_splitter_id != 0 {
 			handle_splitter_drag(inp, ctx, ev.x, ev.y)
 		}
+		if inp.active_slider_id != 0 {
+			handle_slider_mouse_drag(inp, ctx, ev.x)
+		}
 		if inp.mouse_down && inp.active_press_id != 0 {
 			inp.drag_delta = {ev.x - prev_pos[0], ev.y - prev_pos[1]}
 			if p_idx, ok := ctx.id_map[inp.active_press_id]; ok {
@@ -1481,6 +1517,9 @@ handle_mouse_event :: proc(inp: ^Input_State, ctx: ^Layout_Context, capture_idx:
 	case .Drag:
 		if inp.active_splitter_id != 0 {
 			handle_splitter_drag(inp, ctx, ev.x, ev.y)
+		}
+		if inp.active_slider_id != 0 {
+			handle_slider_mouse_drag(inp, ctx, ev.x)
 		}
 		if inp.active_press_id != 0 {
 			inp.drag_delta = {ev.x - prev_pos[0], ev.y - prev_pos[1]}
@@ -1539,6 +1578,9 @@ handle_mouse_event :: proc(inp: ^Input_State, ctx: ^Layout_Context, capture_idx:
 				if node.config.splitter {
 					begin_splitter_drag(inp, ctx, hit_idx, ev.x, ev.y)
 				}
+				if node.config.slider && is_node_allowed(ctx, hit_idx, capture_idx) {
+					handle_slider_mouse_press(inp, ctx, capture_idx, hit_idx, ev.x)
+				}
 				if (.Captures_Text in node.focus_flags) && (.Disabled not_in node.focus_flags) && is_node_allowed(ctx, hit_idx, capture_idx) {
 					inp.editing_id    = node.id_hash
 					inp.pending_chord = {}
@@ -1573,6 +1615,7 @@ handle_mouse_event :: proc(inp: ^Input_State, ctx: ^Layout_Context, capture_idx:
 				inp.active_id       = 0
 				if backdrop_modal != 0 {
 					inp.backdrop_clicked_id = backdrop_modal
+					inp.editing_id          = 0
 				}
 			}
 		} else if ev.button == .Middle && hit_idx >= 0 {
@@ -1585,6 +1628,7 @@ handle_mouse_event :: proc(inp: ^Input_State, ctx: ^Layout_Context, capture_idx:
 		if ev.button == .Left {
 			inp.mouse_down = false
 			inp.active_splitter_id = 0
+			inp.active_slider_id   = 0
 			pressed_id := inp.active_press_id
 			if pressed_id != 0 {
 				slot := get_scroll_slot(inp, pressed_id)

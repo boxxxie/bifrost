@@ -117,29 +117,49 @@ spec_braille_bresenham_line_rect_and_series_polyline :: proc(t: ^testing.T) {
 	then.canvas_point_is(&canvas, 11, 0, true)
 
 	// 4. Mount the pre-populated canvas inside a bordered `ui_canvas` widget and verify screen cell output
-	upon.rendering_frame(proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen) {
+	build_series_ui :: proc(ctx: ^bifrost.Layout_Context, scr: ^bifrost.Screen) {
 		if bifrost.container(ctx, "root", {dir = .Column, width = bifrost.grow(1), height = bifrost.grow(1)}) {
 			bifrost.ui_canvas(ctx, scr, "series_chart", bifrost.Canvas_Config{
 				title       = "Series",
-				width       = bifrost.fixed(8), // 6 inner cols + 2 border cols
-				height      = bifrost.fixed(4), // 2 inner rows + 2 border rows
+				width       = bifrost.fixed(10), // 8 inner cols + 2 border cols
+				height      = bifrost.fixed(4),  // 2 inner rows + 2 border rows
 				border      = .Rounded,
 				fg          = bifrost.rgb(130, 240, 170),
+				bg          = bifrost.rgb(16, 20, 28),
 				border_fg   = bifrost.rgb(90, 120, 160),
+				fill_bg     = true,
 				focus_flags = {.Focusable, .Default_Focus},
 				draw_fn     = proc(c: ^bifrost.Braille_Canvas, _: rawptr) {
 					pts := [3]f32{0.0, 50.0, 100.0}
 					bifrost.canvas_draw_series(c, pts[:], 0.0, 100.0, bifrost.rgb(130, 240, 170))
 				},
 			})
+			bifrost.ui_button(ctx, scr, "other_btn", {label = "Other"})
 		}
-	})
+	}
+	upon.rendering_frame(build_series_ui)
 
 	then.focused_widget_is("series_chart")
-	then.node_inner_rect_is("series_chart", {x = 1, y = 1, w = 6, h = 2})
-	// Bottom-left cell (cx=0, cy=1 -> screen x=1, y=2) and top-right cell (cx=5, cy=0 -> screen x=6, y=1) must contain non-space Braille glyphs
-	then.cell_colors_at_are(1, 2, bifrost.rgb(130, 240, 170), {})
-	then.cell_colors_at_are(6, 1, bifrost.rgb(130, 240, 170), {})
+	then.node_inner_rect_is("series_chart", {x = 1, y = 1, w = 8, h = 2})
+	// Bottom-left cell (cx=0, cy=1 -> screen x=1, y=2) and top-right cell (cx=7, cy=0 -> screen x=8, y=1) must contain non-space Braille glyphs
+	// and MUST NOT have `.Reverse` or `.Underline` applied to interior cells when focused!
+	then.cell_colors_at_are(1, 2, bifrost.rgb(130, 240, 170), bifrost.rgb(16, 20, 28))
+	then.cell_colors_at_are(8, 1, bifrost.rgb(130, 240, 170), bifrost.rgb(16, 20, 28))
+	then.cell_style_has(1, 2, .Reverse, false)
+	then.cell_style_has(1, 1, .Reverse, false)
+	// Instead, the border title ("Series" at y=0, x=3) receives `.Reverse` when focused:
+	then.cell_style_has(3, 0, .Reverse, true)
+
+	// 5. Move focus away to `other_btn` and hover the mouse over `series_chart`:
+	//    Hovering over the canvas underlines the border title ("Series") and NEVER underlines interior cells!
+	upon.pressing_key(.Tab)
+	upon.mouse_move(2, 1)
+	upon.rendering_frame(build_series_ui)
+	then.focused_widget_is("other_btn")
+	then.hovered_widget_is("series_chart")
+	then.cell_style_has(3, 0, .Underline, true)
+	then.cell_style_has(1, 1, .Underline, false)
+	then.cell_style_has(1, 2, .Underline, false)
 }
 
 @(test)

@@ -1,5 +1,7 @@
 package bifrost
 
+import "core:fmt"
+
 // =============================================================================
 // Virtualized List & Scrollable Viewport Widget (O(1) Visible Slice for xitdb)
 // =============================================================================
@@ -533,6 +535,173 @@ put_sanitized_text_bounded :: proc(
 		used_w += w
 	}
 	return used_w
+}
+
+// =============================================================================
+// Track 20: Interactive Table Column Controls (Sorting & Divider Resizing)
+// =============================================================================
+
+Table_Sort_Direction :: enum u8 {
+	None = 0,
+	Asc  = 1,
+	Desc = 2,
+}
+
+Table_Sort_State :: struct {
+	column:    int,
+	direction: Table_Sort_Direction,
+}
+
+Table_Header_Config :: struct {
+	gutter_width:   i32,
+	column_spacing: i32,
+	fg:             Color,
+	bg:             Color,
+	active_fg:      Color,
+	border_fg:      Color,
+	allow_sort:     bool,
+	allow_resize:   bool,
+}
+
+ui_table_header :: proc(
+	ctx: ^Layout_Context,
+	s: ^Screen,
+	inp: ^Input_State,
+	id: string,
+	specs: []Table_Column_Spec,
+	sort_state: ^Table_Sort_State = nil,
+	cfg: Table_Header_Config = {},
+) -> (sort_changed: bool) {
+	hdr_fg := cfg.fg if cfg.fg.kind != .Default else rgb(200, 210, 225)
+	hdr_bg := cfg.bg if cfg.bg.kind != .Default else rgb(30, 38, 52)
+	act_fg := cfg.active_fg if cfg.active_fg.kind != .Default else rgb(250, 200, 80)
+	b_fg   := cfg.border_fg if cfg.border_fg.kind != .Default else rgb(70, 85, 110)
+
+	if s != nil {
+		s.paints[hash_id(id)] = Paint_Spec{
+			bg      = hdr_bg,
+			fill_bg = true,
+		}
+	}
+
+	if container(ctx, id, Box_Config{
+		dir    = .Row,
+		width  = grow(1),
+		height = fixed(1),
+	}) {
+		// Gutter spacing on left if any
+		if cfg.gutter_width > 0 {
+			leaf(ctx, fmt.tprintf("%s_gutter", id), cfg.gutter_width, 1, Box_Config{
+				width  = fixed(cfg.gutter_width),
+				height = fixed(1),
+			})
+		}
+
+		for i in 0 ..< len(specs) {
+			spec := &specs[i]
+			col_id := fmt.tprintf("%s_col_%d", id, i)
+			div_id := fmt.tprintf("%s_div_%d", id, i)
+
+			// Resizable column width sync
+			base_fixed_w := spec.fixed_width if spec.fixed_width > 0 else (spec.value if spec.value > 0 else 12)
+			min_w := spec.min_width if spec.min_width > 0 else 4
+			max_w := spec.max_width if spec.max_width > 0 else 120
+			if cfg.allow_resize && spec.kind == .Fixed {
+				resolved_w := get_split_size(inp, div_id, base_fixed_w, min_w, max_w)
+				spec.fixed_width = resolved_w
+				if spec.value > 0 {
+					spec.value = resolved_w
+				}
+			}
+
+			// Check sort activation before label construction so new sort indicator appears in the same frame
+			if cfg.allow_sort && was_activated(inp, col_id) && sort_state != nil {
+				if sort_state.column != i {
+					sort_state.column = i
+					sort_state.direction = .Asc
+				} else {
+					switch sort_state.direction {
+					case .None: sort_state.direction = .Asc
+					case .Asc:  sort_state.direction = .Desc
+					case .Desc: sort_state.direction = .None
+					}
+				}
+				sort_changed = true
+			}
+
+			is_sorted := sort_state != nil && sort_state.column == i && sort_state.direction != .None
+			col_fg := act_fg if is_sorted else hdr_fg
+
+			header_label := spec.header
+			if is_sorted {
+				arrow := " ▲" if sort_state.direction == .Asc else " ▼"
+				header_label = fmt.tprintf("%s%s", spec.header, arrow)
+			}
+
+			w_size: Axis_Size
+			switch spec.kind {
+			case .Fixed:
+				w_size = fixed(spec.fixed_width if spec.fixed_width > 0 else base_fixed_w)
+			case .Fill:
+				fw := spec.fill_weight if spec.fill_weight > 0 else (spec.value if spec.value > 0 else 1)
+				w_size = grow(fw)
+			case .Auto_Content:
+				auto_w := max(string_display_width(header_label), spec.max_observed_w)
+				if spec.min_width > 0 {
+					auto_w = max(auto_w, spec.min_width)
+				}
+				if spec.max_width > 0 {
+					auto_w = min(auto_w, spec.max_width)
+				}
+				w_size = fixed(auto_w)
+			}
+
+			if cfg.allow_sort {
+				ui_button(ctx, s, col_id, Button_Spec{
+					label       = header_label,
+					width       = w_size,
+					height      = fixed(1),
+					fg          = col_fg,
+					bg          = hdr_bg,
+					focus_flags = {.Focusable},
+				})
+			} else {
+				ui_label(ctx, s, col_id, header_label, col_fg, {.Bold}, Box_Config{
+					width  = w_size,
+					height = fixed(1),
+				})
+			}
+
+			// Divider between columns
+			if i + 1 < len(specs) {
+				if cfg.allow_resize && spec.kind == .Fixed {
+					ui_splitter(ctx, s, inp, div_id, Splitter_Config{
+						dir          = .Row,
+						default_size = base_fixed_w,
+						min_size     = min_w,
+						max_size     = max_w,
+						fg           = b_fg,
+						active_fg    = act_fg,
+					})
+					if cfg.column_spacing > 1 {
+						leaf(ctx, fmt.tprintf("%s_pad", div_id), cfg.column_spacing - 1, 1, Box_Config{
+							width  = fixed(cfg.column_spacing - 1),
+							height = fixed(1),
+							text   = " ",
+						})
+					}
+				} else if cfg.column_spacing > 0 {
+					leaf(ctx, div_id, cfg.column_spacing, 1, Box_Config{
+						width  = fixed(cfg.column_spacing),
+						height = fixed(1),
+						text   = " ",
+					})
+				}
+			}
+		}
+	}
+
+	return sort_changed
 }
 
 // =============================================================================
@@ -1206,6 +1375,12 @@ scroll_node_into_view :: proc "contextless" (inp: ^Input_State, ctx: ^Layout_Con
 sync_scroll_viewports :: proc "contextless" (inp: ^Input_State, ctx: ^Layout_Context) {
 	for i := 0; i < len(ctx.nodes); i += 1 {
 		node := &ctx.nodes[i]
+		if node.config.slider {
+			sl_slot := get_slider_slot(inp, node.id_hash)
+			if node.inner_rect.w > 0 {
+				sl_slot.solved_w = node.inner_rect.w
+			}
+		}
 		if !node.config.scrollable {
 			continue
 		}

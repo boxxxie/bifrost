@@ -2,8 +2,8 @@
   "track_id": "form_controls_20261108",
   "title": "Track 15: Form Controls Suite (Checkbox, Radio Group, Switch, Slider, Anchored Dropdown)",
   "type": "feature",
-  "status": "new",
+  "status": "completed",
   "created_at": "2026-11-08T09:47:00+08:00",
-  "updated_at": "2026-11-08T09:47:00+08:00",
+  "updated_at": "2026-11-08T10:00:00+08:00",
   "description": "Implement standard TUI form controls: ui_checkbox, ui_radio_group, ui_switch, ui_slider, and anchored ui_dropdown."
 }

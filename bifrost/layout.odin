@@ -135,6 +135,7 @@ Box_Config :: struct {
 	offset:             [2]i32,       // [x, y] offset from aligned anchor position
 	expand:             [2]i32,       // [x, y] bounding expansion for floating nodes
 	clip_to_parent:     bool,
+	clamp_to_screen:    bool,
 
 	// Focus, input routing & widget role flags
 	focus_flags:        Focus_Flags,
@@ -154,6 +155,7 @@ Box_Config :: struct {
 	text_input:         bool,
 	text_area:          bool,
 	splitter:           bool,
+	slider:             bool,
 	nav_overrides:      [Nav_Dir]u64, // Optional per-direction target node id_hash overrides
 }
 
@@ -196,6 +198,12 @@ Layout_Node :: struct {
 	is_text:               bool,
 	text:                  string,
 	wrapped_lines:         []string,
+	para_spans:            []Styled_Span,
+	md_source:             string,
+	md_cfg:                Markdown_Config,
+	has_markdown:          bool,
+	wrapped_span_lines:    [][]Styled_Span,
+	wrapped_span_w:        i32,
 }
 
 Layout_Context :: struct {
@@ -1052,6 +1060,36 @@ wrap_text_and_repropagate_heights :: proc(ctx: ^Layout_Context) {
 
 	for i := 0; i < len(ctx.nodes); i += 1 {
 		node := &ctx.nodes[i]
+		if node.has_markdown && node.config.wrap_mode != .None {
+			any_wrapped = true
+			insets := compute_total_insets(node.config)
+			max_w := max(1, node.dims[0] - insets[0])
+			md_lines := markdown_parse_document(node.md_source, max_w, node.md_cfg, ctx.allocator)
+			node.wrapped_span_lines = md_lines
+			node.wrapped_span_w     = max_w
+			line_count := max(1, i32(len(md_lines)))
+			node.content_size[1] = line_count
+			new_h := line_count + insets[1]
+			node.dims[1]          = resolve_pass1_axis(node.config.height, new_h)
+			node.min_dims[1]      = max(node.min_dims[1], node.dims[1])
+			node.computed_size[1] = node.dims[1]
+			continue
+		}
+		if len(node.para_spans) > 0 && node.config.wrap_mode != .None {
+			any_wrapped = true
+			insets := compute_total_insets(node.config)
+			max_w := max(1, node.dims[0] - insets[0])
+			para_lines := paragraph_wrap_spans(node.para_spans, max_w, node.config.wrap_mode, ctx.allocator)
+			node.wrapped_span_lines = para_lines
+			node.wrapped_span_w     = max_w
+			line_count := max(1, i32(len(para_lines)))
+			node.content_size[1] = line_count
+			new_h := line_count + insets[1]
+			node.dims[1]          = resolve_pass1_axis(node.config.height, new_h)
+			node.min_dims[1]      = max(node.min_dims[1], node.dims[1])
+			node.computed_size[1] = node.dims[1]
+			continue
+		}
 		if len(node.text) == 0 || node.config.wrap_mode == .None {
 			continue
 		}
@@ -1227,6 +1265,24 @@ position_nodes_topological :: proc(ctx: ^Layout_Context) {
 				y = ref_rect.y + oy - parent.config.expand[1],
 				w = parent.dims[0] + parent.config.expand[0] * 2,
 				h = parent.dims[1] + parent.config.expand[1] * 2,
+			}
+
+			if parent.config.clamp_to_screen {
+				if parent.rect.y + parent.rect.h > screen_bounds.h && ref_rect.y - parent.rect.h >= 0 {
+					parent.rect.y = ref_rect.y - parent.rect.h - max(0, parent.config.offset[1] - 1)
+				}
+				if parent.rect.y + parent.rect.h > screen_bounds.h {
+					parent.rect.y = max(0, screen_bounds.h - parent.rect.h)
+				}
+				if parent.rect.y < 0 {
+					parent.rect.y = 0
+				}
+				if parent.rect.x + parent.rect.w > screen_bounds.w {
+					parent.rect.x = max(0, screen_bounds.w - parent.rect.w)
+				}
+				if parent.rect.x < 0 {
+					parent.rect.x = 0
+				}
 			}
 		}
 

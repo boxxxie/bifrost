@@ -84,32 +84,32 @@ This file tracks all major tracks for the `bifrost` project. Each track has its 
 
 ---
 
-- [ ] **Track 15: Form Controls Suite (`bifrost/form_controls.odin`)**
+- [x] **Track 15: Form Controls Suite (`bifrost/form_controls.odin`)**
   *Link: [./tracks/form_controls_20261108/](./tracks/form_controls_20261108/)*
 
 ---
 
-- [ ] **Track 16: Progress Bars, Gauges & Indeterminate Spinners (`bifrost/progress.odin`)**
+- [x] **Track 16: Progress Bars, Gauges & Indeterminate Spinners (`bifrost/progress.odin`)**
   *Link: [./tracks/progress_and_spinners_20261108/](./tracks/progress_and_spinners_20261108/)*
 
 ---
 
-- [ ] **Track 17: Cartesian 2D Coordinate Charts & Categorical Bar Charts (`bifrost/chart.odin`)**
+- [x] **Track 17: Cartesian 2D Coordinate Charts & Categorical Bar Charts (`bifrost/chart.odin`)**
   *Link: [./tracks/charts_and_plots_20261108/](./tracks/charts_and_plots_20261108/)*
 
 ---
 
-- [ ] **Track 18: Word-Wrapped Rich Text Paragraph & Markdown Document Viewer (`bifrost/paragraph.odin`)**
+- [x] **Track 18: Word-Wrapped Rich Text Paragraph & Markdown Document Viewer (`bifrost/paragraph.odin`)**
   *Link: [./tracks/rich_text_and_markdown_20261108/](./tracks/rich_text_and_markdown_20261108/)*
 
 ---
 
-- [ ] **Track 19: Turnkey Modal Dialogs, Floating Toasts & Contextual Tooltips (`bifrost/dialogs.odin`)**
+- [x] **Track 19: Turnkey Modal Dialogs, Floating Toasts & Contextual Tooltips (`bifrost/dialogs.odin`)**
   *Link: [./tracks/dialogs_toasts_tooltips_20261108/](./tracks/dialogs_toasts_tooltips_20261108/)*
 
 ---
 
-- [ ] **Track 20: Auto-Scrolling Log Stream Viewer, Table Column Controls & OSC 8 Hyperlinks (`bifrost/log_stream.odin`, `bifrost/scroll.odin`, `bifrost/renderer.odin`)**
+- [x] **Track 20: Auto-Scrolling Log Stream Viewer, Table Column Controls & OSC 8 Hyperlinks (`bifrost/log_stream.odin`, `bifrost/scroll.odin`, `bifrost/renderer.odin`)**
   *Link: [./tracks/log_stream_and_table_controls_20261108/](./tracks/log_stream_and_table_controls_20261108/)*
 
 ---

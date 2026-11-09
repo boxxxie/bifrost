@@ -726,6 +726,7 @@ run_csv_workbench :: proc(live_tty: bool, custom_file: string, track: ^mem.Track
 						break
 					}
 					_ = bifrost.append_or_coalesce_input_event(&queued_inputs, ev2, &ui_actor.state.input)
+					free_all(context.temp_allocator)
 				}
 			}
 			now := time.tick_now()

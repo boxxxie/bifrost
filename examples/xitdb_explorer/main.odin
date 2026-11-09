@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:mem"
 import "core:os"
 import "core:strings"
+import "core:time"
 import "../../bifrost"
 import xitdb "../../deps/xitdb/xitdb"
 
@@ -232,6 +233,8 @@ Explorer_App :: struct {
 	quit_requested:   bool,
 	last_action:      string,
 	slot_col_specs:   [4]bifrost.Table_Column_Spec,
+	slot_sort_state:  bifrost.Table_Sort_State,
+	slot_vslice:      bifrost.Xitdb_Viewport_Slice,
 	tree_entries:     [MAX_TREE_NODES_CAP]Explorer_Tree_Entry,
 	tree_nodes:       [MAX_TREE_NODES_CAP]bifrost.Tree_Node,
 	tree_count:       int,
@@ -833,10 +836,10 @@ explorer_init :: proc(app: ^Explorer_App, db: ^xitdb.Database, db_label: string,
 	app.pinned_moment = -1
 
 	app.slot_col_specs = [4]bifrost.Table_Column_Spec{
-		{header = "Key / Step",  kind = .Auto_Content, min_width = 12, max_width = 24},
-		{header = "Wire Tag",    kind = .Fixed,        value = 12,     min_width = 10, max_width = 14},
-		{header = "Slot Offset", kind = .Fixed,        value = 9,      min_width = 8,  max_width = 10},
-		{header = "Value",       kind = .Fill,         value = 1,      min_width = 16},
+		{header = "Key / Step",  kind = .Auto_Content, fixed_width = 18, min_width = 12, max_width = 24},
+		{header = "Wire Tag",    kind = .Fixed,        value = 12, fixed_width = 12, min_width = 10, max_width = 14},
+		{header = "Slot Offset", kind = .Fixed,        value = 9,  fixed_width = 9,  min_width = 8,  max_width = 10},
+		{header = "Value",       kind = .Fill,         value = 1,  fixed_width = 24, min_width = 16},
 	}
 
 	set_selected_paths(app, ".users", ".users")
@@ -1033,9 +1036,32 @@ build_explorer_ui :: proc(
 						context.temp_allocator,
 					)
 					slot_total := max(1, i32(vslice_probe.total_rows))
+					for row in vslice_probe.rows {
+						bifrost.table_column_observe_cell(&app.slot_col_specs[0], row.key_text)
+					}
 					slot_scroll := bifrost.get_scroll_slot(&app.input, bifrost.hash_id("slot_table"))
 					active_col := clamp(slot_scroll.selected_col, 0, 3)
 
+					_ = bifrost.ui_table_header(
+						&app.layout_ctx,
+						&app.screen,
+						&app.input,
+						"slot_table_hdr",
+						app.slot_col_specs[:],
+						&app.slot_sort_state,
+						bifrost.Table_Header_Config{
+							fg             = pal.accent_fg,
+							bg             = pal.header_bg,
+							active_fg      = pal.sel_fg,
+							border_fg      = pal.border_fg,
+							gutter_width   = 2,
+							column_spacing = 2,
+							allow_sort     = true,
+							allow_resize   = true,
+						},
+					)
+
+					app.slot_vslice = {}
 					if bifrost.ui_virtual_list(
 						&app.layout_ctx,
 						&app.screen,
@@ -1059,6 +1085,59 @@ build_explorer_ui :: proc(
 						},
 						out_slot_slice,
 					) {
+						if app.slot_sort_state.direction != .None && slot_total > 1 {
+							full_slice, _ := bifrost.xitdb_slice_viewport(
+								app.db,
+								app.resolved_moment,
+								app.selected_coll,
+								0,
+								i64(slot_total),
+								filter,
+								context.temp_allocator,
+							)
+							sort_col := clamp(app.slot_sort_state.column, 0, 3)
+							is_asc := app.slot_sort_state.direction == .Asc
+							for a := 0; a < len(full_slice.rows); a += 1 {
+								for b := a + 1; b < len(full_slice.rows); b += 1 {
+									ra := full_slice.rows[a]
+									rb := full_slice.rows[b]
+									swap := false
+									switch sort_col {
+									case 0:
+										swap = (ra.key_text > rb.key_text) if is_asc else (ra.key_text < rb.key_text)
+									case 1:
+										ta := format_tag_badge(ra.tag)
+										tb := format_tag_badge(rb.tag)
+										swap = (ta > tb) if is_asc else (ta < tb)
+									case 2:
+										swap = (ra.slot_offset > rb.slot_offset) if is_asc else (ra.slot_offset < rb.slot_offset)
+									case 3:
+										swap = (ra.val_text > rb.val_text) if is_asc else (ra.val_text < rb.val_text)
+									}
+									if swap {
+										full_slice.rows[a], full_slice.rows[b] = full_slice.rows[b], full_slice.rows[a]
+									}
+								}
+							}
+							s_lo := clamp(int(out_slot_slice.start_row), 0, len(full_slice.rows))
+							s_hi := clamp(int(out_slot_slice.end_row), s_lo, len(full_slice.rows))
+							app.slot_vslice = full_slice
+							app.slot_vslice.rows = full_slice.rows[s_lo:s_hi]
+						} else {
+							app.slot_vslice, _ = bifrost.xitdb_slice_viewport(
+								app.db,
+								app.resolved_moment,
+								app.selected_coll,
+								i64(out_slot_slice.start_row),
+								i64(max(1, out_slot_slice.end_row - out_slot_slice.start_row)),
+								filter,
+								context.temp_allocator,
+							)
+						}
+						for row in app.slot_vslice.rows {
+							bifrost.table_column_observe_cell(&app.slot_col_specs[0], row.key_text)
+						}
+
 						for vis_r := out_slot_slice.start_row; vis_r < out_slot_slice.end_row; vis_r += 1 {
 							row_id := fmt.tprintf("slot_row_%d", vis_r)
 							bifrost.leaf(&app.layout_ctx, row_id, 20, 1, bifrost.Box_Config{
@@ -1342,21 +1421,7 @@ paint_explorer_tables :: proc(
 			usable_rect := list_inner
 			usable_rect.w = max(1, usable_rect.w - 1)
 
-			raw_q := strings.trim_space(bifrost.get_text(&app.input, "slot_filter"))
-			filter := make_slot_filter(raw_q)
-			vslice, _ := bifrost.xitdb_slice_viewport(
-				app.db,
-				app.resolved_moment,
-				app.selected_coll,
-				i64(slot_slice.start_row),
-				i64(max(1, slot_slice.end_row - slot_slice.start_row)),
-				filter,
-				context.temp_allocator,
-			)
-
-			for row in vslice.rows {
-				bifrost.table_column_observe_cell(&app.slot_col_specs[0], row.key_text)
-			}
+			vslice := app.slot_vslice
 
 			spans: [4]bifrost.Table_Column_Span
 			bifrost.resolve_table_columns(app.slot_col_specs[:], spans[:], usable_rect, 2, 2)
@@ -1563,8 +1628,29 @@ handle_explorer_interactions :: proc(app: ^Explorer_App) -> bool {
 	sel_tree := clamp(int(bifrost.get_tree_selected_node(&app.input, "db_tree")), 0, max(0, app.tree_count - 1))
 	if sel_tree >= 0 && sel_tree < app.tree_count {
 		entry := app.tree_entries[sel_tree]
-		if entry.selector_path != app.selected_path || entry.collection_path != app.selected_coll {
+		if entry.collection_path != app.selected_coll || (app.input.focused_id == bifrost.hash_id("db_tree") && entry.selector_path != app.selected_path) {
 			set_selected_paths(app, entry.selector_path, entry.collection_path)
+			changed = true
+		}
+	}
+
+	// Sync sorted slot table row activation (`Enter` / click) to active lineage selector path
+	if bifrost.get_active_tab(&app.input, "explorer_tabs") == 0 && len(app.slot_vslice.rows) > 0 {
+		slot_scroll := bifrost.get_scroll_slot(&app.input, bifrost.hash_id("slot_table"))
+		local_idx := int(slot_scroll.selected_row - i32(app.slot_vslice.start_row))
+		row_activated := bifrost.was_activated(&app.input, "slot_table") ||
+			bifrost.was_activated(&app.input, fmt.tprintf("slot_row_%d", slot_scroll.selected_row))
+		if row_activated && local_idx >= 0 && local_idx < len(app.slot_vslice.rows) {
+			rv := app.slot_vslice.rows[local_idx]
+			coll_tag := xitdb.Tag.Hash_Map
+			if sel_tree >= 0 && sel_tree < app.tree_count {
+				coll_tag = app.tree_entries[sel_tree].tag
+			}
+			row_path := format_child_selector(app.selected_coll, coll_tag, rv.key_text, rv.logical_index, context.temp_allocator)
+			target_coll := row_path if is_collection_tag(rv.tag) else app.selected_coll
+			set_selected_paths(app, row_path, target_coll)
+			set_last_action(app, fmt.tprintf("slot:%s", rv.key_text))
+			app.action_count += 1
 			changed = true
 		}
 	}
@@ -1858,6 +1944,7 @@ run_explorer :: proc(live_tty: bool, seed_only: bool, custom_db_path: string) ->
 						break
 					}
 					_ = bifrost.append_or_coalesce_input_event(&queued_inputs, ev2, &app.input)
+					free_all(context.temp_allocator)
 				}
 			}
 			now := time.tick_now()
@@ -1874,6 +1961,7 @@ run_explorer :: proc(live_tty: bool, seed_only: bool, custom_db_path: string) ->
 					_, _ = os.write_string(os.stdout, strings.to_string(app.ansi_builder))
 				}
 			}
+			free_all(context.temp_allocator)
 		}
 	} else {
 		// Deterministic headless walkthrough exercising all 3 tabs + live transaction + Datalog + diff:

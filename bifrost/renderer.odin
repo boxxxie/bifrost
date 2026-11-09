@@ -39,11 +39,12 @@ Color :: struct {
 // width == 2: lead (left) cell of a 2-column wide glyph
 // width == 0: trailing (right) spacer cell of a 2-column wide glyph (ch == 0)
 Cell :: struct {
-	ch:    rune,
-	fg:    Color,
-	bg:    Color,
-	style: Style_Flags,
-	width: u8,
+	ch:       rune,
+	fg:       Color,
+	bg:       Color,
+	style:    Style_Flags,
+	width:    u8,
+	link_url: string,
 }
 
 EMPTY_CELL :: Cell{
@@ -60,15 +61,17 @@ Backdrop_Mode :: enum u8 {
 }
 
 Styled_Span :: struct {
-	text:  string,
-	fg:    Color,
-	bg:    Color,
-	style: Style_Flags,
+	text:     string,
+	fg:       Color,
+	bg:       Color,
+	style:    Style_Flags,
+	link_url: string,
 }
 
 Paint_Spec :: struct {
 	title:       string,
 	text:        string,
+	url:         string,
 	spans:       []Styled_Span,
 	fg:          Color,
 	bg:          Color,
@@ -128,19 +131,23 @@ ANSI_16_DARK_TO_256 := [8]u8{
 }
 
 Screen :: struct {
-	width:           i32,
-	height:          i32,
-	front:           []Cell,
-	back:            []Cell,
-	paints:          map[u64]Paint_Spec,
-	text_areas:      map[u64]^Text_Area_State,
-	dynamic_bars:    [dynamic]Dynamic_Bar_Entry,
-	canvas_entries:  map[u64]Canvas_Render_Entry,
-	table_entries:   map[u64]Table_Render_Entry,
-	active_table_id: u64,
-	first_frame:     bool,
-	allocator:       mem.Allocator,
-	recorder:        ^heimdall.Recorder,
+	width:             i32,
+	height:            i32,
+	front:             []Cell,
+	back:              []Cell,
+	paints:            map[u64]Paint_Spec,
+	text_areas:        map[u64]^Text_Area_State,
+	dynamic_bars:      [dynamic]Dynamic_Bar_Entry,
+	canvas_entries:    map[u64]Canvas_Render_Entry,
+	progress_entries:  map[u64]Progress_Render_Entry,
+	chart_entries:     map[u64]Chart_Render_Entry,
+	paragraph_entries: map[u64]Paragraph_Render_Entry,
+	table_entries:     map[u64]Table_Render_Entry,
+	active_table_id:   u64,
+	url_pool:          map[string]string,
+	first_frame:       bool,
+	allocator:         mem.Allocator,
+	recorder:          ^heimdall.Recorder,
 }
 
 // =============================================================================
@@ -164,7 +171,16 @@ colors_equal :: #force_inline proc "contextless" (a, b: Color) -> bool {
 }
 
 cells_equal :: #force_inline proc "contextless" (a, b: Cell) -> bool {
-	return a == b
+	if a.ch != b.ch || a.fg != b.fg || a.bg != b.bg || a.style != b.style || a.width != b.width {
+		return false
+	}
+	if len(a.link_url) != len(b.link_url) {
+		return false
+	}
+	if raw_data(a.link_url) == raw_data(b.link_url) {
+		return true
+	}
+	return a.link_url == b.link_url
 }
 
 // =============================================================================
@@ -272,6 +288,7 @@ screen_init :: proc(
 	total := int(max(0, w * h))
 	s.front = make([]Cell, total, allocator) or_return
 	s.back  = make([]Cell, total, allocator) or_return
+	s.url_pool    = make(map[string]string, 16, allocator)
 	s.width       = max(0, w)
 	s.height      = max(0, h)
 	s.first_frame = true
@@ -284,6 +301,10 @@ screen_init :: proc(
 }
 
 screen_destroy :: proc(s: ^Screen) {
+	for _, owned in s.url_pool {
+		delete(owned, s.allocator)
+	}
+	delete(s.url_pool)
 	delete(s.front, s.allocator)
 	delete(s.back, s.allocator)
 	s^ = {}
@@ -294,23 +315,67 @@ screen_resize :: proc(s: ^Screen, new_w, new_h: i32) -> mem.Allocator_Error {
 		return nil
 	}
 	alloc := s.allocator
+	for _, owned in s.url_pool {
+		delete(owned, alloc)
+	}
+	delete(s.url_pool)
 	delete(s.front, alloc)
 	delete(s.back, alloc)
+	s.front    = nil
+	s.back     = nil
+	s.url_pool = nil
 	return screen_init(s, new_w, new_h, alloc)
 }
 
+MAX_SCREEN_URL_POOL_ENTRIES :: 1024
+
+@(private)
+intern_screen_url :: proc(s: ^Screen, url: string) -> string {
+	if s == nil || len(url) == 0 {
+		return ""
+	}
+	if existing, ok := s.url_pool[url]; ok {
+		return existing
+	}
+	if s.allocator.procedure == nil {
+		return url
+	}
+	if s.url_pool.allocator.procedure == nil {
+		s.url_pool = make(map[string]string, 16, s.allocator)
+	}
+	cloned, err := strings.clone(url, s.allocator)
+	if err != nil {
+		return url
+	}
+	s.url_pool[cloned] = cloned
+	return cloned
+}
+
 begin_frame :: proc(s: ^Screen, default_bg: Color = {}, temp_alloc := context.temp_allocator) {
+	if len(s.url_pool) > MAX_SCREEN_URL_POOL_ENTRIES {
+		for _, owned in s.url_pool {
+			delete(owned, s.allocator)
+		}
+		clear(&s.url_pool)
+		for i in 0 ..< len(s.front) {
+			s.front[i].link_url = ""
+		}
+		s.first_frame = true
+	}
 	clear_cell := EMPTY_CELL
 	clear_cell.bg = default_bg
 	for i in 0 ..< len(s.back) {
 		s.back[i] = clear_cell
 	}
-	s.paints          = make(map[u64]Paint_Spec, 128, temp_alloc)
-	s.text_areas      = make(map[u64]^Text_Area_State, 8, temp_alloc)
-	s.dynamic_bars    = make([dynamic]Dynamic_Bar_Entry, 0, 8, temp_alloc)
-	s.canvas_entries  = make(map[u64]Canvas_Render_Entry, 16, temp_alloc)
-	s.table_entries   = make(map[u64]Table_Render_Entry, 8, temp_alloc)
-	s.active_table_id = 0
+	s.paints            = make(map[u64]Paint_Spec, 128, temp_alloc)
+	s.text_areas        = make(map[u64]^Text_Area_State, 8, temp_alloc)
+	s.dynamic_bars      = make([dynamic]Dynamic_Bar_Entry, 0, 8, temp_alloc)
+	s.canvas_entries    = make(map[u64]Canvas_Render_Entry, 16, temp_alloc)
+	s.progress_entries  = make(map[u64]Progress_Render_Entry, 16, temp_alloc)
+	s.chart_entries     = make(map[u64]Chart_Render_Entry, 8, temp_alloc)
+	s.paragraph_entries = make(map[u64]Paragraph_Render_Entry, 16, temp_alloc)
+	s.table_entries     = make(map[u64]Table_Render_Entry, 8, temp_alloc)
+	s.active_table_id   = 0
 }
 
 set_paint :: proc(s: ^Screen, id: string, spec: Paint_Spec) {
@@ -335,6 +400,31 @@ ui_label :: proc(
 	label_cfg := cfg
 	label_cfg.text = text
 	return leaf(ctx, id, disp_w, 1, label_cfg)
+}
+
+ui_link :: proc(
+	ctx: ^Layout_Context,
+	s: ^Screen,
+	id: string,
+	text: string,
+	url: string,
+	fg: Color = {},
+	style: Style_Flags = {.Underline},
+	cfg: Box_Config = {},
+) -> i32 {
+	disp_w := string_display_width(text)
+	eff_fg := fg if fg.kind != .Default else rgb(80, 160, 255)
+	if s != nil {
+		s.paints[hash_id(id)] = Paint_Spec{
+			text  = text,
+			url   = url,
+			fg    = eff_fg,
+			style = style,
+		}
+	}
+	link_cfg := cfg
+	link_cfg.text = text
+	return leaf(ctx, id, disp_w, 1, link_cfg)
 }
 
 @(deferred_in = defer_end_modal)
@@ -419,6 +509,9 @@ put_cell_clipped :: proc(s: ^Screen, x, y: i32, cell: Cell, clip: Rect) {
 	}
 
 	c := cell
+	if len(c.link_url) > 0 {
+		c.link_url = intern_screen_url(s, c.link_url)
+	}
 	if c.ch < 32 || (c.ch >= 0x7f && c.ch < 0xa0) {
 		c.ch    = ' '
 		c.width = 1
@@ -442,11 +535,12 @@ put_cell_clipped :: proc(s: ^Screen, x, y: i32, cell: Cell, clip: Rect) {
 		heal_overwrite_at(s, x + 1, y)
 		s.back[idx] = c
 		s.back[idx + 1] = Cell{
-			ch    = 0,
-			fg    = c.fg,
-			bg    = c.bg,
-			style = c.style,
-			width = 0,
+			ch       = 0,
+			fg       = c.fg,
+			bg       = c.bg,
+			style    = c.style,
+			width    = 0,
+			link_url = c.link_url,
 		}
 	} else {
 		s.back[idx] = c
@@ -464,6 +558,7 @@ put_text_clipped :: proc(
 	fg, bg: Color,
 	style: Style_Flags,
 	clip: Rect,
+	link_url: string = "",
 ) -> i32 {
 	cur_x := x
 	idx := 0
@@ -479,11 +574,12 @@ put_text_clipped :: proc(
 			eff_bg = s.back[int(y * s.width + cur_x)].bg
 		}
 		put_cell_clipped(s, cur_x, y, Cell{
-			ch    = lead_r,
-			fg    = fg,
-			bg    = eff_bg,
-			style = style,
-			width = w,
+			ch       = lead_r,
+			fg       = fg,
+			bg       = eff_bg,
+			style    = style,
+			width    = w,
+			link_url = link_url,
 		}, clip)
 		cur_x += i32(w)
 	}
@@ -497,8 +593,9 @@ draw_string_clipped :: proc(
 	text: string,
 	fg, bg: Color,
 	style: Style_Flags,
+	link_url: string = "",
 ) {
-	put_text_clipped(s, x, y, text, fg, bg, style, clip)
+	put_text_clipped(s, x, y, text, fg, bg, style, clip, link_url)
 }
 
 fill_rect :: proc(s: ^Screen, r: Rect, clip: Rect, ch: rune, fg, bg: Color, style: Style_Flags) {
@@ -914,7 +1011,7 @@ render_layout :: proc(s: ^Screen, ctx: ^Layout_Context, temp_alloc := context.te
 					line_w := string_display_width(line)
 					tx := node.inner_rect.x + align_offset(node.inner_rect.w, line_w, h_align)
 					ty := base_y + i32(line_idx)
-					draw_string_clipped(s, tx, ty, inner_clip, line, paint.fg, paint.bg, paint.style)
+					draw_string_clipped(s, tx, ty, inner_clip, line, paint.fg, paint.bg, paint.style, paint.url)
 				}
 			} else if len(paint.spans) > 0 {
 				spans_w: i32 = 0
@@ -927,7 +1024,8 @@ render_layout :: proc(s: ^Screen, ctx: ^Layout_Context, temp_alloc := context.te
 				for sp in paint.spans {
 					sp_fg := sp.fg if sp.fg.kind != .Default else paint.fg
 					sp_bg := sp.bg if sp.bg.kind != .Default else paint.bg
-					cur_x += put_text_clipped(s, cur_x, ty, sp.text, sp_fg, sp_bg, paint.style + sp.style, inner_clip)
+					sp_url := sp.link_url if len(sp.link_url) > 0 else paint.url
+					cur_x += put_text_clipped(s, cur_x, ty, sp.text, sp_fg, sp_bg, paint.style + sp.style, inner_clip, sp_url)
 				}
 			} else {
 				text_str := paint.text if len(paint.text) > 0 else node.text
@@ -935,12 +1033,21 @@ render_layout :: proc(s: ^Screen, ctx: ^Layout_Context, temp_alloc := context.te
 					text_w := string_display_width(text_str)
 					tx := node.inner_rect.x + align_offset(node.inner_rect.w, text_w, h_align)
 					ty := node.inner_rect.y + align_offset(node.inner_rect.h, 1, v_align)
-					draw_string_clipped(s, tx, ty, inner_clip, text_str, paint.fg, paint.bg, paint.style)
+					draw_string_clipped(s, tx, ty, inner_clip, text_str, paint.fg, paint.bg, paint.style, paint.url)
 				}
 			}
 
 			if c_entry, has_canvas := s.canvas_entries[node.id_hash]; has_canvas {
 				render_canvas_entry(s, node, paint, c_entry, temp_alloc)
+			}
+			if p_entry, has_progress := s.progress_entries[node.id_hash]; has_progress {
+				render_progress_entry(s, node, paint, p_entry, temp_alloc)
+			}
+			if ch_entry, has_chart := s.chart_entries[node.id_hash]; has_chart {
+				render_chart_entry(s, node, paint, ch_entry, temp_alloc)
+			}
+			if para_entry, has_para := s.paragraph_entries[node.id_hash]; has_para {
+				render_paragraph_entry(s, node, paint, para_entry, temp_alloc)
 			}
 			if has_table {
 				render_table_entry(s, node, paint, t_entry)
@@ -986,6 +1093,7 @@ screen_diff_ansi :: proc(s: ^Screen, out: ^strings.Builder) -> int {
 	cur_fg := Color{kind = .Default}
 	cur_bg := Color{kind = .Default}
 	cur_style := Style_Flags{}
+	cur_url := ""
 	sgr_initialized := false
 	emitted_any := false
 
@@ -995,7 +1103,7 @@ screen_diff_ansi :: proc(s: ^Screen, out: ^strings.Builder) -> int {
 		if !s.first_frame {
 			for rx: i32 = 0; rx < s.width; rx += 1 {
 				r_idx := row_base + int(rx)
-				if s.back[r_idx] != s.front[r_idx] {
+				if !cells_equal(s.back[r_idx], s.front[r_idx]) {
 					last_dirty_x = rx
 				}
 			}
@@ -1014,9 +1122,9 @@ screen_diff_ansi :: proc(s: ^Screen, out: ^strings.Builder) -> int {
 				continue
 			}
 
-			dirty := s.first_frame || (next != prev) || (force_row_flush && x <= last_dirty_x)
+			dirty := s.first_frame || !cells_equal(next, prev) || (force_row_flush && x <= last_dirty_x)
 			if next.width == 2 && x + 1 < s.width {
-				if s.back[idx + 1] != s.front[idx + 1] {
+				if !cells_equal(s.back[idx + 1], s.front[idx + 1]) {
 					dirty = true
 				}
 			}
@@ -1040,11 +1148,25 @@ screen_diff_ansi :: proc(s: ^Screen, out: ^strings.Builder) -> int {
 
 			// Emit 1-based cursor position only when non-contiguous
 			if x != cur_x || y != cur_y {
+				if len(cur_url) > 0 {
+					strings.write_string(out, "\x1b]8;;\x1b\\")
+					cur_url = ""
+				}
 				strings.write_string(out, "\x1b[")
 				strings.write_int(out, int(y + 1))
 				strings.write_byte(out, ';')
 				strings.write_int(out, int(x + 1))
 				strings.write_byte(out, 'H')
+			}
+
+			// Emit OSC 8 hyperlink transition when link_url changes
+			if next.link_url != cur_url {
+				strings.write_string(out, "\x1b]8;;")
+				if len(next.link_url) > 0 {
+					strings.write_string(out, next.link_url)
+				}
+				strings.write_string(out, "\x1b\\")
+				cur_url = next.link_url
 			}
 
 			// Emit SGR sequence only when style or colors differ from active state
@@ -1082,6 +1204,9 @@ screen_diff_ansi :: proc(s: ^Screen, out: ^strings.Builder) -> int {
 	}
 
 	if emitted_any {
+		if len(cur_url) > 0 {
+			strings.write_string(out, "\x1b]8;;\x1b\\")
+		}
 		// Reset SGR attributes and end Synchronized Update
 		strings.write_string(out, "\x1b[0m\x1b[?2026l")
 	}

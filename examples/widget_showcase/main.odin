@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:math"
 import "core:mem"
 import "core:os"
+import "core:strconv"
 import "core:strings"
 import "core:time"
 import "../../bifrost"
@@ -345,6 +346,15 @@ track_13 :: "ui_tabs (focus-scoped tabs + H* memory)"
 track_14 :: "ui_canvas & ui_sparkline (Braille 2x4)"`
 
 TELEMETRY_SAMPLES :: 48
+SYS_HISTORY_LEN   :: 240 // 2 minutes of 500ms history
+SYS_VIEW_SAMPLES  :: 32  // 15s visible chart window
+SYS_MAX_CORES     :: 256
+
+CPU_Jiffies :: struct {
+	total: u64,
+	idle:  u64,
+	valid: bool,
+}
 
 SHOWCASE_HEIMDALL_DIR    :: ".tmp/showcase_heimdall"
 SHOWCASE_HEIMDALL_PREFIX :: ".tmp/showcase_heimdall/seg"
@@ -372,9 +382,253 @@ Showcase_App :: struct {
 	active_file:          string,
 	editor_syntax:        bifrost.Text_Area_Syntax_Mode,
 	last_action:          string,
+	last_action_buf:      [64]u8,
 	action_count:         int,
 	frames_rendered:      int,
 	quit_requested:       bool,
+
+	// Track 15: Form Controls demo state
+	form_chk:             bool,
+	form_sw:              bool,
+	form_radio:           int,
+	form_slider:          f64,
+	form_dropdown:        int,
+	form_dd_open:         bool,
+
+	// Track 17: Live Linux System Metrics (`/proc/stat` & `/proc/meminfo`) + Timeline Scrubbing
+	sys_cpu_hist:         [SYS_HISTORY_LEN]f64,
+	sys_mem_hist:         [SYS_HISTORY_LEN]f64,
+	sys_core_hist:        [SYS_MAX_CORES][SYS_HISTORY_LEN]f64,
+	sys_pan_samples:      f64, // 0.0 = pinned to Live Now, >0 = scrubbed back in time (500ms/sample)
+	sys_cpu_pct:          f64,
+	sys_core_count:       int,
+	sys_core_pct:         [SYS_MAX_CORES]f64,
+	sys_mem_used_pct:     f64,
+	sys_mem_cach_pct:     f64,
+	sys_swap_pct:         f64,
+	sys_mem_total_gb:     f64,
+	sys_mem_used_gb:      f64,
+	prev_cpu_total:       CPU_Jiffies,
+	prev_cpu_cores:       [SYS_MAX_CORES]CPU_Jiffies,
+	sys_samples_cnt:      int,
+
+	// Self-process metrics (`/proc/self/stat` & `/proc/self/status`)
+	self_cpu_pct:         f64,
+	self_rss_mb:          f64,
+	prev_self_ticks:      u64,
+	prev_self_total:      u64,
+}
+
+parse_proc_stat_line :: proc(line: string) -> (jiffies: CPU_Jiffies, ok: bool) {
+	fields := strings.fields(line, context.temp_allocator)
+	if len(fields) < 5 {
+		return {}, false
+	}
+	var_total: u64 = 0
+	var_idle: u64  = 0
+	for i := 1; i < len(fields); i += 1 {
+		v, parsed := strconv.parse_u64_of_base(fields[i], 10)
+		if !parsed {
+			continue
+		}
+		var_total += v
+		if i == 4 || i == 5 { // idle + iowait
+			var_idle += v
+		}
+	}
+	return CPU_Jiffies{total = var_total, idle = var_idle, valid = var_total > 0}, var_total > 0
+}
+
+compute_cpu_delta_pct :: proc(prev: ^CPU_Jiffies, cur: CPU_Jiffies, fallback_pct: f64) -> f64 {
+	if !cur.valid {
+		return fallback_pct
+	}
+	if !prev.valid || cur.total < prev.total {
+		prev^ = cur
+		if cur.total > 0 && cur.total >= cur.idle {
+			return clamp(f64(cur.total - cur.idle) * 100.0 / f64(cur.total), 0.0, 100.0)
+		}
+		return fallback_pct
+	}
+	d_total := cur.total - prev.total
+	if d_total == 0 {
+		// No kernel jiffy tick elapsed since the previous call
+		return fallback_pct
+	}
+	d_idle := cur.idle - prev.idle if cur.idle >= prev.idle else 0
+	prev^  = cur
+	if d_idle >= d_total {
+		return 0.0
+	}
+	return clamp(f64(d_total - d_idle) * 100.0 / f64(d_total), 0.0, 100.0)
+}
+
+sample_live_system_metrics :: proc(app: ^Showcase_App) {
+	// 1. Sample `/proc/stat` aggregate + all logical per-core jiffies (`cpu0`..`cpuN`)
+	proc_stat_ok := false
+	if stat_bytes, stat_err := os.read_entire_file("/proc/stat", context.temp_allocator); stat_err == nil {
+		proc_stat_ok = true
+		stat_str := string(stat_bytes)
+		detected_cores := 0
+		for line in strings.split_lines_iterator(&stat_str) {
+			if strings.has_prefix(line, "cpu ") {
+				if j, ok := parse_proc_stat_line(line); ok {
+					app.sys_cpu_pct = compute_cpu_delta_pct(&app.prev_cpu_total, j, app.sys_cpu_pct)
+				}
+			} else if strings.has_prefix(line, "cpu") {
+				sp_idx := strings.index_byte(line, ' ')
+				if sp_idx > 3 {
+					if core_idx, c_ok := strconv.parse_int(line[3:sp_idx], 10); c_ok && core_idx >= 0 && core_idx < SYS_MAX_CORES {
+						if j, ok := parse_proc_stat_line(line); ok {
+							app.sys_core_pct[core_idx] = compute_cpu_delta_pct(&app.prev_cpu_cores[core_idx], j, app.sys_core_pct[core_idx])
+							if core_idx + 1 > detected_cores {
+								detected_cores = core_idx + 1
+							}
+						}
+					}
+				}
+			}
+		}
+		if detected_cores > 0 {
+			app.sys_core_count = detected_cores
+		}
+	}
+	if app.sys_core_count <= 0 {
+		app.sys_core_count = 4
+	}
+
+	// 2. Sample `/proc/meminfo` for RAM Used %, Page Cache %, and Swap Used %
+	if mem_bytes, mem_err := os.read_entire_file("/proc/meminfo", context.temp_allocator); mem_err == nil {
+		mem_str := string(mem_bytes)
+		mem_total_kb: u64 = 0
+		mem_avail_kb: u64 = 0
+		buffers_kb:   u64 = 0
+		cached_kb:    u64 = 0
+		swap_tot_kb:  u64 = 0
+		swap_free_kb: u64 = 0
+
+		for line in strings.split_lines_iterator(&mem_str) {
+			fields := strings.fields(line, context.temp_allocator)
+			if len(fields) < 2 {
+				continue
+			}
+			val, v_ok := strconv.parse_u64_of_base(fields[1], 10)
+			if !v_ok {
+				continue
+			}
+			switch fields[0] {
+			case "MemTotal:":     mem_total_kb = val
+			case "MemAvailable:": mem_avail_kb = val
+			case "Buffers:":      buffers_kb   = val
+			case "Cached:":       cached_kb    = val
+			case "SwapTotal:":    swap_tot_kb  = val
+			case "SwapFree:":     swap_free_kb = val
+			}
+		}
+		if mem_total_kb > 0 {
+			used_kb := mem_total_kb - min(mem_total_kb, mem_avail_kb)
+			cach_kb := min(mem_total_kb, buffers_kb + cached_kb)
+			app.sys_mem_total_gb = f64(mem_total_kb) / (1024.0 * 1024.0)
+			app.sys_mem_used_gb  = f64(used_kb) / (1024.0 * 1024.0)
+			app.sys_mem_used_pct = clamp(f64(used_kb) * 100.0 / f64(mem_total_kb), 0.0, 100.0)
+			app.sys_mem_cach_pct = clamp(f64(cach_kb) * 100.0 / f64(mem_total_kb), 0.0, 100.0)
+		}
+		if swap_tot_kb > 0 {
+			swap_used := swap_tot_kb - min(swap_tot_kb, swap_free_kb)
+			app.sys_swap_pct = clamp(f64(swap_used) * 100.0 / f64(swap_tot_kb), 0.0, 100.0)
+		}
+	}
+
+	// 2b. Sample `/proc/self/stat` and `/proc/self/status` for this process's own CPU % and RSS memory
+	if self_stat_bytes, ss_err := os.read_entire_file("/proc/self/stat", context.temp_allocator); ss_err == nil {
+		ss_str := string(self_stat_bytes)
+		// Skip past `(comm)` since executable name may contain spaces/parens
+		if rparen := strings.last_index_byte(ss_str, ')'); rparen >= 0 && rparen + 2 < len(ss_str) {
+			rest_fields := strings.fields(ss_str[rparen + 2:], context.temp_allocator)
+			// Field 14 (`utime`) is index 11 after `) `, Field 15 (`stime`) is index 12, Field 24 (`rss` pages) is index 21
+			if len(rest_fields) > 12 {
+				utime, u_ok := strconv.parse_u64_of_base(rest_fields[11], 10)
+				stime, s_ok := strconv.parse_u64_of_base(rest_fields[12], 10)
+				if u_ok && s_ok {
+					self_ticks := utime + stime
+					cur_total  := app.prev_cpu_total.total
+					if app.prev_self_total > 0 && cur_total > app.prev_self_total && self_ticks >= app.prev_self_ticks {
+						d_self  := self_ticks - app.prev_self_ticks
+						d_total := cur_total - app.prev_self_total
+						// Multiply by logical core count so 100% = 1 full logical core (matching `top` / `htop` %CPU)
+						ncores  := f64(max(1, app.sys_core_count))
+						app.self_cpu_pct = clamp((f64(d_self) * ncores * 100.0) / f64(d_total), 0.0, ncores * 100.0)
+					}
+					app.prev_self_ticks = self_ticks
+					app.prev_self_total = cur_total
+				}
+			}
+			if len(rest_fields) > 21 {
+				if rss_pages, r_ok := strconv.parse_u64_of_base(rest_fields[21], 10); r_ok {
+					app.self_rss_mb = (f64(rss_pages) * 4096.0) / (1024.0 * 1024.0)
+				}
+			}
+		}
+	}
+
+	// 3. Shift rolling history ring (`0 ..< SYS_HISTORY_LEN`) and push latest sample at tail
+	ncores := max(1, app.sys_core_count)
+	if !proc_stat_ok {
+		t := f64(SYS_HISTORY_LEN + app.sys_samples_cnt) * 0.22
+		cpu_wave := 12.0 * math.sin_f64(t) + 6.0 * math.cos_f64(t * 2.3)
+		mem_wave := 3.5 * math.sin_f64(t * 0.45)
+		app.sys_cpu_pct = clamp(24.0 + cpu_wave, 1.0, 100.0)
+		if app.sys_mem_total_gb <= 0.0 {
+			app.sys_mem_total_gb = 16.0
+		}
+		app.sys_mem_used_pct = clamp(42.0 + mem_wave, 1.0, 100.0)
+		app.sys_mem_used_gb  = (app.sys_mem_used_pct / 100.0) * app.sys_mem_total_gb
+		app.sys_mem_cach_pct = 18.5
+		app.sys_swap_pct     = 4.2
+		for c in 0 ..< ncores {
+			phase := f64(c) * 0.75
+			c_wave := 14.0 * math.sin_f64(t + phase) + 7.0 * math.cos_f64(t * 1.9 - phase)
+			app.sys_core_pct[c] = clamp(24.0 + c_wave, 0.0, 100.0)
+		}
+	}
+	if app.sys_samples_cnt == 0 {
+		for i in 0 ..< SYS_HISTORY_LEN {
+			t := f64(i) * 0.22
+			cpu_wave := 12.0 * math.sin_f64(t) + 6.0 * math.cos_f64(t * 2.3)
+			mem_wave := 3.5 * math.sin_f64(t * 0.45)
+			app.sys_cpu_hist[i] = clamp(app.sys_cpu_pct + cpu_wave, 1.0, 100.0)
+			app.sys_mem_hist[i] = clamp(app.sys_mem_used_pct + mem_wave, 1.0, 100.0)
+			for c in 0 ..< ncores {
+				phase := f64(c) * 0.75
+				c_wave := 14.0 * math.sin_f64(t + phase) + 7.0 * math.cos_f64(t * 1.9 - phase)
+				app.sys_core_hist[c][i] = clamp(app.sys_core_pct[c] + c_wave, 0.0, 100.0)
+			}
+		}
+		app.sys_cpu_hist[SYS_HISTORY_LEN - 1] = app.sys_cpu_pct
+		app.sys_mem_hist[SYS_HISTORY_LEN - 1] = app.sys_mem_used_pct
+		for c in 0 ..< ncores {
+			app.sys_core_hist[c][SYS_HISTORY_LEN - 1] = app.sys_core_pct[c]
+		}
+	} else {
+		for i in 0 ..< SYS_HISTORY_LEN - 1 {
+			app.sys_cpu_hist[i] = app.sys_cpu_hist[i + 1]
+			app.sys_mem_hist[i] = app.sys_mem_hist[i + 1]
+		}
+		for c in 0 ..< ncores {
+			for i in 0 ..< SYS_HISTORY_LEN - 1 {
+				app.sys_core_hist[c][i] = app.sys_core_hist[c][i + 1]
+			}
+			app.sys_core_hist[c][SYS_HISTORY_LEN - 1] = app.sys_core_pct[c]
+		}
+		app.sys_cpu_hist[SYS_HISTORY_LEN - 1] = app.sys_cpu_pct
+		app.sys_mem_hist[SYS_HISTORY_LEN - 1] = app.sys_mem_used_pct
+		// If user has scrubbed into the past, advance pan offset by 1 sample so their viewed timestamp stays locked!
+		if app.sys_pan_samples > 0.05 {
+			max_pan := f64(SYS_HISTORY_LEN - SYS_VIEW_SAMPLES)
+			app.sys_pan_samples = clamp(app.sys_pan_samples + 1.0, 0.0, max_pan)
+		}
+	}
+	app.sys_samples_cnt += 1
 }
 
 active_heimdall_scope_filter :: proc(app: ^Showcase_App) -> string {
@@ -486,7 +740,14 @@ showcase_init :: proc(app: ^Showcase_App, cols, rows: i32, allocator := context.
 	app.active_file     = "notes.odin"
 	app.editor_syntax   = .Odin
 	app.wave_phase      = 0.0
+	app.form_chk        = true
+	app.form_sw         = true
+	app.form_radio      = 1
+	app.form_slider     = 65.0
+	app.form_dropdown   = 1
+	app.form_dd_open    = false
 	recompute_telemetry(app)
+	sample_live_system_metrics(app)
 
 	// Seed initial multi-line editor content and focus the tree explorer first
 	bifrost.set_text_area(&app.input, "notes_editor", INITIAL_EDITOR_NOTES)
@@ -532,9 +793,11 @@ build_showcase_ui :: proc(app: ^Showcase_App, out_tree_slice: ^bifrost.Tree_Slic
 		active_tab := bifrost.get_active_tab(&app.input, "workspace_tabs")
 		cur_row, cur_col, _ := bifrost.get_text_area_cursor(&app.input, "notes_editor")
 		header_text := fmt.tprintf(
-			" BIFROST SHOWCASE (Tracks 11-14) | Theme: %s | Tab: %d | Cursor: L%d:C%d | Last: %s",
+			" BIFROST SHOWCASE | Theme: %s | Tab: %d | App: %.1f%% CPU, %.1f MB | Cur: L%d:C%d | Last: %s",
 			pal.name,
 			active_tab + 1,
+			app.self_cpu_pct,
+			app.self_rss_mb,
 			cur_row + 1,
 			cur_col + 1,
 			app.last_action,
@@ -598,11 +861,14 @@ build_showcase_ui :: proc(app: ^Showcase_App, out_tree_slice: ^bifrost.Tree_Slic
 			})
 
 			// 2c. Right Pane: Track 13 Focus-Scope-Integrated Tab Bar (`ui_tabs`)
-			tab_specs := [4]bifrost.Tab_Item_Spec{
-				{label = "Editor & Docs",      badge = "T11",    key_hint = "1:"},
+			tab_specs := [7]bifrost.Tab_Item_Spec{
+				{label = "Editor & Docs",       badge = "T11",    key_hint = "1:"},
 				{label = "Braille Telemetry",   badge = "T14",    key_hint = "2:"},
 				{label = "Inspector & Keys",    badge = "T12/13", key_hint = "3:"},
-				{label = "Heimdall IPC Viewer", badge = "ARROW",  key_hint = "4:"},
+				{label = "Form Controls",       badge = "T15",    key_hint = "4:"},
+				{label = "Charts & Plots",      badge = "T17",    key_hint = "5:"},
+				{label = "Markdown Manual",     badge = "T18",    key_hint = "6:"},
+				{label = "Heimdall IPC Viewer", badge = "ARROW",  key_hint = "7:"},
 			}
 
 			cur_tab := 0
@@ -630,7 +896,7 @@ build_showcase_ui :: proc(app: ^Showcase_App, out_tree_slice: ^bifrost.Tree_Slic
 					sep_fg           = pal.border_fg,
 					border_fg        = pal.border_fg,
 					title_fg         = pal.accent_fg,
-					title            = "Workspace ([ / ] or Alt+1..4 switches tabs with H* Focus Memory)",
+					title            = "Workspace ([ / ] or Alt+1..7 switches tabs with H* Focus Memory)",
 					show_index_hints = true,
 				},
 				&cur_tab,
@@ -858,7 +1124,340 @@ build_showcase_ui :: proc(app: ^Showcase_App, out_tree_slice: ^bifrost.Tree_Slic
 
 				case 3:
 					// =========================================================
-					// TAB 3: Heimdall Arrow IPC Telemetry Viewer
+					// TAB 3: Track 15 Form Controls Suite
+					// =========================================================
+					if bifrost.ui_scope(&app.layout_ctx, &app.screen, "form_scope", bifrost.Scope_Config{
+						dir         = .Column,
+						width       = bifrost.grow(1),
+						height      = bifrost.grow(1),
+						gap         = 1,
+						padding     = bifrost.pad_xy(2, 1),
+						focus_flags = {.Focus_Scope},
+					}) {
+						bifrost.ui_label(&app.layout_ctx, &app.screen, "lbl_form_hdr", "Track 15: Form Controls Suite (Checkbox, Switch, Radio, Slider, Dropdown)", pal.sel_fg, {.Bold})
+
+						bifrost.ui_checkbox(&app.layout_ctx, &app.screen, &app.input, "demo_chk", &app.form_chk, "Hardware Acceleration (Space / Click)", {
+							focus_flags = {.Default_Focus},
+						})
+
+						bifrost.ui_switch(&app.layout_ctx, &app.screen, &app.input, "demo_sw", &app.form_sw, "Debug Logging Mode")
+
+						radio_opts := [3]string{"Standard Allocation", "Thread-Local Arena", "Virtual Memory Ring"}
+						bifrost.ui_radio_group(&app.layout_ctx, &app.screen, &app.input, "demo_radio", &app.form_radio, radio_opts[:])
+
+						bifrost.ui_slider(&app.layout_ctx, &app.screen, &app.input, "demo_slider", &app.form_slider, 0.0, 100.0, 5.0, {
+							label = "Buffer Depth",
+						})
+
+						backends := [4]string{"Raw POSIX PTY", "Windows ConPTY", "ANSI VT Diff", "Headless Virtual Grid"}
+						bifrost.ui_dropdown(&app.layout_ctx, &app.screen, &app.input, "demo_dropdown", &app.form_dropdown, backends[:], &app.form_dd_open)
+					}
+
+				case 4:
+					// =========================================================
+					// TAB 4 (Tab 5): Track 17 Live Linux System Metrics (`ui_chart`, `ui_bar_chart`)
+					// =========================================================
+					if bifrost.container(&app.layout_ctx, "charts_container", bifrost.Box_Config{
+						dir    = .Column,
+						width  = bifrost.grow(1),
+						height = bifrost.grow(1),
+						gap    = 1,
+					}) {
+						ncores := max(1, app.sys_core_count)
+						max_pan := f64(SYS_HISTORY_LEN - SYS_VIEW_SAMPLES)
+						pan := clamp(app.sys_pan_samples, 0.0, max_pan)
+						x_max := f64(SYS_HISTORY_LEN - 1) - pan
+						x_min := x_max - f64(SYS_VIEW_SAMPLES - 1)
+
+						// Dynamic X-axis time labels (`-15s .. Now` when live, or `-75s .. -60s` when scrubbed back)
+						x_labels := make([]string, 6, context.temp_allocator)
+						for tick in 0 ..< 6 {
+							r := f64(tick) / 5.0
+							sample_idx := x_min + r * (x_max - x_min)
+							sec_ago := int(math.round((f64(SYS_HISTORY_LEN - 1) - sample_idx) * 0.5))
+							if sec_ago <= 0 {
+								x_labels[tick] = "Now"
+							} else {
+								x_labels[tick] = fmt.tprintf("-%ds", sec_ago)
+							}
+						}
+
+						right_idx := clamp(int(math.round(x_max)), 0, SYS_HISTORY_LEN - 1)
+						view_cpu  := app.sys_cpu_hist[right_idx]
+						view_mem  := app.sys_mem_hist[right_idx]
+						pan_sec   := pan * 0.5
+
+						// KSysGuard / System Monitor multi-core color palette (vivid line + dimmed translucent fill)
+						sg_line_colors := [8]bifrost.Color{
+							bifrost.rgb(88, 214, 141),  // Emerald
+							bifrost.rgb(93, 173, 226),  // Sky Blue
+							bifrost.rgb(245, 176, 65),  // Amber Gold
+							bifrost.rgb(175, 122, 197), // Amethyst Purple
+							bifrost.rgb(72, 201, 176),  // Turquoise
+							bifrost.rgb(236, 112, 99),  // Coral Red
+							bifrost.rgb(244, 208, 63),  // Sun Yellow
+							bifrost.rgb(133, 193, 233), // Ice Blue
+						}
+						sg_fill_colors := [8]bifrost.Color{
+							bifrost.rgb(42, 110, 74),
+							bifrost.rgb(45, 88, 120),
+							bifrost.rgb(125, 88, 32),
+							bifrost.rgb(90, 62, 105),
+							bifrost.rgb(36, 102, 90),
+							bifrost.rgb(120, 56, 50),
+							bifrost.rgb(122, 104, 30),
+							bifrost.rgb(66, 96, 118),
+						}
+
+						// Build System Guard per-CPU area datasets (`c0..cN`, or 8 grouped core clusters if >8 cores)
+						num_series := min(ncores, 8)
+						cores_per_series := (ncores + num_series - 1) / num_series
+						chart_datasets := make([]bifrost.Chart_Dataset, num_series, context.temp_allocator)
+						for s_idx in 0 ..< num_series {
+							c_start := s_idx * cores_per_series
+							c_end   := min(ncores, c_start + cores_per_series)
+							pts := make([][2]f64, SYS_HISTORY_LEN, context.temp_allocator)
+							for i in 0 ..< SYS_HISTORY_LEN {
+								sum_v := 0.0
+								cnt_v := 0
+								for c in c_start ..< c_end {
+									sum_v += app.sys_core_hist[c][i]
+									cnt_v += 1
+								}
+								avg_v := sum_v / f64(max(1, cnt_v))
+								pts[i] = {f64(i), avg_v}
+							}
+							cur_v := pts[right_idx][1]
+							series_lbl: string
+							if cores_per_series == 1 {
+								series_lbl = fmt.tprintf("c%d %.0f%%", c_start, cur_v)
+							} else {
+								series_lbl = fmt.tprintf("c%d-%d %.0f%%", c_start, c_end - 1, cur_v)
+							}
+							chart_datasets[s_idx] = bifrost.Chart_Dataset{
+								name    = series_lbl,
+								data    = pts,
+								marker  = .Braille_Area,
+								fg      = sg_line_colors[s_idx % len(sg_line_colors)],
+								fill_fg = sg_fill_colors[s_idx % len(sg_fill_colors)],
+							}
+						}
+
+						chart_title: string
+						x_axis_title: string
+						if pan <= 0.05 {
+							chart_title = fmt.tprintf(
+								"System Guard CPU History [LIVE] — Avg: %.1f%% | RAM: %.1f/%.1f GB | App: %.1f%% CPU, %.1f MB",
+								app.sys_cpu_pct,
+								app.sys_mem_used_gb,
+								app.sys_mem_total_gb,
+								app.self_cpu_pct,
+								app.self_rss_mb,
+							)
+							x_axis_title = "Timeline (Drag or Wheel on chart to scrub history · 500ms live)"
+						} else {
+							chart_title = fmt.tprintf(
+								"System Guard CPU History [PAUSED -%.1fs] — Avg: %.1f%% | RAM: %.1f%% (App: %.1f%% CPU, %.1f MB)",
+								pan_sec,
+								view_cpu,
+								view_mem,
+								app.self_cpu_pct,
+								app.self_rss_mb,
+							)
+							x_axis_title = fmt.tprintf("Scrubbed -%.1fs (Drag left/right or Wheel · Press '0' or Home for Live)", pan_sec)
+						}
+
+						bifrost.ui_chart(&app.layout_ctx, &app.screen, "telemetry_chart", bifrost.Chart_Config{
+							title       = chart_title,
+							width       = bifrost.grow(1),
+							height      = bifrost.grow(1),
+							border      = .Rounded,
+							border_fg   = pal.border_fg,
+							title_fg    = pal.accent_fg,
+							focus_flags = {.Focusable, .Default_Focus},
+							show_grid   = true,
+							show_legend = true,
+							x_axis      = bifrost.Axis_Config{
+								title  = x_axis_title,
+								bounds = {x_min, x_max},
+								labels = x_labels,
+								fg     = pal.muted_fg,
+							},
+							y_axis      = bifrost.Axis_Config{
+								title  = "CPU %",
+								bounds = {0.0, 100.0},
+								labels = {"0", "25", "50", "75", "100"},
+								fg     = pal.muted_fg,
+							},
+							datasets    = chart_datasets,
+						})
+
+						if bifrost.container(&app.layout_ctx, "bar_charts_row", bifrost.Box_Config{
+							dir    = .Row,
+							width  = bifrost.grow(1),
+							height = bifrost.fixed(7),
+							gap    = 1,
+						}) {
+							if ncores <= 6 {
+								vbar_data := make([]bifrost.Bar_Data, ncores, context.temp_allocator)
+								for c in 0 ..< ncores {
+									s_idx := min(num_series - 1, c / max(1, cores_per_series))
+									vbar_data[c] = bifrost.Bar_Data{
+										label = fmt.tprintf("c%d", c),
+										value = app.sys_core_hist[c][right_idx],
+										color = sg_line_colors[s_idx % len(sg_line_colors)],
+									}
+								}
+								bw: i32 = 4 if ncores <= 4 else 3
+								bgap: i32 = 2 if ncores <= 4 else 1
+								bifrost.ui_bar_chart(&app.layout_ctx, &app.screen, "svc_vbar", bifrost.Bar_Chart_Config{
+									direction   = .Vertical,
+									title       = fmt.tprintf("Per-Core Load %% (%d cores)", ncores),
+									width       = bifrost.grow(1),
+									height      = bifrost.grow(1),
+									border      = .Plain,
+									border_fg   = pal.border_fg,
+									title_fg    = pal.accent_fg,
+									bar_width   = bw,
+									gap         = bgap,
+									max_value   = 100.0,
+									show_values = true,
+									data        = vbar_data,
+								})
+							} else if ncores <= 24 {
+								if bifrost.ui_scope(&app.layout_ctx, &app.screen, "cores_gauge_grid", bifrost.Scope_Config{
+									dir       = .Column,
+									width     = bifrost.grow(1),
+									height    = bifrost.grow(1),
+									border    = .Plain,
+									title     = fmt.tprintf("Per-Core Load %% (%d cores · color-coded)", ncores),
+									fg        = pal.text_fg,
+									bg        = pal.bg,
+									border_fg = pal.border_fg,
+									title_fg  = pal.accent_fg,
+								}) {
+									grid_rows :: 4
+									grid_cols := (ncores + grid_rows - 1) / grid_rows
+									for r in 0 ..< grid_rows {
+										if bifrost.container(&app.layout_ctx, fmt.tprintf("core_grid_row_%d", r), bifrost.Box_Config{
+											dir    = .Row,
+											width  = bifrost.grow(1),
+											height = bifrost.fixed(1),
+											gap    = 1,
+										}) {
+											for gc in 0 ..< grid_cols {
+												core_idx := gc * grid_rows + r
+												if core_idx < ncores {
+													pct   := app.sys_core_hist[core_idx][right_idx]
+													s_idx := min(num_series - 1, core_idx / max(1, cores_per_series))
+													c_fg  := sg_line_colors[s_idx % len(sg_line_colors)]
+													bifrost.ui_gauge(&app.layout_ctx, &app.screen, fmt.tprintf("core_g_%d", core_idx), bifrost.Gauge_Config{
+														ratio            = clamp(pct / 100.0, 0.0, 1.0),
+														show_percentage  = true,
+														filled_fg        = c_fg,
+														unfilled_fg      = pal.border_fg,
+														unfilled_bg      = pal.header_bg,
+														text_filled_fg   = pal.bg,
+														text_unfilled_fg = c_fg,
+														width            = bifrost.grow(1),
+														height           = bifrost.fixed(1),
+													})
+												} else {
+													bifrost.leaf(&app.layout_ctx, fmt.tprintf("core_pad_%d_%d", r, gc), 1, 1, bifrost.Box_Config{
+														width  = bifrost.grow(1),
+														height = bifrost.fixed(1),
+													})
+												}
+											}
+										}
+									}
+								}
+							} else {
+								max_c := 0
+								max_p := 0.0
+								spark_cores := make([]f32, ncores, context.temp_allocator)
+								for c in 0 ..< ncores {
+									val := app.sys_core_hist[c][right_idx]
+									spark_cores[c] = f32(val)
+									if val > max_p {
+										max_p = val
+										max_c = c
+									}
+								}
+								bifrost.ui_sparkline(&app.layout_ctx, &app.screen, "cores_spark_all", spark_cores, bifrost.Sparkline_Config{
+									title     = fmt.tprintf("All %d Cores (c0..c%d | Peak c%d: %.0f%%)", ncores, ncores - 1, max_c, max_p),
+									width     = bifrost.grow(1),
+									height    = bifrost.grow(1),
+									border    = .Plain,
+									fg        = pal.series_a,
+									bg        = pal.bg,
+									border_fg = pal.border_fg,
+									title_fg  = pal.accent_fg,
+									fill_bg   = true,
+									min_val   = 0.0,
+									max_val   = 100.0,
+								})
+							}
+
+							hbar_data := [3]bifrost.Bar_Data{
+								{label = "RAM",   value = app.sys_mem_used_pct, color = pal.series_a},
+								{label = "Cache", value = app.sys_mem_cach_pct, color = pal.accent_fg},
+								{label = "Swap",  value = app.sys_swap_pct,     color = pal.series_b},
+							}
+							bifrost.ui_bar_chart(&app.layout_ctx, &app.screen, "res_hbar", bifrost.Bar_Chart_Config{
+								direction   = .Horizontal,
+								title       = "Memory Breakdown % (/proc/meminfo)",
+								width       = bifrost.grow(1),
+								height      = bifrost.grow(1),
+								border      = .Plain,
+								border_fg   = pal.border_fg,
+								title_fg    = pal.accent_fg,
+								gap         = 1,
+								max_value   = 100.0,
+								show_values = true,
+								data        = hbar_data[:],
+							})
+						}
+					}
+
+				case 5:
+					// =========================================================
+					// TAB 5: Track 18 Word-Wrapped Markdown Manual (`ui_markdown`)
+					// =========================================================
+					md_text := `# Bifrost Actor-Driven TUI Engine
+Bifrost is an immediate-mode **actor-driven** terminal user interface framework for Odin.
+
+## Core Architectural Pillars
+- **Sleipnir Actor Supervision**: Background workers stream diffs into UI queues.
+- **Zero-Allocation Tree Layout**: Layout and render pipelines use context.temp_allocator.
+- **2D Spatial Navigation**: Directional arrow keys bubble up nested container hierarchies.
+
+> "A terminal interface should feel as fast, crisp, and robust as a game engine."
+
+---
+*Track 18 Documentation & Markdown Viewer Suite*`
+
+					bifrost.ui_markdown(&app.layout_ctx, &app.screen, "manual_md", md_text, bifrost.Markdown_Config{
+						title       = "Bifrost Architecture Manual (ui_markdown)",
+						width       = bifrost.grow(1),
+						height      = bifrost.grow(1),
+						border      = .Rounded,
+						border_fg   = pal.border_fg,
+						title_fg    = pal.accent_fg,
+						wrap_mode   = .Words,
+						h1_fg       = pal.accent_fg,
+						h2_fg       = pal.series_a,
+						h3_fg       = pal.series_b,
+						bullet_fg   = pal.sel_fg,
+						quote_fg    = pal.muted_fg,
+						code_fg     = pal.sel_fg,
+						code_bg     = pal.header_bg,
+						rule_fg     = pal.border_fg,
+					})
+
+				case 6:
+					// =========================================================
+					// TAB 6 (Tab 7): Heimdall Arrow IPC Telemetry Viewer
 					// =========================================================
 					rec_stats := bifrost.heimdall_snapshot_recorder_stats(&app.recorder)
 					scope_lbl := active_heimdall_scope_filter(app)
@@ -997,6 +1596,12 @@ build_showcase_ui :: proc(app: ^Showcase_App, out_tree_slice: ^bifrost.Tree_Slic
 	bifrost.end_layout(&app.layout_ctx)
 }
 
+set_last_action :: proc(app: ^Showcase_App, s: string) {
+	n := min(len(s), len(app.last_action_buf))
+	copy(app.last_action_buf[:n], s[:n])
+	app.last_action = string(app.last_action_buf[:n])
+}
+
 handle_showcase_interactions :: proc(app: ^Showcase_App) -> bool {
 	changed := false
 
@@ -1013,7 +1618,7 @@ handle_showcase_interactions :: proc(app: ^Showcase_App) -> bool {
 		app.active_file    = node_label
 		app.editor_syntax  = .Cue if strings.has_suffix(node_label, ".cue") else .Odin
 		bifrost.set_text_area(&app.input, "notes_editor", NODE_FILE_SNIPPETS[act_node])
-		app.last_action    = fmt.tprintf("tree.open:%s", node_label)
+		set_last_action(app, fmt.tprintf("tree.open:%s", node_label))
 		app.action_count  += 1
 		changed = true
 	}
@@ -1021,10 +1626,10 @@ handle_showcase_interactions :: proc(app: ^Showcase_App) -> bool {
 	// Track 13: Check if active tab changed this frame
 	if bifrost.was_tab_changed(&app.input, "workspace_tabs") {
 		new_tab := bifrost.get_active_tab(&app.input, "workspace_tabs")
-		if new_tab == 3 {
+		if new_tab == 6 {
 			flush_and_reload_showcase_heimdall(app)
 		}
-		app.last_action   = fmt.tprintf("tab.switch:%d", new_tab + 1)
+		set_last_action(app, fmt.tprintf("tab.switch:%d", new_tab + 1))
 		app.action_count += 1
 		changed = true
 	}
@@ -1033,33 +1638,34 @@ handle_showcase_interactions :: proc(app: ^Showcase_App) -> bool {
 	act, has_act := bifrost.triggered_action(&app.input, Showcase_Action)
 	if bifrost.was_activated(&app.input, "btn_theme_tab2") || (has_act && act == .Theme_Cycle) || bifrost.was_action_triggered(&app.input, "theme.cycle") {
 		app.theme         = Theme_Preset((int(app.theme) + 1) % len(Theme_Preset))
-		app.last_action   = fmt.tprintf("theme:%s", THEMES[app.theme].name)
+		set_last_action(app, fmt.tprintf("theme:%s", THEMES[app.theme].name))
 		app.action_count += 1
 		changed = true
 	}
 	if bifrost.was_activated(&app.input, "btn_cycle_keymap") || (has_act && act == .Style_Cycle) || bifrost.was_action_triggered(&app.input, "style.cycle") {
 		next_st           := bifrost.cycle_keymap_style(&app.input)
-		app.last_action    = fmt.tprintf("style:%s", bifrost.keymap_style_name(next_st))
+		set_last_action(app, fmt.tprintf("style:%s", bifrost.keymap_style_name(next_st)))
 		app.action_count  += 1
 		changed = true
 	}
 	if bifrost.was_activated(&app.input, "btn_pulse_wave") || (has_act && act == .Pulse_Telemetry) || bifrost.was_action_triggered(&app.input, "telemetry.pulse") {
 		app.wave_phase   += 0.65
 		recompute_telemetry(app)
-		app.last_action   = "telemetry.pulse"
+		sample_live_system_metrics(app)
+		set_last_action(app, "telemetry.pulse")
 		app.action_count += 1
 		changed = true
 	}
 	if (has_act && act == .Focus_Tree) || bifrost.was_action_triggered(&app.input, "nav.tree") {
 		app.input.wants_focus_id = bifrost.hash_id("arch_tree")
-		app.last_action          = "nav.tree"
+		set_last_action(app, "nav.tree")
 		app.action_count        += 1
 		changed = true
 	}
 	if (has_act && act == .Focus_Editor) || bifrost.was_action_triggered(&app.input, "nav.editor") {
 		bifrost.set_active_tab(&app.input, "workspace_tabs", 0, true)
 		app.input.wants_focus_id = bifrost.hash_id("notes_editor")
-		app.last_action          = "nav.editor"
+		set_last_action(app, "nav.editor")
 		app.action_count        += 1
 		changed = true
 	}
@@ -1068,7 +1674,7 @@ handle_showcase_interactions :: proc(app: ^Showcase_App) -> bool {
 		snippet := fmt.tprintf("\n// Selected: %s", SHOWCASE_TREE_NODES[sel_node].label)
 		slot := bifrost.get_text_area_state(&app.input, "notes_editor")
 		_ = bifrost.text_area_insert_string(&app.input, slot, snippet)
-		app.last_action   = "editor.append_node"
+		set_last_action(app, "editor.append_node")
 		app.action_count += 1
 		changed = true
 	}
@@ -1076,7 +1682,7 @@ handle_showcase_interactions :: proc(app: ^Showcase_App) -> bool {
 		app.active_file   = "notes.odin"
 		app.editor_syntax = .Odin
 		bifrost.set_text_area(&app.input, "notes_editor", INITIAL_EDITOR_NOTES)
-		app.last_action   = "editor.reset"
+		set_last_action(app, "editor.reset")
 		app.action_count += 1
 		changed = true
 	}
@@ -1086,14 +1692,14 @@ handle_showcase_interactions :: proc(app: ^Showcase_App) -> bool {
 				bifrost.set_tree_node_expanded(&app.input, "arch_tree", idx, true)
 			}
 		}
-		app.last_action   = "tree.expand_all"
+		set_last_action(app, "tree.expand_all")
 		app.action_count += 1
 		changed = true
 	}
 	if bifrost.was_activated(&app.input, "btn_collapse_tests") {
 		cur_exp := bifrost.is_tree_node_expanded(&app.input, "arch_tree", 11)
 		bifrost.set_tree_node_expanded(&app.input, "arch_tree", 11, !cur_exp)
-		app.last_action   = "tree.toggle_tests"
+		set_last_action(app, "tree.toggle_tests")
 		app.action_count += 1
 		changed = true
 	}
@@ -1103,13 +1709,13 @@ handle_showcase_interactions :: proc(app: ^Showcase_App) -> bool {
 		app.palette.dirty = true
 		bifrost.update_palette_matches(&app.palette, &app.input, "")
 		app.input.wants_focus_id = bifrost.hash_id(app.palette.input_id)
-		app.last_action          = "palette.opened"
+		set_last_action(app, "palette.opened")
 		app.action_count        += 1
 		changed = true
 	}
 	if bifrost.was_activated(&app.input, "btn_hd_flush") || (has_act && act == .Heimdall_Flush) || bifrost.was_action_triggered(&app.input, "heimdall.flush") {
 		flush_and_reload_showcase_heimdall(app)
-		app.last_action   = "heimdall.flush"
+		set_last_action(app, "heimdall.flush")
 		app.action_count += 1
 		changed = true
 	}
@@ -1127,7 +1733,7 @@ handle_showcase_interactions :: proc(app: ^Showcase_App) -> bool {
 			slot.selected_row = 0
 			slot.offset       = 0
 		}
-		app.last_action   = fmt.tprintf("heimdall.kind:%s", bifrost.heimdall_filter_kind_label(app.heimdall_filter_kind))
+		set_last_action(app, fmt.tprintf("heimdall.kind:%s", bifrost.heimdall_filter_kind_label(app.heimdall_filter_kind)))
 		app.action_count += 1
 		changed = true
 	}
@@ -1160,17 +1766,84 @@ handle_showcase_interactions :: proc(app: ^Showcase_App) -> bool {
 			slot.selected_row = 0
 			slot.offset       = 0
 		}
-		app.last_action   = "heimdall.scope"
+		set_last_action(app, "heimdall.scope")
 		app.action_count += 1
 		changed = true
 	}
 	if (has_act && act == .Quit) || bifrost.was_action_triggered(&app.input, "app.quit") {
 		app.quit_requested = true
-		app.last_action    = "app.quit"
+		set_last_action(app, "app.quit")
 		changed = true
 	}
 
 	return changed || (app.input.text_changed_id != 0) || (app.input.scrolled_id != 0) || (app.input.tab_changed_id != 0)
+}
+
+handle_chart_timeline_scrubbing :: proc(app: ^Showcase_App, events: []bifrost.Input_Event) -> bool {
+	chart_id := bifrost.hash_id("telemetry_chart")
+	max_pan  := f64(SYS_HISTORY_LEN - SYS_VIEW_SAMPLES)
+	changed  := false
+
+	// 1. Mouse click-and-drag panning on `telemetry_chart`
+	if app.input.active_press_id == chart_id && app.input.drag_delta[0] != 0 {
+		chart_w: f64 = 56.0
+		if idx, ok := app.layout_ctx.id_map[chart_id]; ok {
+			chart_w = max(12.0, f64(app.layout_ctx.nodes[idx].inner_rect.w - 4))
+		}
+		samples_per_col := f64(SYS_VIEW_SAMPLES) / chart_w
+		// Dragging right (dx > 0) pulls earlier history into view; dragging left (dx < 0) moves toward Now
+		app.sys_pan_samples = clamp(app.sys_pan_samples + f64(app.input.drag_delta[0]) * samples_per_col, 0.0, max_pan)
+		if app.sys_pan_samples <= 0.05 {
+			app.sys_pan_samples = 0.0
+			set_last_action(app, "chart.live")
+		} else {
+			set_last_action(app, fmt.tprintf("chart.scrub:-%.1fs", app.sys_pan_samples * 0.5))
+		}
+		changed = true
+	}
+
+	// 2. Mouse wheel & keyboard scrubbing when `telemetry_chart` is hovered or focused
+	for ev in events {
+		switch e in ev {
+		case bifrost.Mouse_Event:
+			if app.input.hovered_id == chart_id && (e.action == .Press || e.action == .Scroll_Up || e.action == .Scroll_Down || e.action == .Scroll_Left || e.action == .Scroll_Right) {
+				step: f64 = 0.0
+				if e.button == .Wheel_Up || e.button == .Wheel_Left || e.action == .Scroll_Up || e.action == .Scroll_Left {
+					step = 2.0
+				} else if e.button == .Wheel_Down || e.button == .Wheel_Right || e.action == .Scroll_Down || e.action == .Scroll_Right {
+					step = -2.0
+				}
+				if step != 0.0 {
+					app.sys_pan_samples = clamp(app.sys_pan_samples + step, 0.0, max_pan)
+					if app.sys_pan_samples <= 0.05 {
+						app.sys_pan_samples = 0.0
+						set_last_action(app, "chart.live")
+					} else {
+						set_last_action(app, fmt.tprintf("chart.scrub:-%.1fs", app.sys_pan_samples * 0.5))
+					}
+					changed = true
+				}
+			}
+		case bifrost.Key_Event:
+			if app.input.focused_id == chart_id {
+				if e.code == .Rune && e.ch == '0' {
+					app.sys_pan_samples = 0.0
+					set_last_action(app, "chart.live")
+					changed = true
+				} else if e.code == .Home {
+					app.sys_pan_samples = max_pan
+					set_last_action(app, fmt.tprintf("chart.scrub:-%.1fs", app.sys_pan_samples * 0.5))
+					changed = true
+				} else if e.code == .End {
+					app.sys_pan_samples = 0.0
+					set_last_action(app, "chart.live")
+					changed = true
+				}
+			}
+		case bifrost.Focus_Loss_Event, bifrost.Focus_Event, bifrost.Paste_Event, bifrost.Resize_Event:
+		}
+	}
+	return changed
 }
 
 step_showcase_frame :: proc(app: ^Showcase_App, events: ..bifrost.Input_Event) {
@@ -1196,7 +1869,8 @@ step_showcase_frame :: proc(app: ^Showcase_App, events: ..bifrost.Input_Event) {
 		build_showcase_ui(app, &tree_slice)
 
 		bifrost.resolve_input(&app.input, &app.layout_ctx, ..events)
-		if handle_showcase_interactions(app) || (len(events) > 0 && !bifrost.is_pure_hover_event_batch(&app.input, events)) {
+		chart_scrubbed := handle_chart_timeline_scrubbing(app, events)
+		if handle_showcase_interactions(app) || chart_scrubbed || (len(events) > 0 && !bifrost.is_pure_hover_event_batch(&app.input, events)) {
 			build_showcase_ui(app, &tree_slice)
 			bifrost.resolve_input(&app.input, &app.layout_ctx)
 		}
@@ -1247,19 +1921,24 @@ run_showcase :: proc(live_tty: bool) -> bool {
 		bifrost.terminal_deinit(&term)
 	}
 
-	app: Showcase_App
-	if !showcase_init(&app, cols, rows, context.allocator) {
+	app, alloc_err := new(Showcase_App, context.allocator)
+	if alloc_err != nil {
 		return false
 	}
-	defer showcase_destroy(&app)
+	defer free(app, context.allocator)
+	if !showcase_init(app, cols, rows, context.allocator) {
+		return false
+	}
+	defer showcase_destroy(app)
 
 	if live_tty {
-		step_showcase_frame(&app)
+		step_showcase_frame(app)
 		if strings.builder_len(app.ansi_builder) > 0 {
 			_, _ = os.write_string(os.stdout, strings.to_string(app.ansi_builder))
 		}
 
 		last_tick := time.tick_now()
+		last_sys_sample := last_tick
 		target_frame_interval := 33 * time.Millisecond // 30 FPS cap
 		queued_inputs := make([dynamic]bifrost.Input_Event, 0, 64, context.allocator)
 		defer delete(queued_inputs)
@@ -1275,61 +1954,71 @@ run_showcase :: proc(live_tty: bool) -> bool {
 						break
 					}
 					_ = bifrost.append_or_coalesce_input_event(&queued_inputs, ev2, &app.input)
+					free_all(context.temp_allocator)
 				}
 			}
 			now := time.tick_now()
-			if len(queued_inputs) > 0 && time.tick_diff(last_tick, now) >= target_frame_interval {
+			sys_tick_due := false
+			if time.tick_since(last_sys_sample) >= 500 * time.Millisecond {
+				last_sys_sample = now
+				sample_live_system_metrics(app)
+				if bifrost.get_active_tab(&app.input, "workspace_tabs") == 4 {
+					sys_tick_due = true
+				}
+			}
+			if (len(queued_inputs) > 0 && time.tick_diff(last_tick, now) >= target_frame_interval) || sys_tick_due {
 				last_tick = now
 				for q_ev in queued_inputs {
 					if res_ev, is_res := q_ev.(bifrost.Resize_Event); is_res {
 						_ = bifrost.screen_resize(&app.screen, max(80, res_ev.width), max(20, res_ev.height))
 					}
 				}
-				step_showcase_frame(&app, ..queued_inputs[:])
+				step_showcase_frame(app, ..queued_inputs[:])
 				clear(&queued_inputs)
 				if strings.builder_len(app.ansi_builder) > 0 {
 					_, _ = os.write_string(os.stdout, strings.to_string(app.ansi_builder))
 				}
 			}
+			free_all(context.temp_allocator)
 		}
 	} else {
-		// Deterministic headless walkthrough exercising all 4 new components together:
+		// Deterministic headless walkthrough exercising all components together:
 		// 1. Initial frame render (focused on `arch_tree` in the left pane)
-		step_showcase_frame(&app)
+		step_showcase_frame(app)
 
 		// 2. Track 12 (`ui_tree`): Navigate down to `core/` -> collapse `core/` via `h`,
 		//    step down to `widgets/canvas.odin (T14)` (5 steps: `widgets/` -> `T11` -> `T12` -> `T13` -> `T14`),
 		//    and activate `canvas.odin (T14)` with Enter!
-		step_showcase_frame(&app, bifrost.Key_Event{code = .Rune, ch = 'j'}) // `core/` (node 1)
-		step_showcase_frame(&app, bifrost.Key_Event{code = .Rune, ch = 'h'}) // collapse `core/`! (4 children hidden)
+		step_showcase_frame(app, bifrost.Key_Event{code = .Rune, ch = 'j'}) // `core/` (node 1)
+		step_showcase_frame(app, bifrost.Key_Event{code = .Rune, ch = 'h'}) // collapse `core/`! (4 children hidden)
 		for _ in 0 ..< 5 {
-			step_showcase_frame(&app, bifrost.Key_Event{code = .Rune, ch = 'j'}) // step down to `canvas.odin (T14)` (node 10)
+			step_showcase_frame(app, bifrost.Key_Event{code = .Rune, ch = 'j'}) // step down to `canvas.odin (T14)` (node 10)
 		}
-		step_showcase_frame(&app, bifrost.Key_Event{code = .Enter}) // activate leaf node `canvas.odin (T14)`
+		step_showcase_frame(app, bifrost.Key_Event{code = .Enter}) // activate leaf node `canvas.odin (T14)`
 
 		// 3. Focus Tab 0 (`Editor & Docs` — `notes_editor`) via 2-step chord `g n` (`Focus_Editor`),
 		//    enter `.Editing` mode via Enter, append a comment line at the bottom, and press Escape to return to `.Navigation`
-		step_showcase_frame(&app, bifrost.Key_Event{code = .Rune, ch = 'g'})
-		step_showcase_frame(&app, bifrost.Key_Event{code = .Rune, ch = 'n'}) // 2-step chord `g n` -> `nav.editor` (`notes_editor`)
-		step_showcase_frame(&app, bifrost.Key_Event{code = .Enter})          // two-stage Enter -> `.Editing` mode in `notes_editor`
-		step_showcase_frame(&app, bifrost.Key_Event{code = .End})
-		step_showcase_frame(&app, bifrost.Key_Event{code = .Enter})
+		step_showcase_frame(app, bifrost.Key_Event{code = .Rune, ch = 'g'})
+		step_showcase_frame(app, bifrost.Key_Event{code = .Rune, ch = 'n'}) // 2-step chord `g n` -> `nav.editor` (`notes_editor`)
+		step_showcase_frame(app, bifrost.Key_Event{code = .Enter})          // two-stage Enter -> `.Editing` mode in `notes_editor`
+		step_showcase_frame(app, bifrost.Key_Event{code = .End})
+		step_showcase_frame(app, bifrost.Key_Event{code = .Enter})
 		for ch in "// Verified in headless showcase!" {
-			step_showcase_frame(&app, bifrost.Key_Event{code = .Rune, ch = ch})
+			step_showcase_frame(app, bifrost.Key_Event{code = .Rune, ch = ch})
 		}
-		step_showcase_frame(&app, bifrost.Key_Event{code = .Escape}) // exit `.Editing` -> `.Navigation` mode
+		step_showcase_frame(app, bifrost.Key_Event{code = .Escape}) // exit `.Editing` -> `.Navigation` mode
 
 		// 4. Track 13 (`ui_tabs`) + Track 14 (`ui_canvas` & `ui_sparkline`):
 		//    Press `]` to switch to Tab 2 (`Braille Telemetry`), pulse the wave twice (`p`),
 		//    then press `]` to switch to Tab 3 (`Inspector & Keys`), focus `btn_collapse_tests`,
 		//    then press `Alt+1` to jump back to Tab 1 (verifying H* restores `notes_editor`),
 		//    and finally press `Alt+2` to showcase the live Braille + Sparkline canvas on screen!
-		step_showcase_frame(&app, bifrost.Key_Event{code = .Rune, ch = ']'}) // switch to Tab 2 (`Braille Telemetry`)
-		step_showcase_frame(&app, bifrost.Key_Event{code = .Rune, ch = 'p'}) // pulse wave phase
-		step_showcase_frame(&app, bifrost.Key_Event{code = .Rune, ch = 'p'}) // pulse wave phase again
-		step_showcase_frame(&app, bifrost.Key_Event{code = .Rune, ch = ']'}) // switch to Tab 3 (`Inspector & Keys`)
-		step_showcase_frame(&app, bifrost.Key_Event{code = .Rune, ch = 'j'}) // move focus to `btn_collapse_tests` in Tab 3
-		step_showcase_frame(&app, bifrost.Key_Event{code = .Rune, ch = '1', mods = {.Alt}}) // Alt+1 -> Tab 1 (`notes_editor` restored via H*)
+		step_showcase_frame(app, bifrost.Key_Event{code = .Rune, ch = ']'}) // switch to Tab 2 (`Braille Telemetry`)
+		step_showcase_frame(app, bifrost.Key_Event{code = .Rune, ch = 'p'}) // pulse wave phase
+		step_showcase_frame(app, bifrost.Key_Event{code = .Rune, ch = 'p'}) // pulse wave phase again
+		step_showcase_frame(app, bifrost.Key_Event{code = .Rune, ch = ']'}) // switch to Tab 3 (`Inspector & Keys`)
+		step_showcase_frame(app, bifrost.Key_Event{code = .Rune, ch = 'j'}) // move focus to `btn_collapse_tests` in Tab 3
+		step_showcase_frame(app, bifrost.Key_Event{code = .Rune, ch = '1', mods = {.Alt}}) // Alt+1 -> Tab 1 (`notes_editor` restored via H*)
 
 		fmt.printf(
 			"[Bifrost Showcase — Tab 1 (Multi-Line Editor + Collapsible Tree)] active_tab=%d tree_vis=%d editor_lines=%d frames=%d actions=%d\n",
@@ -1350,7 +2039,7 @@ run_showcase :: proc(live_tty: bool) -> bool {
 		}
 
 		// Switch to Tab 2 (`Alt+2`) so the headless output also prints the rendered Braille & Sparkline view
-		step_showcase_frame(&app, bifrost.Key_Event{code = .Rune, ch = '2', mods = {.Alt}})
+		step_showcase_frame(app, bifrost.Key_Event{code = .Rune, ch = '2', mods = {.Alt}})
 		fmt.printf(
 			"\n[Bifrost Showcase — Tab 2 (2x4 Braille Canvas + 8-Level Sparklines)] active_tab=%d frames=%d actions=%d\n",
 			bifrost.get_active_tab(&app.input, "workspace_tabs") + 1,
@@ -1367,10 +2056,46 @@ run_showcase :: proc(live_tty: bool) -> bool {
 			_ = os.write_entire_file_from_string(fmt.tprintf("%s/widget_showcase_tab2.html", dir), strings.to_string(b))
 		}
 
-		// Switch to Tab 4 (`Alt+4`) to flush and inspect live Heimdall Arrow IPC telemetry records
-		step_showcase_frame(&app, bifrost.Key_Event{code = .Rune, ch = '4', mods = {.Alt}})
+		// Switch to Tab 4 (`Alt+4`) to showcase Track 15 Form Controls
+		step_showcase_frame(app, bifrost.Key_Event{code = .Rune, ch = '4', mods = {.Alt}})
 		fmt.printf(
-			"\n[Bifrost Showcase — Tab 4 (Heimdall Arrow IPC Viewer)] active_tab=%d segments=%d records=%d spans=%d frames=%d actions=%d\n",
+			"\n[Bifrost Showcase — Tab 4 (Track 15 Form Controls Suite)] active_tab=%d frames=%d actions=%d\n",
+			bifrost.get_active_tab(&app.input, "workspace_tabs") + 1,
+			app.frames_rendered,
+			app.action_count,
+		)
+		for r: i32 = 0; r < app.screen.height; r += 1 {
+			fmt.printf("  %s\n", extract_screen_row(&app.screen, r))
+		}
+
+		// Switch to Tab 5 (`Alt+5`) to showcase the Cartesian 2D Coordinate Chart and Categorical Bar Charts
+		step_showcase_frame(app, bifrost.Key_Event{code = .Rune, ch = '5', mods = {.Alt}})
+		fmt.printf(
+			"\n[Bifrost Showcase — Tab 5 (Cartesian 2D Chart + Bar Charts)] active_tab=%d frames=%d actions=%d\n",
+			bifrost.get_active_tab(&app.input, "workspace_tabs") + 1,
+			app.frames_rendered,
+			app.action_count,
+		)
+		for r: i32 = 0; r < app.screen.height; r += 1 {
+			fmt.printf("  %s\n", extract_screen_row(&app.screen, r))
+		}
+
+		// Switch to Tab 6 (`Alt+6`) to showcase the Track 18 Markdown Viewer
+		step_showcase_frame(app, bifrost.Key_Event{code = .Rune, ch = '6', mods = {.Alt}})
+		fmt.printf(
+			"\n[Bifrost Showcase — Tab 6 (Track 18 Markdown Manual)] active_tab=%d frames=%d actions=%d\n",
+			bifrost.get_active_tab(&app.input, "workspace_tabs") + 1,
+			app.frames_rendered,
+			app.action_count,
+		)
+		for r: i32 = 0; r < app.screen.height; r += 1 {
+			fmt.printf("  %s\n", extract_screen_row(&app.screen, r))
+		}
+
+		// Switch to Tab 7 (`Alt+7`) to flush and inspect live Heimdall Arrow IPC telemetry records
+		step_showcase_frame(app, bifrost.Key_Event{code = .Rune, ch = '7', mods = {.Alt}})
+		fmt.printf(
+			"\n[Bifrost Showcase — Tab 7 (Heimdall Arrow IPC Viewer)] active_tab=%d segments=%d records=%d spans=%d frames=%d actions=%d\n",
 			bifrost.get_active_tab(&app.input, "workspace_tabs") + 1,
 			app.heimdall_store.segment_count,
 			len(app.heimdall_store.records),
@@ -1384,7 +2109,7 @@ run_showcase :: proc(live_tty: bool) -> bool {
 
 		if dir := os.get_env("BIFROST_SCREENSHOT_DIR", context.temp_allocator); dir != "" {
 			b := strings.builder_make(context.temp_allocator)
-			bifrost.screen_export_html(&app.screen, "Bifrost Showcase — Tab 4: Heimdall Arrow IPC Viewer", &b)
+			bifrost.screen_export_html(&app.screen, "Bifrost Showcase — Tab 7: Heimdall Arrow IPC Viewer", &b)
 			_ = os.write_entire_file_from_string(fmt.tprintf("%s/widget_showcase_tab4.html", dir), strings.to_string(b))
 		}
 	}

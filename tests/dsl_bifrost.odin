@@ -1684,6 +1684,198 @@ then_row_contains_rune :: proc(
 	testing.expect_value(s.t, found, expected_present, loc = loc)
 }
 
+// =============================================================================
+// Layer 2: Domain-Specific Language (Tracks 15-20: Form Controls, Progress, Charts, Paragraphs, Dialogs, Log Stream)
+// =============================================================================
+
+then_bool_is :: proc(s: ^Suite_Ctx, actual: bool, expected: bool, loc := #caller_location) {
+	testing.expect_value(s.t, actual, expected, loc = loc)
+}
+
+then_int_is :: proc(s: ^Suite_Ctx, actual: int, expected: int, loc := #caller_location) {
+	testing.expect_value(s.t, actual, expected, loc = loc)
+}
+
+then_f64_is :: proc(s: ^Suite_Ctx, actual: f64, expected: f64, loc := #caller_location) {
+	testing.expect_value(s.t, actual, expected, loc = loc)
+}
+
+then_progress_subcell_eighths_are :: proc(
+	s: ^Suite_Ctx,
+	ratio: f64,
+	width: i32,
+	expected_full: i32,
+	expected_rem: i32,
+	loc := #caller_location,
+) {
+	full, rem := bifrost.progress_subcell_eighths(ratio, width)
+	testing.expect_value(s.t, full, expected_full, loc = loc)
+	testing.expect_value(s.t, rem, expected_rem, loc = loc)
+}
+
+then_spinner_frame_is :: proc(
+	s: ^Suite_Ctx,
+	kind: bifrost.Spinner_Kind,
+	tick: int,
+	expected_glyph: string,
+	loc := #caller_location,
+) {
+	glyph := bifrost.spinner_get_frame(kind, nil, tick)
+	testing.expect_value(s.t, glyph, expected_glyph, loc = loc)
+}
+
+then_gauge_threshold_color_is :: proc(
+	s: ^Suite_Ctx,
+	ratio: f64,
+	thresholds: []bifrost.Gauge_Threshold,
+	expected_fg: bifrost.Color,
+	loc := #caller_location,
+) {
+	fg, _ := bifrost.gauge_eval_threshold(ratio, thresholds, bifrost.Color{}, bifrost.Color{})
+	testing.expect_value(s.t, fg, expected_fg, loc = loc)
+}
+
+then_projected_point_is :: proc(
+	s: ^Suite_Ctx,
+	point: [2]f64,
+	x_bounds, y_bounds: [2]f64,
+	pixel_w, pixel_h: i32,
+	expected_px, expected_py: i32,
+	expected_in_bounds: bool,
+	loc := #caller_location,
+) {
+	px, py, in_bounds := bifrost.chart_project_point(point, x_bounds, y_bounds, pixel_w, pixel_h)
+	testing.expect_value(s.t, px, expected_px, loc = loc)
+	testing.expect_value(s.t, py, expected_py, loc = loc)
+	testing.expect_value(s.t, in_bounds, expected_in_bounds, loc = loc)
+}
+
+then_wrapped_lines_count_is :: proc(
+	s: ^Suite_Ctx,
+	spans: []bifrost.Styled_Span,
+	width: i32,
+	wrap_mode: bifrost.Wrap_Mode,
+	expected_count: int,
+	loc := #caller_location,
+) {
+	lines := bifrost.paragraph_wrap_spans(spans, width, wrap_mode, context.temp_allocator)
+	testing.expect_value(s.t, len(lines), expected_count, loc = loc)
+}
+
+then_wrapped_line_text_is :: proc(
+	s: ^Suite_Ctx,
+	spans: []bifrost.Styled_Span,
+	width: i32,
+	wrap_mode: bifrost.Wrap_Mode,
+	line_idx: int,
+	expected_text: string,
+	loc := #caller_location,
+) {
+	lines := bifrost.paragraph_wrap_spans(spans, width, wrap_mode, context.temp_allocator)
+	testing.expect(s.t, line_idx >= 0 && line_idx < len(lines), "Expected line index in bounds", loc = loc)
+	if line_idx >= 0 && line_idx < len(lines) {
+		b := strings.builder_make(context.temp_allocator)
+		for sp in lines[line_idx] {
+			strings.write_string(&b, sp.text)
+		}
+		testing.expect_value(s.t, strings.to_string(b), expected_text, loc = loc)
+	}
+}
+
+then_dialog_result_is :: proc(
+	s: ^Suite_Ctx,
+	actual: bifrost.Dialog_Result,
+	expected: bifrost.Dialog_Result,
+	loc := #caller_location,
+) {
+	testing.expect_value(s.t, actual, expected, loc = loc)
+}
+
+then_toast_count_is :: proc(
+	s: ^Suite_Ctx,
+	tm: ^bifrost.Toast_Manager,
+	expected_count: int,
+	loc := #caller_location,
+) {
+	testing.expect_value(s.t, tm.count, expected_count, loc = loc)
+}
+
+then_toast_item_is :: proc(
+	s: ^Suite_Ctx,
+	tm: ^bifrost.Toast_Manager,
+	idx: int,
+	expected_title: string,
+	expected_severity: bifrost.Toast_Severity,
+	loc := #caller_location,
+) {
+	testing.expect(s.t, idx >= 0 && idx < tm.count, "Expected toast index in bounds", loc = loc)
+	if idx >= 0 && idx < tm.count {
+		testing.expect_value(s.t, bifrost.toast_item_title(&tm.items[idx]), expected_title, loc = loc)
+		testing.expect_value(s.t, tm.items[idx].severity, expected_severity, loc = loc)
+	}
+}
+
+then_string_is :: proc(
+	s: ^Suite_Ctx,
+	actual: string,
+	expected: string,
+	loc := #caller_location,
+) {
+	testing.expect_value(s.t, actual, expected, loc = loc)
+}
+
+then_log_viewer_following_is :: proc(
+	s: ^Suite_Ctx,
+	actual: bool,
+	expected: bool,
+	loc := #caller_location,
+) {
+	testing.expect_value(s.t, actual, expected, loc = loc)
+}
+
+then_log_viewer_unread_is :: proc(
+	s: ^Suite_Ctx,
+	actual: i32,
+	expected: i32,
+	loc := #caller_location,
+) {
+	testing.expect_value(s.t, actual, expected, loc = loc)
+}
+
+then_table_sort_is :: proc(
+	s: ^Suite_Ctx,
+	actual_col: int,
+	actual_dir: bifrost.Table_Sort_Direction,
+	expected_col: int,
+	expected_dir: bifrost.Table_Sort_Direction,
+	loc := #caller_location,
+) {
+	testing.expect_value(s.t, actual_col, expected_col, loc = loc)
+	testing.expect_value(s.t, actual_dir, expected_dir, loc = loc)
+}
+
+then_ansi_contains_osc8_link :: proc(
+	s: ^Suite_Ctx,
+	url: string,
+	label: string,
+	loc := #caller_location,
+) {
+	open_seq := fmt.tprintf("\x1b]8;;%s\x1b\\", url)
+	close_seq := "\x1b]8;;\x1b\\"
+	testing.expect(s.t, strings.contains(s.last_ansi_str, open_seq), "Expected ANSI stream to contain OSC 8 open sequence", loc = loc)
+	testing.expect(s.t, strings.contains(s.last_ansi_str, label), "Expected ANSI stream to contain link label", loc = loc)
+	testing.expect(s.t, strings.contains(s.last_ansi_str, close_seq), "Expected ANSI stream to contain OSC 8 close sequence", loc = loc)
+}
+
+then_column_width_is :: proc(
+	s: ^Suite_Ctx,
+	actual: i32,
+	expected: i32,
+	loc := #caller_location,
+) {
+	testing.expect_value(s.t, actual, expected, loc = loc)
+}
+
 
 
 

@@ -223,6 +223,24 @@ Suite_Ctx_VTable :: struct {
 	then_table_sort_state_is: proc(s: ^Suite_Ctx, id: string, expected_sort_col: i32, expected_sort_dir: bifrost.Table_Sort_Dir, loc := #caller_location),
 	then_table_col_width_is: proc(s: ^Suite_Ctx, id: string, col_idx: int, expected_width: i32, loc := #caller_location),
 	then_row_contains_rune: proc(s: ^Suite_Ctx, y: i32, expected_rune: rune, expected_present: bool = true, loc := #caller_location),
+	then_bool_is: proc(s: ^Suite_Ctx, actual: bool, expected: bool, loc := #caller_location),
+	then_int_is: proc(s: ^Suite_Ctx, actual: int, expected: int, loc := #caller_location),
+	then_f64_is: proc(s: ^Suite_Ctx, actual: f64, expected: f64, loc := #caller_location),
+	then_progress_subcell_eighths_are: proc(s: ^Suite_Ctx, ratio: f64, width: i32, expected_full: i32, expected_rem: i32, loc := #caller_location),
+	then_spinner_frame_is: proc(s: ^Suite_Ctx, kind: bifrost.Spinner_Kind, tick: int, expected_glyph: string, loc := #caller_location),
+	then_gauge_threshold_color_is: proc(s: ^Suite_Ctx, ratio: f64, thresholds: []bifrost.Gauge_Threshold, expected_fg: bifrost.Color, loc := #caller_location),
+	then_projected_point_is: proc(s: ^Suite_Ctx, point: [2]f64, x_bounds: [2]f64, y_bounds: [2]f64, pixel_w: i32, pixel_h: i32, expected_px: i32, expected_py: i32, expected_in_bounds: bool, loc := #caller_location),
+	then_wrapped_lines_count_is: proc(s: ^Suite_Ctx, spans: []bifrost.Styled_Span, width: i32, wrap_mode: bifrost.Wrap_Mode, expected_count: int, loc := #caller_location),
+	then_wrapped_line_text_is: proc(s: ^Suite_Ctx, spans: []bifrost.Styled_Span, width: i32, wrap_mode: bifrost.Wrap_Mode, line_idx: int, expected_text: string, loc := #caller_location),
+	then_dialog_result_is: proc(s: ^Suite_Ctx, actual: bifrost.Dialog_Result, expected: bifrost.Dialog_Result, loc := #caller_location),
+	then_toast_count_is: proc(s: ^Suite_Ctx, tm: ^bifrost.Toast_Manager, expected_count: int, loc := #caller_location),
+	then_toast_item_is: proc(s: ^Suite_Ctx, tm: ^bifrost.Toast_Manager, idx: int, expected_title: string, expected_severity: bifrost.Toast_Severity, loc := #caller_location),
+	then_string_is: proc(s: ^Suite_Ctx, actual: string, expected: string, loc := #caller_location),
+	then_log_viewer_following_is: proc(s: ^Suite_Ctx, actual: bool, expected: bool, loc := #caller_location),
+	then_log_viewer_unread_is: proc(s: ^Suite_Ctx, actual: i32, expected: i32, loc := #caller_location),
+	then_table_sort_is: proc(s: ^Suite_Ctx, actual_col: int, actual_dir: bifrost.Table_Sort_Direction, expected_col: int, expected_dir: bifrost.Table_Sort_Direction, loc := #caller_location),
+	then_ansi_contains_osc8_link: proc(s: ^Suite_Ctx, url: string, label: string, loc := #caller_location),
+	then_column_width_is: proc(s: ^Suite_Ctx, actual: i32, expected: i32, loc := #caller_location),
 }
 
 @(private)
@@ -376,6 +394,24 @@ _suite_ctx_vtable := Suite_Ctx_VTable{
 	then_table_sort_state_is = then_table_sort_state_is,
 	then_table_col_width_is = then_table_col_width_is,
 	then_row_contains_rune = then_row_contains_rune,
+	then_bool_is = then_bool_is,
+	then_int_is = then_int_is,
+	then_f64_is = then_f64_is,
+	then_progress_subcell_eighths_are = then_progress_subcell_eighths_are,
+	then_spinner_frame_is = then_spinner_frame_is,
+	then_gauge_threshold_color_is = then_gauge_threshold_color_is,
+	then_projected_point_is = then_projected_point_is,
+	then_wrapped_lines_count_is = then_wrapped_lines_count_is,
+	then_wrapped_line_text_is = then_wrapped_line_text_is,
+	then_dialog_result_is = then_dialog_result_is,
+	then_toast_count_is = then_toast_count_is,
+	then_toast_item_is = then_toast_item_is,
+	then_string_is = then_string_is,
+	then_log_viewer_following_is = then_log_viewer_following_is,
+	then_log_viewer_unread_is = then_log_viewer_unread_is,
+	then_table_sort_is = then_table_sort_is,
+	then_ansi_contains_osc8_link = then_ansi_contains_osc8_link,
+	then_column_width_is = then_column_width_is,
 }
 
 Given_DSL :: struct {
@@ -595,6 +631,24 @@ Then_DSL :: struct {
 	table_sort_state_is: proc(id: string, expected_sort_col: i32, expected_sort_dir: bifrost.Table_Sort_Dir, loc := #caller_location),
 	table_col_width_is: proc(id: string, col_idx: int, expected_width: i32, loc := #caller_location),
 	row_contains_rune: proc(y: i32, expected_rune: rune, expected_present: bool = true, loc := #caller_location),
+	bool_is: proc(actual: bool, expected: bool, loc := #caller_location),
+	int_is: proc(actual: int, expected: int, loc := #caller_location),
+	f64_is: proc(actual: f64, expected: f64, loc := #caller_location),
+	progress_subcell_eighths_are: proc(ratio: f64, width: i32, expected_full: i32, expected_rem: i32, loc := #caller_location),
+	spinner_frame_is: proc(kind: bifrost.Spinner_Kind, tick: int, expected_glyph: string, loc := #caller_location),
+	gauge_threshold_color_is: proc(ratio: f64, thresholds: []bifrost.Gauge_Threshold, expected_fg: bifrost.Color, loc := #caller_location),
+	projected_point_is: proc(point: [2]f64, x_bounds: [2]f64, y_bounds: [2]f64, pixel_w: i32, pixel_h: i32, expected_px: i32, expected_py: i32, expected_in_bounds: bool, loc := #caller_location),
+	wrapped_lines_count_is: proc(spans: []bifrost.Styled_Span, width: i32, wrap_mode: bifrost.Wrap_Mode, expected_count: int, loc := #caller_location),
+	wrapped_line_text_is: proc(spans: []bifrost.Styled_Span, width: i32, wrap_mode: bifrost.Wrap_Mode, line_idx: int, expected_text: string, loc := #caller_location),
+	dialog_result_is: proc(actual: bifrost.Dialog_Result, expected: bifrost.Dialog_Result, loc := #caller_location),
+	toast_count_is: proc(tm: ^bifrost.Toast_Manager, expected_count: int, loc := #caller_location),
+	toast_item_is: proc(tm: ^bifrost.Toast_Manager, idx: int, expected_title: string, expected_severity: bifrost.Toast_Severity, loc := #caller_location),
+	string_is: proc(actual: string, expected: string, loc := #caller_location),
+	log_viewer_following_is: proc(actual: bool, expected: bool, loc := #caller_location),
+	log_viewer_unread_is: proc(actual: i32, expected: i32, loc := #caller_location),
+	table_sort_is: proc(actual_col: int, actual_dir: bifrost.Table_Sort_Direction, expected_col: int, expected_dir: bifrost.Table_Sort_Direction, loc := #caller_location),
+	ansi_contains_osc8_link: proc(url: string, label: string, loc := #caller_location),
+	column_width_is: proc(actual: i32, expected: i32, loc := #caller_location),
 }
 
 @(rodata)
@@ -693,6 +747,24 @@ then := Then_DSL{
 	table_sort_state_is = then_table_sort_state_is_ambient,
 	table_col_width_is = then_table_col_width_is_ambient,
 	row_contains_rune = then_row_contains_rune_ambient,
+	bool_is = then_bool_is_ambient,
+	int_is = then_int_is_ambient,
+	f64_is = then_f64_is_ambient,
+	progress_subcell_eighths_are = then_progress_subcell_eighths_are_ambient,
+	spinner_frame_is = then_spinner_frame_is_ambient,
+	gauge_threshold_color_is = then_gauge_threshold_color_is_ambient,
+	projected_point_is = then_projected_point_is_ambient,
+	wrapped_lines_count_is = then_wrapped_lines_count_is_ambient,
+	wrapped_line_text_is = then_wrapped_line_text_is_ambient,
+	dialog_result_is = then_dialog_result_is_ambient,
+	toast_count_is = then_toast_count_is_ambient,
+	toast_item_is = then_toast_item_is_ambient,
+	string_is = then_string_is_ambient,
+	log_viewer_following_is = then_log_viewer_following_is_ambient,
+	log_viewer_unread_is = then_log_viewer_unread_is_ambient,
+	table_sort_is = then_table_sort_is_ambient,
+	ansi_contains_osc8_link = then_ansi_contains_osc8_link_ambient,
+	column_width_is = then_column_width_is_ambient,
 }
 
 // =============================================================================
@@ -1307,5 +1379,77 @@ then_table_col_width_is_ambient :: #force_inline proc(id: string, col_idx: int, 
 
 then_row_contains_rune_ambient :: #force_inline proc(y: i32, expected_rune: rune, expected_present: bool = true, loc := #caller_location) {
 	then_row_contains_rune(current_scenario(loc), y, expected_rune, expected_present, loc)
+}
+
+then_bool_is_ambient :: #force_inline proc(actual: bool, expected: bool, loc := #caller_location) {
+	then_bool_is(current_scenario(loc), actual, expected, loc)
+}
+
+then_int_is_ambient :: #force_inline proc(actual: int, expected: int, loc := #caller_location) {
+	then_int_is(current_scenario(loc), actual, expected, loc)
+}
+
+then_f64_is_ambient :: #force_inline proc(actual: f64, expected: f64, loc := #caller_location) {
+	then_f64_is(current_scenario(loc), actual, expected, loc)
+}
+
+then_progress_subcell_eighths_are_ambient :: #force_inline proc(ratio: f64, width: i32, expected_full: i32, expected_rem: i32, loc := #caller_location) {
+	then_progress_subcell_eighths_are(current_scenario(loc), ratio, width, expected_full, expected_rem, loc)
+}
+
+then_spinner_frame_is_ambient :: #force_inline proc(kind: bifrost.Spinner_Kind, tick: int, expected_glyph: string, loc := #caller_location) {
+	then_spinner_frame_is(current_scenario(loc), kind, tick, expected_glyph, loc)
+}
+
+then_gauge_threshold_color_is_ambient :: #force_inline proc(ratio: f64, thresholds: []bifrost.Gauge_Threshold, expected_fg: bifrost.Color, loc := #caller_location) {
+	then_gauge_threshold_color_is(current_scenario(loc), ratio, thresholds, expected_fg, loc)
+}
+
+then_projected_point_is_ambient :: #force_inline proc(point: [2]f64, x_bounds: [2]f64, y_bounds: [2]f64, pixel_w: i32, pixel_h: i32, expected_px: i32, expected_py: i32, expected_in_bounds: bool, loc := #caller_location) {
+	then_projected_point_is(current_scenario(loc), point, x_bounds, y_bounds, pixel_w, pixel_h, expected_px, expected_py, expected_in_bounds, loc)
+}
+
+then_wrapped_lines_count_is_ambient :: #force_inline proc(spans: []bifrost.Styled_Span, width: i32, wrap_mode: bifrost.Wrap_Mode, expected_count: int, loc := #caller_location) {
+	then_wrapped_lines_count_is(current_scenario(loc), spans, width, wrap_mode, expected_count, loc)
+}
+
+then_wrapped_line_text_is_ambient :: #force_inline proc(spans: []bifrost.Styled_Span, width: i32, wrap_mode: bifrost.Wrap_Mode, line_idx: int, expected_text: string, loc := #caller_location) {
+	then_wrapped_line_text_is(current_scenario(loc), spans, width, wrap_mode, line_idx, expected_text, loc)
+}
+
+then_dialog_result_is_ambient :: #force_inline proc(actual: bifrost.Dialog_Result, expected: bifrost.Dialog_Result, loc := #caller_location) {
+	then_dialog_result_is(current_scenario(loc), actual, expected, loc)
+}
+
+then_toast_count_is_ambient :: #force_inline proc(tm: ^bifrost.Toast_Manager, expected_count: int, loc := #caller_location) {
+	then_toast_count_is(current_scenario(loc), tm, expected_count, loc)
+}
+
+then_toast_item_is_ambient :: #force_inline proc(tm: ^bifrost.Toast_Manager, idx: int, expected_title: string, expected_severity: bifrost.Toast_Severity, loc := #caller_location) {
+	then_toast_item_is(current_scenario(loc), tm, idx, expected_title, expected_severity, loc)
+}
+
+then_string_is_ambient :: #force_inline proc(actual: string, expected: string, loc := #caller_location) {
+	then_string_is(current_scenario(loc), actual, expected, loc)
+}
+
+then_log_viewer_following_is_ambient :: #force_inline proc(actual: bool, expected: bool, loc := #caller_location) {
+	then_log_viewer_following_is(current_scenario(loc), actual, expected, loc)
+}
+
+then_log_viewer_unread_is_ambient :: #force_inline proc(actual: i32, expected: i32, loc := #caller_location) {
+	then_log_viewer_unread_is(current_scenario(loc), actual, expected, loc)
+}
+
+then_table_sort_is_ambient :: #force_inline proc(actual_col: int, actual_dir: bifrost.Table_Sort_Direction, expected_col: int, expected_dir: bifrost.Table_Sort_Direction, loc := #caller_location) {
+	then_table_sort_is(current_scenario(loc), actual_col, actual_dir, expected_col, expected_dir, loc)
+}
+
+then_ansi_contains_osc8_link_ambient :: #force_inline proc(url: string, label: string, loc := #caller_location) {
+	then_ansi_contains_osc8_link(current_scenario(loc), url, label, loc)
+}
+
+then_column_width_is_ambient :: #force_inline proc(actual: i32, expected: i32, loc := #caller_location) {
+	then_column_width_is(current_scenario(loc), actual, expected, loc)
 }
 

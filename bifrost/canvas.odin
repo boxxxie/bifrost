@@ -498,6 +498,7 @@ ui_canvas :: proc(
 		border      = cfg.border,
 		focus_flags = cfg.focus_flags,
 		focusable   = focusable,
+		hoverable   = focusable,
 	})
 }
 
@@ -542,6 +543,7 @@ ui_sparkline_f32 :: proc(
 		border      = cfg.border,
 		focus_flags = cfg.focus_flags,
 		focusable   = focusable,
+		hoverable   = focusable,
 	})
 }
 
@@ -588,6 +590,7 @@ ui_sparkline_int :: proc(
 		border      = cfg.border,
 		focus_flags = cfg.focus_flags,
 		focusable   = focusable,
+		hoverable   = focusable,
 	})
 }
 

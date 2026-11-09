@@ -283,6 +283,7 @@ UI_Coordinator_State :: struct {
 	last_datalog_summary:  string,
 	last_diff_summary:     UI_Msg_Diff_Ready,
 	last_viewport_rows:    int,
+	alert_log_state:       Log_Viewer_State,
 
 	// Declarative Sleipnir Actor Action Sinks, Button Bridges & Pure Side-Effect Queue
 	action_sinks:          [MAX_UI_ACTION_SINKS]UI_Action_Sink,
@@ -368,6 +369,7 @@ ui_coordinator_init :: proc(
 		viewport_rows = max(1, h - 6),
 		overscan      = DEFAULT_SCROLL_OVERSCAN,
 	}
+	coord.alert_log_state      = Log_Viewer_State{is_following = true}
 	coord.filter.hide_tx       = true
 	coord.dirty                = true
 	coord.layout_dirty         = true

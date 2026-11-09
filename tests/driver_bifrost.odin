@@ -36,6 +36,7 @@ Suite_Ctx :: struct {
 
 	// Independent virtual terminal buffer reconstructed purely from ANSI diffs
 	vt_cells:        []bifrost.Cell,
+	vt_url_pool:     map[string]string,
 	vt_w:            i32,
 	vt_h:            i32,
 
@@ -89,6 +90,7 @@ driver_init :: proc(s: ^Suite_Ctx, t: ^testing.T, w: i32 = 80, h: i32 = 24) {
 	s.ansi_buf = strings.builder_make(s.alloc)
 	total := int(max(0, w * h))
 	s.vt_cells = make([]bifrost.Cell, total, s.alloc)
+	s.vt_url_pool = make(map[string]string, 16, s.alloc)
 	s.vt_w = w
 	s.vt_h = h
 	for i in 0 ..< total {
@@ -131,6 +133,10 @@ driver_destroy :: proc(s: ^Suite_Ctx) {
 		}
 		s.heimdall_active = false
 	}
+	for _, url_str in s.vt_url_pool {
+		delete(url_str, s.alloc)
+	}
+	delete(s.vt_url_pool)
 	delete(s.parsed_events)
 	delete(s.dispatch_steps)
 	bifrost.state_store_destroy(&s.state_store)
@@ -265,10 +271,33 @@ vt_apply_ansi :: proc(s: ^Suite_Ctx, ansi: string) {
 	cur_fg := bifrost.Color{kind = .Default}
 	cur_bg := bifrost.Color{kind = .Default}
 	cur_style := bifrost.Style_Flags{}
+	cur_url := ""
 
 	i := 0
 	n := len(ansi)
 	for i < n {
+		// Handle OSC sequences: \x1b] ... (\x1b\ or \x07)
+		if ansi[i] == 0x1b && i + 1 < n && ansi[i + 1] == ']' {
+			i += 2
+			osc_start := i
+			for i < n {
+				if ansi[i] == 0x07 {
+					osc_content := ansi[osc_start:i]
+					i += 1
+					vt_parse_osc(s, osc_content, &cur_url)
+					break
+				}
+				if ansi[i] == 0x1b && i + 1 < n && ansi[i + 1] == '\\' {
+					osc_content := ansi[osc_start:i]
+					i += 2
+					vt_parse_osc(s, osc_content, &cur_url)
+					break
+				}
+				i += 1
+			}
+			continue
+		}
+
 		if ansi[i] == 0x1b && i + 1 < n && ansi[i + 1] == '[' {
 			i += 2
 			// Check for private DEC mode (e.g. ?2026h / ?2026l)
@@ -332,30 +361,57 @@ vt_apply_ansi :: proc(s: ^Suite_Ctx, ansi: string) {
 					s.vt_cells[idx + 2].width = 1
 				}
 				s.vt_cells[idx] = bifrost.Cell{
-					ch    = r,
-					fg    = cur_fg,
-					bg    = cur_bg,
-					style = cur_style,
-					width = 2,
+					ch       = r,
+					fg       = cur_fg,
+					bg       = cur_bg,
+					style    = cur_style,
+					width    = 2,
+					link_url = cur_url,
 				}
 				s.vt_cells[idx + 1] = bifrost.Cell{
-					ch    = 0,
-					fg    = cur_fg,
-					bg    = cur_bg,
-					style = cur_style,
-					width = 0,
+					ch       = 0,
+					fg       = cur_fg,
+					bg       = cur_bg,
+					style    = cur_style,
+					width    = 0,
+					link_url = cur_url,
 				}
 			} else {
 				s.vt_cells[idx] = bifrost.Cell{
-					ch    = r,
-					fg    = cur_fg,
-					bg    = cur_bg,
-					style = cur_style,
-					width = 1,
+					ch       = r,
+					fg       = cur_fg,
+					bg       = cur_bg,
+					style    = cur_style,
+					width    = 1,
+					link_url = cur_url,
 				}
 			}
 		}
 		cur_x += i32(w)
+	}
+}
+
+vt_intern_url :: proc(s: ^Suite_Ctx, url: string) -> string {
+	if len(url) == 0 {
+		return ""
+	}
+	if existing, ok := s.vt_url_pool[url]; ok {
+		return existing
+	}
+	cloned := strings.clone(url, s.alloc)
+	s.vt_url_pool[cloned] = cloned
+	return cloned
+}
+
+vt_parse_osc :: proc(s: ^Suite_Ctx, content: string, cur_url: ^string) {
+	if strings.has_prefix(content, "8;") {
+		rest := content[2:]
+		semi := strings.index_byte(rest, ';')
+		if semi >= 0 {
+			cur_url^ = vt_intern_url(s, rest[semi + 1:])
+		} else {
+			cur_url^ = ""
+		}
 	}
 }
 
