@@ -411,6 +411,7 @@ Showcase_App :: struct {
 	prev_cpu_total:       CPU_Jiffies,
 	prev_cpu_cores:       [SYS_MAX_CORES]CPU_Jiffies,
 	sys_samples_cnt:      int,
+	sys_dirty:            bool,
 
 	// Self-process metrics (`/proc/self/stat` & `/proc/self/status`)
 	self_cpu_pct:         f64,
@@ -634,6 +635,7 @@ sample_live_system_metrics :: proc(app: ^Showcase_App) {
 		}
 	}
 	app.sys_samples_cnt += 1
+	app.sys_dirty = true
 }
 
 active_heimdall_scope_filter :: proc(app: ^Showcase_App) -> string {
@@ -1853,7 +1855,7 @@ handle_chart_timeline_scrubbing :: proc(app: ^Showcase_App, events: []bifrost.In
 
 step_showcase_frame :: proc(app: ^Showcase_App, events: ..bifrost.Input_Event) {
 	tree_slice: bifrost.Tree_Slice
-	if len(events) > 0 && len(app.layout_ctx.nodes) > 0 && bifrost.is_pure_hover_event_batch(&app.input, events) {
+	if !app.sys_dirty && len(events) > 0 && len(app.layout_ctx.nodes) > 0 && bifrost.is_pure_hover_event_batch(&app.input, events) {
 		frame_start_hovered_id     := app.input.hovered_id
 		frame_start_hover_path     := app.input.hover_path
 		frame_start_hover_path_len := app.input.hover_path_len
@@ -1868,6 +1870,7 @@ step_showcase_frame :: proc(app: ^Showcase_App, events: ..bifrost.Input_Event) {
 		bifrost.state_store_begin_frame(&app.state_store)
 		build_showcase_ui(app, &tree_slice)
 	} else {
+		app.sys_dirty = false
 		free_all(context.temp_allocator)
 		bifrost.state_store_begin_frame(&app.state_store)
 
@@ -1966,9 +1969,7 @@ run_showcase :: proc(live_tty: bool) -> bool {
 			if time.tick_since(last_sys_sample) >= 500 * time.Millisecond {
 				last_sys_sample = now
 				sample_live_system_metrics(app)
-				if bifrost.get_active_tab(&app.input, "workspace_tabs") == 4 {
-					sys_tick_due = true
-				}
+				sys_tick_due = true
 			}
 			if (len(queued_inputs) > 0 && time.tick_diff(last_tick, now) >= target_frame_interval) || sys_tick_due {
 				last_tick = now
