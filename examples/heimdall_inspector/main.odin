@@ -1033,7 +1033,6 @@ run_heimdall_inspector :: proc(live_tty: bool, track: ^mem.Tracking_Allocator = 
 						break
 					}
 					_ = bifrost.append_or_coalesce_input_event(&queued_inputs, ev2, &ui_actor.state.input)
-					free_all(context.temp_allocator)
 				}
 			}
 			now := time.tick_now()
@@ -1068,7 +1067,6 @@ run_heimdall_inspector :: proc(live_tty: bool, track: ^mem.Tracking_Allocator = 
 					if ui_actor.state.last_ansi_bytes > 0 {
 						_, _ = os.write_string(os.stdout, strings.to_string(ui_actor.state.ansi_builder))
 					}
-					free_all(context.temp_allocator)
 				}
 			}
 		}

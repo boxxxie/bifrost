@@ -167,7 +167,6 @@ run_inspector :: proc(live_tty: bool) -> bool {
 					if ui_actor.state.last_ansi_bytes > 0 {
 						_, _ = os.write_string(os.stdout, strings.to_string(ui_actor.state.ansi_builder))
 					}
-					free_all(context.temp_allocator)
 				}
 			}
 		}

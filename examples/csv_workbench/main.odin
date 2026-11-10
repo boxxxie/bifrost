@@ -726,7 +726,6 @@ run_csv_workbench :: proc(live_tty: bool, custom_file: string, track: ^mem.Track
 						break
 					}
 					_ = bifrost.append_or_coalesce_input_event(&queued_inputs, ev2, &ui_actor.state.input)
-					free_all(context.temp_allocator)
 				}
 			}
 			now := time.tick_now()
@@ -751,7 +750,6 @@ run_csv_workbench :: proc(live_tty: bool, custom_file: string, track: ^mem.Track
 					if ui_actor.state.last_ansi_bytes > 0 {
 						_, _ = os.write_string(os.stdout, strings.to_string(ui_actor.state.ansi_builder))
 					}
-					free_all(context.temp_allocator)
 				}
 			}
 		}

@@ -1337,7 +1337,9 @@ scroll_node_into_view :: proc "contextless" (inp: ^Input_State, ctx: ^Layout_Con
 		return
 	}
 	curr := ctx.nodes[target_idx].parent_idx
-	for curr >= 0 && int(curr) < len(ctx.nodes) {
+	steps := 0
+	for curr >= 0 && int(curr) < len(ctx.nodes) && steps < len(ctx.nodes) {
+		steps += 1
 		sc_node := ctx.nodes[curr]
 		if sc_node.config.scrollable && sc_node.config.virtual_total_rows == 0 {
 			slot := get_scroll_slot(inp, sc_node.id_hash)
@@ -1364,7 +1366,7 @@ scroll_node_into_view :: proc "contextless" (inp: ^Input_State, ctx: ^Layout_Con
 				apply_scroll_delta_x(inp, ctx, curr, delta_x)
 			}
 		}
-		if sc_node.out_of_flow {
+		if sc_node.out_of_flow || sc_node.parent_idx >= curr {
 			break
 		}
 		curr = sc_node.parent_idx

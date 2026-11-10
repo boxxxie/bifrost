@@ -419,8 +419,8 @@ Showcase_App :: struct {
 	prev_self_total:      u64,
 }
 
-parse_proc_stat_line :: proc(line: string) -> (jiffies: CPU_Jiffies, ok: bool) {
-	fields := strings.fields(line, context.temp_allocator)
+parse_proc_stat_line :: proc(line: string, alloc := context.temp_allocator) -> (jiffies: CPU_Jiffies, ok: bool) {
+	fields := strings.fields(line, alloc)
 	if len(fields) < 5 {
 		return {}, false
 	}
@@ -464,22 +464,27 @@ compute_cpu_delta_pct :: proc(prev: ^CPU_Jiffies, cur: CPU_Jiffies, fallback_pct
 }
 
 sample_live_system_metrics :: proc(app: ^Showcase_App) {
+	arena_buf: [65536]byte
+	arena: mem.Arena
+	mem.arena_init(&arena, arena_buf[:])
+	scratch := mem.arena_allocator(&arena)
+
 	// 1. Sample `/proc/stat` aggregate + all logical per-core jiffies (`cpu0`..`cpuN`)
 	proc_stat_ok := false
-	if stat_bytes, stat_err := os.read_entire_file("/proc/stat", context.temp_allocator); stat_err == nil {
+	if stat_bytes, stat_err := os.read_entire_file("/proc/stat", scratch); stat_err == nil {
 		proc_stat_ok = true
 		stat_str := string(stat_bytes)
 		detected_cores := 0
 		for line in strings.split_lines_iterator(&stat_str) {
 			if strings.has_prefix(line, "cpu ") {
-				if j, ok := parse_proc_stat_line(line); ok {
+				if j, ok := parse_proc_stat_line(line, scratch); ok {
 					app.sys_cpu_pct = compute_cpu_delta_pct(&app.prev_cpu_total, j, app.sys_cpu_pct)
 				}
 			} else if strings.has_prefix(line, "cpu") {
 				sp_idx := strings.index_byte(line, ' ')
 				if sp_idx > 3 {
 					if core_idx, c_ok := strconv.parse_int(line[3:sp_idx], 10); c_ok && core_idx >= 0 && core_idx < SYS_MAX_CORES {
-						if j, ok := parse_proc_stat_line(line); ok {
+						if j, ok := parse_proc_stat_line(line, scratch); ok {
 							app.sys_core_pct[core_idx] = compute_cpu_delta_pct(&app.prev_cpu_cores[core_idx], j, app.sys_core_pct[core_idx])
 							if core_idx + 1 > detected_cores {
 								detected_cores = core_idx + 1
@@ -498,7 +503,7 @@ sample_live_system_metrics :: proc(app: ^Showcase_App) {
 	}
 
 	// 2. Sample `/proc/meminfo` for RAM Used %, Page Cache %, and Swap Used %
-	if mem_bytes, mem_err := os.read_entire_file("/proc/meminfo", context.temp_allocator); mem_err == nil {
+	if mem_bytes, mem_err := os.read_entire_file("/proc/meminfo", scratch); mem_err == nil {
 		mem_str := string(mem_bytes)
 		mem_total_kb: u64 = 0
 		mem_avail_kb: u64 = 0
@@ -508,7 +513,7 @@ sample_live_system_metrics :: proc(app: ^Showcase_App) {
 		swap_free_kb: u64 = 0
 
 		for line in strings.split_lines_iterator(&mem_str) {
-			fields := strings.fields(line, context.temp_allocator)
+			fields := strings.fields(line, scratch)
 			if len(fields) < 2 {
 				continue
 			}
@@ -540,11 +545,11 @@ sample_live_system_metrics :: proc(app: ^Showcase_App) {
 	}
 
 	// 2b. Sample `/proc/self/stat` and `/proc/self/status` for this process's own CPU % and RSS memory
-	if self_stat_bytes, ss_err := os.read_entire_file("/proc/self/stat", context.temp_allocator); ss_err == nil {
+	if self_stat_bytes, ss_err := os.read_entire_file("/proc/self/stat", scratch); ss_err == nil {
 		ss_str := string(self_stat_bytes)
 		// Skip past `(comm)` since executable name may contain spaces/parens
 		if rparen := strings.last_index_byte(ss_str, ')'); rparen >= 0 && rparen + 2 < len(ss_str) {
-			rest_fields := strings.fields(ss_str[rparen + 2:], context.temp_allocator)
+			rest_fields := strings.fields(ss_str[rparen + 2:], scratch)
 			// Field 14 (`utime`) is index 11 after `) `, Field 15 (`stime`) is index 12, Field 24 (`rss` pages) is index 21
 			if len(rest_fields) > 12 {
 				utime, u_ok := strconv.parse_u64_of_base(rest_fields[11], 10)
@@ -1954,7 +1959,6 @@ run_showcase :: proc(live_tty: bool) -> bool {
 						break
 					}
 					_ = bifrost.append_or_coalesce_input_event(&queued_inputs, ev2, &app.input)
-					free_all(context.temp_allocator)
 				}
 			}
 			now := time.tick_now()
@@ -1979,7 +1983,6 @@ run_showcase :: proc(live_tty: bool) -> bool {
 					_, _ = os.write_string(os.stdout, strings.to_string(app.ansi_builder))
 				}
 			}
-			free_all(context.temp_allocator)
 		}
 	} else {
 		// Deterministic headless walkthrough exercising all components together:

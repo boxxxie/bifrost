@@ -1944,7 +1944,6 @@ run_explorer :: proc(live_tty: bool, seed_only: bool, custom_db_path: string) ->
 						break
 					}
 					_ = bifrost.append_or_coalesce_input_event(&queued_inputs, ev2, &app.input)
-					free_all(context.temp_allocator)
 				}
 			}
 			now := time.tick_now()
@@ -1961,7 +1960,6 @@ run_explorer :: proc(live_tty: bool, seed_only: bool, custom_db_path: string) ->
 					_, _ = os.write_string(os.stdout, strings.to_string(app.ansi_builder))
 				}
 			}
-			free_all(context.temp_allocator)
 		}
 	} else {
 		// Deterministic headless walkthrough exercising all 3 tabs + live transaction + Datalog + diff:
