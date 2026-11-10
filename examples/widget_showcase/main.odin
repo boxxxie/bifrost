@@ -1855,21 +1855,15 @@ handle_chart_timeline_scrubbing :: proc(app: ^Showcase_App, events: []bifrost.In
 
 step_showcase_frame :: proc(app: ^Showcase_App, events: ..bifrost.Input_Event) {
 	tree_slice: bifrost.Tree_Slice
-	if !app.sys_dirty && len(events) > 0 && len(app.layout_ctx.nodes) > 0 && bifrost.is_pure_hover_event_batch(&app.input, events) {
-		frame_start_hovered_id     := app.input.hovered_id
-		frame_start_hover_path     := app.input.hover_path
-		frame_start_hover_path_len := app.input.hover_path_len
-		bifrost.resolve_input(&app.input, &app.layout_ctx, ..events)
-		if app.input.hovered_id == frame_start_hovered_id &&
-		   app.input.hover_path_len == frame_start_hover_path_len &&
-		   app.input.hover_path == frame_start_hover_path {
-			strings.builder_reset(&app.ansi_builder)
-			return
-		}
+	switch bifrost.try_resolve_hover_fast_path(&app.input, &app.layout_ctx, events, app.sys_dirty) {
+	case .Hover_Unchanged:
+		strings.builder_reset(&app.ansi_builder)
+		return
+	case .Hover_Changed:
 		free_all(context.temp_allocator)
 		bifrost.state_store_begin_frame(&app.state_store)
 		build_showcase_ui(app, &tree_slice)
-	} else {
+	case .Not_Pure_Hover:
 		app.sys_dirty = false
 		free_all(context.temp_allocator)
 		bifrost.state_store_begin_frame(&app.state_store)

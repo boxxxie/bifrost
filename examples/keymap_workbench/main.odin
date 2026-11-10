@@ -671,23 +671,16 @@ handle_workbench_interactions :: proc(app: ^Workbench_App, slice: bifrost.Virtua
 }
 
 step_workbench_frame :: proc(app: ^Workbench_App, events: ..bifrost.Input_Event) {
-	if len(events) > 0 && len(app.layout_ctx.nodes) > 0 && !app.input.pending_chord.active &&
-	   bifrost.is_pure_hover_event_batch(&app.input, events) {
-		frame_start_hovered_id     := app.input.hovered_id
-		frame_start_hover_path     := app.input.hover_path
-		frame_start_hover_path_len := app.input.hover_path_len
-		bifrost.resolve_input(&app.input, &app.layout_ctx, ..events)
-		if app.input.hovered_id == frame_start_hovered_id &&
-		   app.input.hover_path_len == frame_start_hover_path_len &&
-		   app.input.hover_path == frame_start_hover_path {
-			strings.builder_reset(&app.ansi_builder)
-			return
-		}
+	switch bifrost.try_resolve_hover_fast_path(&app.input, &app.layout_ctx, events) {
+	case .Hover_Unchanged:
+		strings.builder_reset(&app.ansi_builder)
+		return
+	case .Hover_Changed:
 		free_all(context.temp_allocator)
 		bifrost.state_store_begin_frame(&app.state_store)
 		slice: bifrost.Virtual_Slice
 		build_workbench_ui(app, &slice)
-	} else {
+	case .Not_Pure_Hover:
 		free_all(context.temp_allocator)
 		bifrost.state_store_begin_frame(&app.state_store)
 

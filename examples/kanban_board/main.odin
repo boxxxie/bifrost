@@ -726,44 +726,31 @@ handle_kanban_interactions :: proc(app: ^Kanban_App, snap: Kanban_Snapshot) -> b
 }
 
 step_kanban_frame :: proc(app: ^Kanban_App, events: ..bifrost.Input_Event) {
-	if len(events) > 0 && len(app.layout_ctx.nodes) > 0 && bifrost.is_pure_hover_event_batch(&app.input, events) {
-		frame_start_hovered_id     := app.input.hovered_id
-		frame_start_hover_path     := app.input.hover_path
-		frame_start_hover_path_len := app.input.hover_path_len
-		bifrost.resolve_input(&app.input, &app.layout_ctx, ..events)
-		if app.input.hovered_id == frame_start_hovered_id &&
-		   app.input.hover_path_len == frame_start_hover_path_len &&
-		   app.input.hover_path == frame_start_hover_path {
-			strings.builder_reset(&app.ansi_builder)
-			return
-		}
+	switch bifrost.try_resolve_hover_fast_path(&app.input, &app.layout_ctx, events) {
+	case .Hover_Unchanged:
+		strings.builder_reset(&app.ansi_builder)
+		return
+	case .Hover_Changed:
 		free_all(context.temp_allocator)
 		bifrost.state_store_begin_frame(&app.state_store)
 		moment := app.active_moment if app.pinned_history else -1
 		snap := read_kanban_snapshot(app, moment)
 		build_kanban_ui(app, snap)
-		bifrost.state_store_sync_from_layout(&app.state_store, &app.layout_ctx, &app.input)
-		bifrost.apply_input_highlights(&app.screen, &app.layout_ctx, &app.input)
-		bifrost.render_layout(&app.screen, &app.layout_ctx)
-		strings.builder_reset(&app.ansi_builder)
-		_ = bifrost.screen_diff_ansi(&app.screen, &app.ansi_builder)
-		app.frames_rendered += 1
-		return
-	}
+	case .Not_Pure_Hover:
+		free_all(context.temp_allocator)
+		bifrost.state_store_begin_frame(&app.state_store)
 
-	free_all(context.temp_allocator)
-	bifrost.state_store_begin_frame(&app.state_store)
-
-	moment := app.active_moment if app.pinned_history else -1
-	snap := read_kanban_snapshot(app, moment)
-	build_kanban_ui(app, snap)
-
-	bifrost.resolve_input(&app.input, &app.layout_ctx, ..events)
-	if handle_kanban_interactions(app, snap) || (len(events) > 0 && !bifrost.is_pure_hover_event_batch(&app.input, events)) {
-		moment = app.active_moment if app.pinned_history else -1
-		snap = read_kanban_snapshot(app, moment)
+		moment := app.active_moment if app.pinned_history else -1
+		snap := read_kanban_snapshot(app, moment)
 		build_kanban_ui(app, snap)
-		bifrost.resolve_input(&app.input, &app.layout_ctx)
+
+		bifrost.resolve_input(&app.input, &app.layout_ctx, ..events)
+		if handle_kanban_interactions(app, snap) || (len(events) > 0 && !bifrost.is_pure_hover_event_batch(&app.input, events)) {
+			moment = app.active_moment if app.pinned_history else -1
+			snap = read_kanban_snapshot(app, moment)
+			build_kanban_ui(app, snap)
+			bifrost.resolve_input(&app.input, &app.layout_ctx)
+		}
 	}
 
 	bifrost.state_store_sync_from_layout(&app.state_store, &app.layout_ctx, &app.input)

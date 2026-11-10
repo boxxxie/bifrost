@@ -1042,3 +1042,33 @@ test_two_pass_materialized_scroll_retention_and_lru_slot_eviction :: proc(t: ^te
 	testing.expect_value(t, inp.scroll_slots[0].offset, 6)
 	testing.expect_value(t, inp.scroll_slots[1].id_hash, hash_id("new_overflow_scroll"))
 }
+
+@(test)
+test_try_resolve_hover_fast_path_respects_dirty_flag :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+
+	ctx: Layout_Context
+	begin_layout(&ctx, 40, 10)
+	if container(&ctx, "root", Box_Config{dir = .Row, width = fixed(40), height = fixed(10)}) {
+		leaf(&ctx, "chart_a", 20, 10, Box_Config{width = fixed(20), height = fixed(10), focus_flags = {.Focusable}})
+		leaf(&ctx, "chart_b", 20, 10, Box_Config{width = fixed(20), height = fixed(10), focus_flags = {.Focusable}})
+	}
+	end_layout(&ctx)
+
+	inp: Input_State
+	resolve_input(&inp, &ctx, Mouse_Event{x = 2, y = 2, action = .Move})
+	testing.expect_value(t, inp.hovered_id, hash_id("chart_a"))
+
+	// 1. Moving within `chart_a` with `dirty = false` short-circuits (.Hover_Unchanged)
+	move_same := [1]Input_Event{Mouse_Event{x = 5, y = 3, action = .Move}}
+	testing.expect_value(t, try_resolve_hover_fast_path(&inp, &ctx, move_same[:], false), Hover_Fast_Path_Result.Hover_Unchanged)
+
+	// 2. Moving within `chart_a` with `dirty = true` (e.g. background telemetry tick) MUST NOT short-circuit (.Not_Pure_Hover)
+	move_dirty := [1]Input_Event{Mouse_Event{x = 6, y = 3, action = .Move}}
+	testing.expect_value(t, try_resolve_hover_fast_path(&inp, &ctx, move_dirty[:], true), Hover_Fast_Path_Result.Not_Pure_Hover)
+
+	// 3. Moving across into `chart_b` with `dirty = false` reports `.Hover_Changed` and updates `hovered_id`
+	move_other := [1]Input_Event{Mouse_Event{x = 25, y = 3, action = .Move}}
+	testing.expect_value(t, try_resolve_hover_fast_path(&inp, &ctx, move_other[:], false), Hover_Fast_Path_Result.Hover_Changed)
+	testing.expect_value(t, inp.hovered_id, hash_id("chart_b"))
+}

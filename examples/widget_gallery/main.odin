@@ -856,21 +856,16 @@ handle_gallery_interactions :: proc(app: ^Gallery_App, slice: bifrost.Virtual_Sl
 
 step_gallery_frame :: proc(app: ^Gallery_App, events: ..bifrost.Input_Event) {
 	slice: bifrost.Virtual_Slice
-	if len(events) > 0 && len(app.layout_ctx.nodes) > 0 && bifrost.is_pure_hover_event_batch(&app.input, events) {
-		frame_start_hovered_id     := app.input.hovered_id
-		frame_start_hover_path     := app.input.hover_path
-		frame_start_hover_path_len := app.input.hover_path_len
-		bifrost.resolve_input(&app.input, &app.layout_ctx, ..events)
-		if app.input.hovered_id == frame_start_hovered_id &&
-		   app.input.hover_path_len == frame_start_hover_path_len &&
-		   app.input.hover_path == frame_start_hover_path {
-			strings.builder_reset(&app.ansi_builder)
-			return
-		}
+	has_active_toasts := app.toasts.count > 0
+	switch bifrost.try_resolve_hover_fast_path(&app.input, &app.layout_ctx, events, has_active_toasts) {
+	case .Hover_Unchanged:
+		strings.builder_reset(&app.ansi_builder)
+		return
+	case .Hover_Changed:
 		free_all(context.temp_allocator)
 		bifrost.state_store_begin_frame(&app.state_store)
 		build_gallery_ui(app, &slice)
-	} else {
+	case .Not_Pure_Hover:
 		free_all(context.temp_allocator)
 		bifrost.toast_update(&app.toasts, 1)
 		bifrost.state_store_begin_frame(&app.state_store)

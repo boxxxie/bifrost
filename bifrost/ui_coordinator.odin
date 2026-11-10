@@ -1170,28 +1170,10 @@ ui_coordinator_flush_frame :: proc(state: ^UI_Coordinator_State) {
 	has_pre_fx := ui_drain_side_effects(state, &state.ansi_builder)
 
 	has_existing_layout := state.use_widget_pipeline && len(state.layout_ctx.nodes) > 0 && state.cols > 0 && state.rows > 0
-	if !state.layout_dirty && !has_pre_fx && has_existing_layout && !state.input.pending_chord.active &&
-	   is_pure_hover_event_batch(&state.input, state.pending_inputs[:]) {
-		frame_start_focused_id     := state.input.focused_id
-		frame_start_hovered_id     := state.input.hovered_id
-		frame_start_hover_path     := state.input.hover_path
-		frame_start_hover_path_len := state.input.hover_path_len
-
-		for ev in state.pending_inputs {
-			resolve_input(&state.input, &state.layout_ctx, ev)
-		}
-		clear(&state.pending_inputs)
-
-		hover_same := state.input.hovered_id == frame_start_hovered_id &&
-		              state.input.hover_path_len == frame_start_hover_path_len &&
-		              state.input.hover_path == frame_start_hover_path
-
-		state.input.prev_focused_id     = frame_start_focused_id
-		state.input.prev_hovered_id     = frame_start_hovered_id
-		state.input.prev_hover_path     = frame_start_hover_path
-		state.input.prev_hover_path_len = frame_start_hover_path_len
-
-		if hover_same {
+	if has_existing_layout {
+		switch try_resolve_hover_fast_path(&state.input, &state.layout_ctx, state.pending_inputs[:], state.layout_dirty || has_pre_fx) {
+		case .Hover_Unchanged:
+			clear(&state.pending_inputs)
 			// Cursor moved to a different cell inside the same widget (e.g. `csv_main_table`):
 			// zero layout passes, zero CSV slicing, zero screen diffing.
 			// IMPORTANT: Do NOT call `free_all(context.temp_allocator)` here so `state.layout_ctx`
@@ -1202,34 +1184,36 @@ ui_coordinator_flush_frame :: proc(state: ^UI_Coordinator_State) {
 			state.urgent_input    = false
 			state.batch_drained   = 0
 			return
-		}
+		case .Hover_Changed:
+			clear(&state.pending_inputs)
+			// Hover target changed: now reset temp_allocator and run 1 render pass with the updated `hovered_id`.
+			free_all(context.temp_allocator)
+			rec := resolve_recorder(state.recorder)
+			heimdall.scoped_span(rec, TELEMETRY_SCOPE_COORDINATOR, "flush_frame", i64(state.total_frames + 1))
 
-		// Hover target changed: now reset temp_allocator and run 1 render pass with the updated `hovered_id`.
-		free_all(context.temp_allocator)
-		rec := resolve_recorder(state.recorder)
-		heimdall.scoped_span(rec, TELEMETRY_SCOPE_COORDINATOR, "flush_frame", i64(state.total_frames + 1))
-
-		state.use_widget_pipeline = false
-		state_store_begin_frame(&state.state_store)
-		ui_invoke_render_pass(state)
-		_ = ui_drain_side_effects(state, &state.ansi_builder)
-		if state.use_widget_pipeline {
-			state_store_sync_from_layout(&state.state_store, &state.layout_ctx, &state.input)
-			apply_input_highlights(&state.screen, &state.layout_ctx, &state.input)
-			render_layout(&state.screen, &state.layout_ctx)
+			state.use_widget_pipeline = false
+			state_store_begin_frame(&state.state_store)
+			ui_invoke_render_pass(state)
+			_ = ui_drain_side_effects(state, &state.ansi_builder)
+			if state.use_widget_pipeline {
+				state_store_sync_from_layout(&state.state_store, &state.layout_ctx, &state.input)
+				apply_input_highlights(&state.screen, &state.layout_ctx, &state.input)
+				render_layout(&state.screen, &state.layout_ctx)
+			}
+			state.last_diff_cells = screen_diff_ansi(&state.screen, &state.ansi_builder)
+			state.last_ansi_bytes = strings.builder_len(state.ansi_builder)
+			state.front_buf       = state.screen.front
+			state.back_buf        = state.screen.back
+			state.dirty           = false
+			state.urgent_input    = false
+			state.batch_drained   = 0
+			state.total_frames    += 1
+			state.last_frame_tick = time.tick_now()
+			heimdall.counter_add(rec, TELEMETRY_SCOPE_COORDINATOR, "frames_rendered", 1.0, i64(state.total_frames))
+			heimdall.gauge_set(rec, TELEMETRY_SCOPE_COORDINATOR, "diff_cells", f64(state.last_diff_cells), i64(state.last_ansi_bytes))
+			return
+		case .Not_Pure_Hover:
 		}
-		state.last_diff_cells = screen_diff_ansi(&state.screen, &state.ansi_builder)
-		state.last_ansi_bytes = strings.builder_len(state.ansi_builder)
-		state.front_buf       = state.screen.front
-		state.back_buf        = state.screen.back
-		state.dirty           = false
-		state.urgent_input    = false
-		state.batch_drained   = 0
-		state.total_frames    += 1
-		state.last_frame_tick = time.tick_now()
-		heimdall.counter_add(rec, TELEMETRY_SCOPE_COORDINATOR, "frames_rendered", 1.0, i64(state.total_frames))
-		heimdall.gauge_set(rec, TELEMETRY_SCOPE_COORDINATOR, "diff_cells", f64(state.last_diff_cells), i64(state.last_ansi_bytes))
-		return
 	}
 
 	free_all(context.temp_allocator)
