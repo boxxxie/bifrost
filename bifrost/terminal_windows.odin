@@ -139,6 +139,9 @@ terminal_deinit :: proc(term: ^Terminal) {
 
 	// 1. Write full escape sequence teardown in a single atomic write
 	if is_valid_handle(term.out_fd) {
+		if term.opts.sgr_pixels {
+			_ = write_all_fd(term.out_fd, SGR_PIXEL_MOUSE_DISABLE)
+		}
 		_ = write_all_fd(term.out_fd, CTL_TEARDOWN_SEQUENCE)
 		term.out_fd = INVALID_TERMINAL_FD
 	}

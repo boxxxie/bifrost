@@ -253,6 +253,109 @@ Mouse_Event :: struct {
 	mods:     Mod_Flags,
 }
 
+// Converts floating-point pixel coordinates into a Bifrost Mouse_Event
+// with integer cell (x, y, col, row) and sub-cell (x_offset, y_offset).
+mouse_event_from_pixels :: #force_inline proc "contextless" (
+	px_x, px_y: f32,
+	cell_w, cell_h: f32,
+	action: Mouse_Action,
+	button: Mouse_Button = .None,
+	mods: Mod_Flags = {},
+) -> Mouse_Event {
+	sx := px_x if px_x == px_x else 0.0
+	sy := px_y if px_y == px_y else 0.0
+	cw := max(f32(1.0), cell_w)
+	ch := max(f32(1.0), cell_h)
+	qx := clamp(sx / cw, -1.0e7, 1.0e7)
+	qy := clamp(sy / ch, -1.0e7, 1.0e7)
+	cx := i32(qx)
+	if f32(cx) > qx {
+		cx -= 1
+	}
+	cy := i32(qy)
+	if f32(cy) > qy {
+		cy -= 1
+	}
+	rem_x := u16(clamp(sx - f32(cx) * cw, 0.0, cw - 1.0 / 256.0))
+	rem_y := u16(clamp(sy - f32(cy) * ch, 0.0, ch - 1.0 / 256.0))
+	return Mouse_Event{
+		x        = cx,
+		y        = cy,
+		col      = i16(clamp(cx, -32768, 32767)),
+		row      = i16(clamp(cy, -32768, 32767)),
+		x_offset = rem_x,
+		y_offset = rem_y,
+		action   = action,
+		button   = button,
+		mods     = mods,
+	}
+}
+
+SGR_PIXEL_MOUSE_ENABLE  :: "\x1b[?1016h"
+SGR_PIXEL_MOUSE_DISABLE :: "\x1b[?1016l"
+
+// Decodes a DECSET 1016 SGR-Pixels sequence (`CSI < Cb ; Px ; Py M/m`) where
+// `px_1based` and `py_1based` are 1-based terminal pixel coordinates.
+mouse_event_from_sgr_pixels :: proc "contextless" (
+	cb: i32,
+	px_1based, py_1based: i32,
+	released: bool,
+	cell_w, cell_h: f32,
+) -> (ev: Mouse_Event, ok: bool) {
+	if cb < 0 || (cb & 128) != 0 {
+		return {}, false
+	}
+	mods: Mod_Flags
+	if (cb & 4)  != 0 { mods += {.Shift} }
+	if (cb & 8)  != 0 { mods += {.Alt} }
+	if (cb & 16) != 0 { mods += {.Ctrl} }
+
+	low2      := cb & 3
+	is_motion := (cb & 32) != 0
+	is_wheel  := (cb & 64) != 0
+
+	action: Mouse_Action = .Press
+	button: Mouse_Button = .None
+
+	if is_wheel {
+		if released {
+			return {}, false
+		}
+		switch low2 {
+		case 0: action = .Scroll_Up
+		case 1: action = .Scroll_Down
+		case 2: action = .Scroll_Left
+		case 3: action = .Scroll_Right
+		}
+	} else {
+		switch low2 {
+		case 0: button = .Left
+		case 1: button = .Middle
+		case 2: button = .Right
+		case 3: button = .None
+		}
+		if released {
+			action = .Release
+		} else if is_motion {
+			action = .Move if button == .None else .Drag
+		} else if button == .None {
+			action = .Release
+		} else {
+			action = .Press
+		}
+	}
+
+	return mouse_event_from_pixels(
+		f32(px_1based - 1),
+		f32(py_1based - 1),
+		cell_w,
+		cell_h,
+		action,
+		button,
+		mods,
+	), true
+}
+
 Focus_Loss_Event :: struct {}
 
 Focus_Event :: struct {

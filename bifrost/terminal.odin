@@ -70,6 +70,7 @@ Terminal_Error :: enum u8 {
 Terminal_Options :: struct {
 	alt_screen:      bool,
 	mouse:           bool,
+	sgr_pixels:      bool,
 	bracketed_paste: bool,
 	focus_events:    bool,
 	kitty_keyboard:  bool,
@@ -104,6 +105,25 @@ terminal_winsize :: proc {
 	terminal_get_winsize,
 }
 
+// Computes terminal cell pixel dimensions `(cell_w, cell_h)` from `TIOCGWINSZ` pixel geometry,
+// falling back to `10.0 x 20.0` when the terminal reports zero pixel size.
+terminal_cell_pixel_size :: proc(term: ^Terminal) -> (cell_w, cell_h: f32) {
+	cell_w = 10.0
+	cell_h = 20.0
+	if term == nil {
+		return
+	}
+	ws, err := terminal_winsize_from_term(term)
+	if err == .None && ws.x_pixel > 0 && ws.y_pixel > 0 {
+		cell_w = f32(ws.x_pixel) / f32(max(1, ws.width))
+		cell_h = f32(ws.y_pixel) / f32(max(1, ws.height))
+	} else if term.fallback_winsize.x_pixel > 0 && term.fallback_winsize.y_pixel > 0 {
+		cell_w = f32(term.fallback_winsize.x_pixel) / f32(max(1, term.fallback_winsize.width))
+		cell_h = f32(term.fallback_winsize.y_pixel) / f32(max(1, term.fallback_winsize.height))
+	}
+	return
+}
+
 // =============================================================================
 // Sleipnir Input Actor Poll + Streaming Parse Loop
 // =============================================================================
@@ -118,10 +138,14 @@ terminal_poll_event :: proc(
 	has_event: bool,
 	err: Terminal_Error,
 ) {
+	cell_w, cell_h: f32 = 10.0, 20.0
+	if term != nil && term.opts.sgr_pixels {
+		cell_w, cell_h = terminal_cell_pixel_size(term)
+	}
 	for {
 		// 1. Attempt to parse any bytes already buffered from a previous read
 		if term.read_len > 0 {
-			ev, consumed, status := parse_ansi_input(term.read_buf[:term.read_len], false)
+			ev, consumed, status := parse_ansi_input(term.read_buf[:term.read_len], false, term.opts.sgr_pixels, cell_w, cell_h)
 			switch status {
 			case .Ok:
 				if paste, is_paste := ev.(Paste_Event); is_paste && len(paste.text) > 0 {
@@ -132,7 +156,7 @@ terminal_poll_event :: proc(
 				if mev, is_m := ev.(Mouse_Event); is_m && (is_mouse_hover_motion(mev.action) || mev.action == .Drag) {
 					cur_m := mev
 					for term.read_len > 0 {
-						next_ev, next_consumed, next_status := parse_ansi_input(term.read_buf[:term.read_len], false)
+						next_ev, next_consumed, next_status := parse_ansi_input(term.read_buf[:term.read_len], false, term.opts.sgr_pixels, cell_w, cell_h)
 						if next_status == .Ignored || next_status == .Malformed {
 							consume_buffer_prefix(term, max(next_consumed, 1))
 							continue
@@ -166,7 +190,7 @@ terminal_poll_event :: proc(
 				}
 				if !ready {
 					// Timeout expired with no continuation bytes: disambiguate bare ESC
-					ev_to, consumed_to, status_to := parse_ansi_input(term.read_buf[:term.read_len], true)
+					ev_to, consumed_to, status_to := parse_ansi_input(term.read_buf[:term.read_len], true, term.opts.sgr_pixels, cell_w, cell_h)
 					consume_buffer_prefix(term, max(consumed_to, 1))
 					if status_to == .Ok {
 						return ev_to, true, .None
@@ -385,6 +409,9 @@ emit_terminal_setup_sequences :: proc(out_fd: Terminal_FD, opts: Terminal_Option
 	}
 	if opts.mouse {
 		write_all_fd(out_fd, CTL_MOUSE_SET) or_return
+		if opts.sgr_pixels {
+			write_all_fd(out_fd, SGR_PIXEL_MOUSE_ENABLE) or_return
+		}
 	}
 	if opts.kitty_keyboard {
 		write_all_fd(out_fd, CTL_KITTY_KBD_PUSH) or_return

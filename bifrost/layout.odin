@@ -206,17 +206,24 @@ Layout_Node :: struct {
 	wrapped_span_w:        i32,
 }
 
+Measure_Text_Intrinsic_Proc :: #type proc "contextless" (
+	text:     string,
+	userdata: rawptr,
+) -> (unwrapped_w, longest_word, line_count: i32)
+
 Layout_Context :: struct {
-	nodes:           [dynamic]Layout_Node,
-	parent_stack:    [dynamic]i32,
-	scope_stack:     [MAX_SCOPE_DEPTH]i32,
-	scope_stack_len: int,
-	id_map:          map[u64]i32,
-	z_order:         []i32,
-	screen_size:     [2]i32,
-	layout_gen:      u64,
-	allocator:       mem.Allocator,
-	recorder:        ^heimdall.Recorder,
+	nodes:            [dynamic]Layout_Node,
+	parent_stack:     [dynamic]i32,
+	scope_stack:      [MAX_SCOPE_DEPTH]i32,
+	scope_stack_len:  int,
+	id_map:           map[u64]i32,
+	z_order:          []i32,
+	screen_size:      [2]i32,
+	layout_gen:       u64,
+	allocator:        mem.Allocator,
+	recorder:         ^heimdall.Recorder,
+	measure_text_fn:  Measure_Text_Intrinsic_Proc,
+	measure_userdata: rawptr,
 }
 
 // =============================================================================
@@ -576,7 +583,12 @@ end_layout :: proc(ctx: ^Layout_Context) {
 			min_intrinsic[main_axis]  = insets[main_axis] if node.config.scrollable else (min_main + insets[main_axis])
 			min_intrinsic[cross_axis] = insets[cross_axis] if node.config.scrollable else (min_cross + insets[cross_axis])
 		} else if len(node.text) > 0 {
-			unwrapped_w, longest_word, line_count := measure_text_intrinsic(node.text)
+			unwrapped_w, longest_word, line_count: i32
+			if ctx.measure_text_fn != nil {
+				unwrapped_w, longest_word, line_count = ctx.measure_text_fn(node.text, ctx.measure_userdata)
+			} else {
+				unwrapped_w, longest_word, line_count = measure_text_intrinsic(node.text)
+			}
 			base_w := max(node.content_size[0], unwrapped_w)
 			base_h := max(node.content_size[1], line_count)
 			min_w  := longest_word if node.config.wrap_mode == .Words else base_w
@@ -637,8 +649,7 @@ end_layout :: proc(ctx: ^Layout_Context) {
 // Internal Solver Passes & Helpers
 // =============================================================================
 
-@(private)
-measure_text_intrinsic :: proc(text: string) -> (unwrapped_w, longest_word, line_count: i32) {
+measure_text_intrinsic :: proc "contextless" (text: string) -> (unwrapped_w, longest_word, line_count: i32) {
 	line_count = 1
 	cur_line_w: i32 = 0
 	cur_word_w: i32 = 0

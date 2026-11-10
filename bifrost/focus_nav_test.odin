@@ -1028,7 +1028,7 @@ test_two_pass_materialized_scroll_retention_and_lru_slot_eviction :: proc(t: ^te
 	resolve_input(&inp, &ctx)
 	testing.expect_value(t, get_scroll_offset(&inp, "mat_scroll"), 6)
 
-	// 2. LRU Scroll_Slot eviction: slot 0 with a recent last_layout_gen must NOT be evicted when 32 older slots exist
+	// 2. LRU Scroll_Slot eviction: slot 0 with a recent last_layout_gen must NOT be evicted when MAX_SCROLL_SLOTS older slots exist
 	inp.scroll_slots[0].last_layout_gen = 500
 	for i := 1; i < MAX_SCROLL_SLOTS; i += 1 {
 		inp.scroll_slots[i] = Scroll_Slot{
@@ -1036,7 +1036,7 @@ test_two_pass_materialized_scroll_retention_and_lru_slot_eviction :: proc(t: ^te
 			last_layout_gen = u64(100 + i),
 		}
 	}
-	// Slot 1 has the oldest last_layout_gen (101), so allocating a 33rd slot must evict slot 1, preserving slot 0 ("mat_scroll")
+	// Slot 1 has the oldest last_layout_gen (101), so allocating an overflow slot must evict slot 1, preserving slot 0 ("mat_scroll")
 	_ = get_scroll_slot(&inp, hash_id("new_overflow_scroll"))
 	testing.expect_value(t, inp.scroll_slots[0].id_hash, hash_id("mat_scroll"))
 	testing.expect_value(t, inp.scroll_slots[0].offset, 6)

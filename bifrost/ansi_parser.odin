@@ -28,9 +28,12 @@ DEFAULT_KITTY_FLAGS :: Kitty_Flags{.Disambiguate, .Report_Alternate_Keys, .Repor
 INPUT_STREAM_BUF_SIZE :: 4096
 
 Input_Stream_Reader :: struct {
-	buf:  [INPUT_STREAM_BUF_SIZE]byte,
-	head: int,
-	len:  int,
+	buf:       [INPUT_STREAM_BUF_SIZE]byte,
+	head:      int,
+	len:       int,
+	sgr_pixel: bool,
+	cell_w:    f32,
+	cell_h:    f32,
 }
 
 // Helper to retrieve the slice of UTF-8 text stored inline on a Key_Event.
@@ -94,7 +97,13 @@ input_stream_next :: proc(
 		return nil, .Need_More
 	}
 	for reader.head < reader.len {
-		ev, consumed, st := parse_ansi_input(reader.buf[reader.head:reader.len], is_timeout)
+		ev, consumed, st := parse_ansi_input(
+			reader.buf[reader.head:reader.len],
+			is_timeout,
+			reader.sgr_pixel,
+			reader.cell_w,
+			reader.cell_h,
+		)
 		switch st {
 		case .Ok:
 			input_stream_consume(reader, consumed)
@@ -144,6 +153,9 @@ classify_codepoint_key :: proc "contextless" (cp: rune) -> (code: Key_Code, ch: 
 parse_ansi_input :: proc(
 	buf: []byte,
 	is_timeout: bool = false,
+	sgr_pixel_mode: bool = false,
+	cell_w: f32 = 10.0,
+	cell_h: f32 = 20.0,
 ) -> (
 	event: Input_Event,
 	bytes_consumed: int,
@@ -172,7 +184,7 @@ parse_ansi_input :: proc(
 		case 'P', 'X', '^', '_': // 0x50 DCS, 0x58 SOS, 0x5E PM, 0x5F APC
 			return skip_until_st(buf, is_timeout)
 		case '[': // 0x5B - CSI
-			return parse_csi(buf, is_timeout)
+			return parse_csi(buf, is_timeout, sgr_pixel_mode, cell_w, cell_h)
 		case ']': // 0x5D - OSC
 			return parse_osc(buf, is_timeout)
 		case:
@@ -481,6 +493,9 @@ parse_osc :: proc(
 parse_csi :: proc(
 	buf: []byte,
 	is_timeout: bool,
+	sgr_pixel_mode: bool = false,
+	cell_w: f32 = 10.0,
+	cell_h: f32 = 20.0,
 ) -> (
 	event: Input_Event,
 	bytes_consumed: int,
@@ -540,7 +555,7 @@ parse_csi :: proc(
 	case 'O':
 		return Focus_Event{focused = false}, len(seq), .Ok
 	case 'M', 'm':
-		return parse_mouse(seq, buf, is_timeout)
+		return parse_mouse(seq, buf, is_timeout, sgr_pixel_mode, cell_w, cell_h)
 	case 't':
 		return parse_xtwinops(seq)
 	case 'u':
@@ -793,6 +808,9 @@ parse_mouse :: proc(
 	seq: []byte,
 	full_buf: []byte,
 	is_timeout: bool,
+	sgr_pixel_mode: bool = false,
+	cell_w: f32 = 10.0,
+	cell_h: f32 = 20.0,
 ) -> (
 	event: Input_Event,
 	bytes_consumed: int,
@@ -821,7 +839,7 @@ parse_mouse :: proc(
 		px = i16(full_buf[4] - 32)
 		py = i16(full_buf[5] - 32)
 	} else if len(seq) >= 4 && seq[2] == '<' {
-		// SGR 1006 mouse: \x1b [ < Pb ; Px ; Py {M|m}
+		// SGR 1006 / 1016 mouse: \x1b [ < Pb ; Px ; Py {M|m}
 		body := seq[3 : len(seq) - 1]
 		f1, rest1, ok1 := split_byte(body, ';')
 		if !ok1 {
@@ -837,6 +855,25 @@ parse_mouse :: proc(
 			return nil, len(seq), .Ignored
 		}
 		button_mask = u16(b_val)
+
+		if sgr_pixel_mode {
+			if (button_mask & MOUSE_BIT_LEAVE) != 0 {
+				return Mouse_Event{
+					action = .Leave,
+					button = .None,
+				}, consumed, .Ok
+			}
+			px_i32, px_ok32 := parse_i32_default(f2, 1)
+			py_i32, py_ok32 := parse_i32_default(f3, 1)
+			if !px_ok32 || !py_ok32 {
+				return nil, len(seq), .Ignored
+			}
+			released := seq[len(seq) - 1] == 'm'
+			if mouse_ev, ok := mouse_event_from_sgr_pixels(i32(b_val), px_i32, py_i32, released, cell_w, cell_h); ok {
+				return mouse_ev, consumed, .Ok
+			}
+			return nil, len(seq), .Ignored
+		}
 
 		px_ok, py_ok: bool
 		px, px_ok = parse_i16_default(f2, 1)
@@ -1052,6 +1089,34 @@ parse_u32 :: proc "contextless" (buf: []byte) -> (val: u32, ok: bool) {
 		}
 	}
 	return u32(acc), true
+}
+
+@(private)
+parse_i32_default :: proc "contextless" (buf: []byte, default_val: i32) -> (val: i32, ok: bool) {
+	if len(buf) == 0 {
+		return default_val, true
+	}
+	neg := false
+	s := buf
+	if s[0] == '-' {
+		neg = true
+		s = s[1:]
+	}
+	if len(s) == 0 {
+		return 0, false
+	}
+	acc: i64 = 0
+	for b in s {
+		if b < '0' || b > '9' {
+			return 0, false
+		}
+		acc = acc * 10 + i64(b - '0')
+		if acc > 0x7FFF_FFFF {
+			return 0, false
+		}
+	}
+	res := -acc if neg else acc
+	return i32(res), true
 }
 
 @(private)
