@@ -858,7 +858,7 @@ surface_merge_box_cell :: proc(
 	}, eff_clip)
 }
 
-MAX_TABLE_COLS :: 256
+MAX_TABLE_COLS :: 224
 
 Table_Cell_Span :: struct {
 	x: i32,
@@ -903,9 +903,9 @@ Scroll_Slot :: struct {
 	col_kinds:              [MAX_TABLE_COLS]Column_Width_Kind,
 	col_aligns:             [MAX_TABLE_COLS]Column_Align,
 	col_req_widths:         [MAX_TABLE_COLS]i16, // Fixed width or Fill weight
-	col_min_widths:         [MAX_TABLE_COLS]i16,
+	col_min_widths:         [MAX_TABLE_COLS]u8,
 	col_max_widths:         [MAX_TABLE_COLS]i16,
-	col_header_widths:      [MAX_TABLE_COLS]i16,
+	col_header_widths:      [MAX_TABLE_COLS]u8,
 	col_max_observed:       [MAX_TABLE_COLS]i16, // Monotonic high-water-mark widths per column
 	col_user_widths:        [MAX_TABLE_COLS]i16, // > 0 when user manually resized this column
 	col_x_starts:           [MAX_TABLE_COLS]i16, // Screen x start (for visible columns) or logical x
@@ -1045,9 +1045,9 @@ populate_slot_column_specs :: proc "contextless" (
 		slot.col_kinds[i]         = spec.kind
 		slot.col_aligns[i]        = spec.align
 		slot.col_req_widths[i]    = i16(clamp(req_val, 0, 32767))
-		slot.col_min_widths[i]    = i16(clamp(max(1, spec.min_width), 1, 32767))
+		slot.col_min_widths[i]    = u8(clamp(max(1, spec.min_width), 1, 255))
 		slot.col_max_widths[i]    = i16(clamp(spec.max_width, 0, 32767))
-		slot.col_header_widths[i] = i16(clamp(hdr_w, 1, 32767))
+		slot.col_header_widths[i] = u8(clamp(hdr_w, 1, 255))
 		slot.col_max_observed[i]  = i16(clamp(obs_w, 0, 32767))
 	}
 }
@@ -1847,7 +1847,7 @@ handle_table_key_shortcut :: proc "contextless" (
 		if inp.repeat_count == 0 && inp.suffix_count == 0 {
 			for i := 0; i < cnt; i += 1 {
 				slot.col_user_widths[i]  = 0
-				slot.col_max_observed[i] = slot.col_header_widths[i]
+				slot.col_max_observed[i] = i16(slot.col_header_widths[i])
 			}
 			slot.auto_size_this_frame = true
 			_ = resolve_slot_table_columns(slot, avail_rect)

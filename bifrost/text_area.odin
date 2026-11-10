@@ -7,8 +7,8 @@ import "core:unicode/utf8"
 // Track 11: Multi-Line Text Editor (`ui_text_area`)
 // =============================================================================
 
-MAX_TEXT_AREA_SLOTS :: 8
-MAX_TEXT_AREA_BYTES :: 4096
+MAX_TEXT_AREA_SLOTS :: #config(BIFROST_MAX_TEXT_AREA_SLOTS, 8)
+MAX_TEXT_AREA_BYTES :: 1024
 MAX_TEXT_AREA_LINES :: 256
 
 Text_Area_Syntax_Mode :: enum u8 {
@@ -32,7 +32,7 @@ Text_Area_State :: struct {
 	dyn_buf:           [dynamic]u8,
 	use_dyn:           bool,
 	len:               int,
-	line_starts:       [MAX_TEXT_AREA_LINES]int,
+	line_starts:       [MAX_TEXT_AREA_LINES]i32,
 	line_count:        int,
 	cursor_byte:       int,
 	cursor_row:        i32,
@@ -251,7 +251,7 @@ text_area_rebuild_lines :: proc "contextless" (slot: ^Text_Area_State) {
 	count := 1
 	for i := 0; i < len(raw); i += 1 {
 		if raw[i] == '\n' && count < MAX_TEXT_AREA_LINES {
-			slot.line_starts[count] = i + 1
+			slot.line_starts[count] = i32(i + 1)
 			count += 1
 		}
 	}
@@ -260,13 +260,13 @@ text_area_rebuild_lines :: proc "contextless" (slot: ^Text_Area_State) {
 	// Binary or linear search for the line containing `cursor_byte`
 	c_row := 0
 	for r := count - 1; r >= 0; r -= 1 {
-		if slot.cursor_byte >= slot.line_starts[r] {
+		if slot.cursor_byte >= int(slot.line_starts[r]) {
 			c_row = r
 			break
 		}
 	}
 	slot.cursor_row = i32(c_row)
-	line_start := slot.line_starts[c_row]
+	line_start := int(slot.line_starts[c_row])
 	prefix := string(raw[line_start:slot.cursor_byte])
 	slot.cursor_col = string_display_width(prefix)
 }
@@ -277,9 +277,9 @@ text_area_line_range :: proc "contextless" (slot: ^Text_Area_State, row: i32) ->
 		return 0, 0
 	}
 	r := clamp(int(row), 0, slot.line_count - 1)
-	start_byte = slot.line_starts[r]
+	start_byte = int(slot.line_starts[r])
 	if r + 1 < slot.line_count {
-		end_byte = max(start_byte, slot.line_starts[r + 1] - 1)
+		end_byte = max(start_byte, int(slot.line_starts[r + 1]) - 1)
 	} else {
 		end_byte = slot.len
 		raw := text_area_bytes(slot)

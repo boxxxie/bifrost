@@ -157,7 +157,7 @@ Key_Event :: struct {
 	base_layout_codepoint: rune,
 	mods:                  Mod_Flags,
 	action:                Key_Action,
-	text_buf:              [64]u8,
+	text_buf:              [16]u8,
 	text_len:              u8,
 }
 
@@ -410,7 +410,7 @@ Event_Handler_Proc :: #type proc(
 
 MAX_FOCUS_HISTORY    :: 8
 MAX_HIT_DEPTH        :: 32
-MAX_SCROLL_SLOTS     :: 32
+MAX_SCROLL_SLOTS     :: #config(BIFROST_MAX_SCROLL_SLOTS, 32)
 MAX_SCOPE_MEMORY     :: 64
 MAX_FOCUS_PATH       :: 32
 MAX_FLOATING_WINDOWS :: 16

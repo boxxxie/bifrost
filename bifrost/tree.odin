@@ -11,10 +11,10 @@ import "core:strings"
 // keyboard/mouse expand/collapse & parent-node jump navigation, and O(1)
 // visible-slice virtualization over 10,000+ node trees.
 
-MAX_TREE_SLOTS        :: 8
+MAX_TREE_SLOTS        :: #config(BIFROST_MAX_TREE_SLOTS, 8)
 MAX_TREE_DEPTH        :: 32
-MAX_TREE_BITSET_WORDS :: 256 // 256 * 64 = 16,384 nodes tracked inline per Tree_Slot
-MAX_TREE_HASH_CAP     :: 512 // Open-addressed power-of-two table tracking expand/collapse by `id_hash`
+MAX_TREE_BITSET_WORDS :: 64  // 64 * 64 = 4,096 nodes tracked inline per Tree_Slot (larger trees use default_expand + hash table)
+MAX_TREE_HASH_CAP     :: 256 // Open-addressed power-of-two table tracking expand/collapse by `id_hash`
 MAX_TREE_HASH_WORDS   :: MAX_TREE_HASH_CAP / 64
 MAX_TREE_WIDTH_HIST   :: 256 // Fixed-bucket row-width histogram for O(N) zero-allocation p95 width estimation
 
