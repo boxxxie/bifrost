@@ -9,6 +9,17 @@ import actor "../deps/heimdall/deps/sleipnir/actor"
 import heimdall "../deps/heimdall/heimdall"
 import xitdb "../deps/xitdb/xitdb"
 
+@(private)
+ensure_test_dir :: proc(dir: string) -> bool {
+	for _ in 0 ..< 5 {
+		err := os.make_directory_all(dir)
+		if err == nil || os.is_dir(dir) {
+			return true
+		}
+	}
+	return false
+}
+
 @(test)
 test_heimdall_explicit_recorder_and_nested_pipeline_spans :: proc(t: ^testing.T) {
 	track: mem.Tracking_Allocator
@@ -24,8 +35,7 @@ test_heimdall_explicit_recorder_and_nested_pipeline_spans :: proc(t: ^testing.T)
 
 	tmp_dir := ".tmp/test_heimdall_explicit"
 	_ = os.remove_all(tmp_dir)
-	mk_err := os.make_directory_all(tmp_dir)
-	testing.expect_value(t, mk_err, nil)
+	testing.expect(t, ensure_test_dir(tmp_dir), "Failed to create test directory")
 	defer {
 		_ = os.remove_all(tmp_dir)
 	}
@@ -289,8 +299,7 @@ test_heimdall_default_recorder_fallback :: proc(t: ^testing.T) {
 
 	tmp_dir := ".tmp/test_heimdall_default"
 	_ = os.remove_all(tmp_dir)
-	mk_err := os.make_directory_all(tmp_dir)
-	testing.expect_value(t, mk_err, nil)
+	testing.expect(t, ensure_test_dir(tmp_dir), "Failed to create test directory")
 	defer {
 		_ = os.remove_all(tmp_dir)
 	}
