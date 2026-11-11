@@ -1366,7 +1366,7 @@ scroll_node_into_view :: proc "contextless" (inp: ^Input_State, ctx: ^Layout_Con
 				apply_scroll_delta_x(inp, ctx, curr, delta_x)
 			}
 		}
-		if sc_node.out_of_flow || sc_node.parent_idx >= curr {
+		if sc_node.out_of_flow || sc_node.parent_idx == curr {
 			break
 		}
 		curr = sc_node.parent_idx
