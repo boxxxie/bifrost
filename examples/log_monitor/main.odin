@@ -859,6 +859,18 @@ extract_monitor_row :: proc(coord: ^bifrost.UI_Coordinator_State, row: int, allo
 	return strings.trim_right_space(strings.to_string(b))
 }
 
+@(private)
+ensure_test_dir :: proc(dir: string) -> bool {
+	for _ in 0 ..< 10 {
+		err := os.make_directory_all(dir)
+		if err == nil || os.is_dir(dir) {
+			return true
+		}
+		time.sleep(5 * time.Millisecond)
+	}
+	return os.is_dir(dir)
+}
+
 run_log_monitor :: proc(live_tty: bool) -> bool {
 	defer free_all(context.temp_allocator)
 
@@ -874,7 +886,10 @@ run_log_monitor :: proc(live_tty: bool) -> bool {
 	shared := bifrost.Xitdb_Shared_Handle{db = &db}
 
 	_ = os.remove_all(MONITOR_HEIMDALL_DIR)
-	_ = os.make_directory_all(MONITOR_HEIMDALL_DIR)
+	if !ensure_test_dir(MONITOR_HEIMDALL_DIR) {
+		fmt.eprintf("Failed to create temporary directory for Heimdall segments: %s\n", MONITOR_HEIMDALL_DIR)
+		return false
+	}
 	tctx: Monitor_Telemetry_Ctx
 	if heimdall.recorder_init(&tctx.recorder, heimdall.Config{
 		file_prefix      = MONITOR_HEIMDALL_PREFIX,
@@ -946,6 +961,7 @@ run_log_monitor :: proc(live_tty: bool) -> bool {
 		context.allocator,
 	)
 	if !ui_ok {
+		fmt.eprintln("Failed to spawn UI coordinator actor")
 		return false
 	}
 	bifrost.ui_coordinator_set_recorder(&ui_actor.state, &tctx.recorder)
@@ -965,6 +981,7 @@ run_log_monitor :: proc(live_tty: bool) -> bool {
 		context.allocator,
 	)
 	if w_err != nil {
+		fmt.eprintf("Failed to spawn xitdb worker actor: %v\n", w_err)
 		return false
 	}
 	worker_pid := actor.pid(worker_actor)
@@ -978,6 +995,7 @@ run_log_monitor :: proc(live_tty: bool) -> bool {
 		context.allocator,
 	)
 	if p_err != nil {
+		fmt.eprintf("Failed to spawn log producer actor: %v\n", p_err)
 		return false
 	}
 	producer_pid := actor.pid(producer_actor)
@@ -1102,6 +1120,7 @@ run_log_monitor :: proc(live_tty: bool) -> bool {
 		// 1. Render initial seeded log stream (120 logs across 3 moments)
 		actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Frame_Tick{tick_ns = 1}))
 		actor.scheduler_wait_idle(&sched)
+		free_all(context.temp_allocator)
 
 		// 2. Step back to @0 (`[` twice) and trigger `<C-g>` (`query.diff`) + `<C-d>` (`query.datalog`) + `f` (`moment.follow`)
 		//    through declarative `bind_actor_action` routing onto `worker_pid`
@@ -1112,6 +1131,7 @@ run_log_monitor :: proc(live_tty: bool) -> bool {
 		actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Key{code = .Rune, ch = 'f'}))
 		actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Frame_Tick{tick_ns = 2}))
 		actor.scheduler_wait_idle(&sched)
+		free_all(context.temp_allocator)
 
 		// 3. Scroll down 4 rows and simulate a 500-message commit burst to verify mailbox coalescing
 		actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Scroll_Viewport{delta_rows = 4}))
@@ -1128,6 +1148,7 @@ run_log_monitor :: proc(live_tty: bool) -> bool {
 
 		saved_ws := bifrost.save_ui_workspace_to_xitdb(&shared, &ui_actor.state, "monitor_default")
 		if !saved_ws {
+			fmt.eprintln("Failed to save workspace snapshot to xitdb")
 			return false
 		}
 
@@ -1154,6 +1175,7 @@ run_log_monitor :: proc(live_tty: bool) -> bool {
 		actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Key{code = .Rune, ch = '4'}))
 		actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Frame_Tick{tick_ns = 4}))
 		actor.scheduler_wait_idle(&sched)
+		free_all(context.temp_allocator)
 
 		fmt.printf(
 			"\n[Bifrost Log Monitor — Tab 2 (Heimdall Arrow IPC Viewer)] segments=%d records=%d spans=%d frames=%d\n",
@@ -1202,6 +1224,9 @@ main :: proc() {
 	mem.tracking_allocator_destroy(&track)
 
 	if !ok || leaks > 0 {
+		if !ok {
+			fmt.eprintln("run_log_monitor returned false")
+		}
 		os.exit(1)
 	}
 }

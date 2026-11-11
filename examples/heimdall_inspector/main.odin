@@ -851,12 +851,24 @@ extract_row_text :: proc(coord: ^bifrost.UI_Coordinator_State, row: int, alloc :
 	return strings.trim_right_space(strings.to_string(b))
 }
 
+@(private)
+ensure_test_dir :: proc(dir: string) -> bool {
+	for _ in 0 ..< 10 {
+		err := os.make_directory_all(dir)
+		if err == nil || os.is_dir(dir) {
+			return true
+		}
+		time.sleep(5 * time.Millisecond)
+	}
+	return os.is_dir(dir)
+}
+
 run_heimdall_inspector :: proc(live_tty: bool, track: ^mem.Tracking_Allocator = nil) -> bool {
 	defer free_all(context.temp_allocator)
 
 	tmp_dir := ".tmp/heimdall_inspector_demo"
 	_ = os.remove_all(tmp_dir)
-	if os.make_directory_all(tmp_dir) != nil {
+	if !ensure_test_dir(tmp_dir) {
 		fmt.eprintln("Failed to create temporary directory for Heimdall segments")
 		return false
 	}
@@ -1076,6 +1088,7 @@ run_heimdall_inspector :: proc(live_tty: bool, track: ^mem.Tracking_Allocator = 
 		// 1. Render Frame 1 so UI Coordinator + Layout + Input + Renderer emit spans & metrics
 		actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Frame_Tick{tick_ns = 1}))
 		actor.scheduler_wait_idle(&sched)
+		free_all(context.temp_allocator)
 
 		// 2. Press 'r' to reload segments, then complete the deferred post-turn flush so Frame 1's
 		//    closed `actor_turn` and `flush_frame` spans are also captured in `.arrow` segments
@@ -1086,6 +1099,7 @@ run_heimdall_inspector :: proc(live_tty: bool, track: ^mem.Tracking_Allocator = 
 			app.pending_reload = false
 			refresh_inspector_store(&app)
 		}
+		free_all(context.temp_allocator)
 
 		// 3. Press 'k' to filter to SPANS only, then render Frame 3 (Tab 1: Arrow IPC Records)
 		actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Key{code = .Rune, ch = 'k'}))
@@ -1107,6 +1121,7 @@ run_heimdall_inspector :: proc(live_tty: bool, track: ^mem.Tracking_Allocator = 
 		for r := 0; r < ui_actor.state.rows; r += 1 {
 			fmt.printf("  %s\n", extract_row_text(&ui_actor.state, r))
 		}
+		free_all(context.temp_allocator)
 
 		// 4. Switch to Tab 2 (`2` -> Span Call-Tree & Latency Waterfall) and render Frame 4
 		actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Key{code = .Rune, ch = '2'}))
@@ -1121,6 +1136,7 @@ run_heimdall_inspector :: proc(live_tty: bool, track: ^mem.Tracking_Allocator = 
 		for r := 0; r < ui_actor.state.rows; r += 1 {
 			fmt.printf("  %s\n", extract_row_text(&ui_actor.state, r))
 		}
+		free_all(context.temp_allocator)
 
 		// 5. Switch to Tab 3 (`3` -> Scope Latency Breakdown) and render Frame 5
 		actor.send(&sched, ui_pid, bifrost.UI_Msg(bifrost.UI_Msg_Key{code = .Rune, ch = '3'}))
@@ -1134,8 +1150,15 @@ run_heimdall_inspector :: proc(live_tty: bool, track: ^mem.Tracking_Allocator = 
 		for r := 0; r < ui_actor.state.rows; r += 1 {
 			fmt.printf("  %s\n", extract_row_text(&ui_actor.state, r))
 		}
+		free_all(context.temp_allocator)
 
 		if app.store.segment_count < 1 || len(app.store.records) < 10 || len(app.store.filtered_idxs) < 5 {
+			fmt.eprintf(
+				"Heimdall inspector check failed: segments=%d records=%d filtered=%d\n",
+				app.store.segment_count,
+				len(app.store.records),
+				len(app.store.filtered_idxs),
+			)
 			return false
 		}
 	}
@@ -1169,6 +1192,9 @@ main :: proc() {
 	mem.tracking_allocator_destroy(&track)
 
 	if !ok || leaks > 0 {
+		if !ok {
+			fmt.eprintln("run_heimdall_inspector returned false")
+		}
 		os.exit(1)
 	}
 }
