@@ -1048,12 +1048,15 @@ test_try_resolve_hover_fast_path_respects_dirty_flag :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 
 	ctx: Layout_Context
+	layout_enable_arena(&ctx)
+	defer layout_destroy(&ctx)
 	begin_layout(&ctx, 40, 10)
 	if container(&ctx, "root", Box_Config{dir = .Row, width = fixed(40), height = fixed(10)}) {
 		leaf(&ctx, "chart_a", 20, 10, Box_Config{width = fixed(20), height = fixed(10), focus_flags = {.Focusable}})
 		leaf(&ctx, "chart_b", 20, 10, Box_Config{width = fixed(20), height = fixed(10), focus_flags = {.Focusable}})
 	}
 	end_layout(&ctx)
+	free_all(context.temp_allocator)
 
 	inp: Input_State
 	resolve_input(&inp, &ctx, Mouse_Event{x = 2, y = 2, action = .Move})
@@ -1062,13 +1065,57 @@ test_try_resolve_hover_fast_path_respects_dirty_flag :: proc(t: ^testing.T) {
 	// 1. Moving within `chart_a` with `dirty = false` short-circuits (.Hover_Unchanged)
 	move_same := [1]Input_Event{Mouse_Event{x = 5, y = 3, action = .Move}}
 	testing.expect_value(t, try_resolve_hover_fast_path(&inp, &ctx, move_same[:], false), Hover_Fast_Path_Result.Hover_Unchanged)
+	testing.expect_value(t, inp.prev_hovered_id, hash_id("chart_a"))
 
 	// 2. Moving within `chart_a` with `dirty = true` (e.g. background telemetry tick) MUST NOT short-circuit (.Not_Pure_Hover)
-	move_dirty := [1]Input_Event{Mouse_Event{x = 6, y = 3, action = .Move}}
+	move_dirty := [1]Input_Event{Mouse_Event{x = 25, y = 3, action = .Move}}
 	testing.expect_value(t, try_resolve_hover_fast_path(&inp, &ctx, move_dirty[:], true), Hover_Fast_Path_Result.Not_Pure_Hover)
+	testing.expect_value(t, inp.hovered_id, hash_id("chart_a"))
 
 	// 3. Moving across into `chart_b` with `dirty = false` reports `.Hover_Changed` and updates `hovered_id`
 	move_other := [1]Input_Event{Mouse_Event{x = 25, y = 3, action = .Move}}
 	testing.expect_value(t, try_resolve_hover_fast_path(&inp, &ctx, move_other[:], false), Hover_Fast_Path_Result.Hover_Changed)
 	testing.expect_value(t, inp.hovered_id, hash_id("chart_b"))
+	testing.expect_value(t, inp.prev_hovered_id, hash_id("chart_a"))
+
+	// 4. `.Leave` clears hover once as `.Hover_Changed`, then repeats as `.Hover_Unchanged`
+	leave_ev := [1]Input_Event{Mouse_Event{action = .Leave}}
+	testing.expect_value(t, try_resolve_hover_fast_path(&inp, &ctx, leave_ev[:], false), Hover_Fast_Path_Result.Hover_Changed)
+	testing.expect_value(t, inp.prev_hovered_id, hash_id("chart_b"))
+	testing.expect_value(t, inp.hovered_id, u64(0))
+	testing.expect_value(t, try_resolve_hover_fast_path(&inp, &ctx, leave_ev[:], false), Hover_Fast_Path_Result.Hover_Unchanged)
+
+	// 5. Active chord, mouse_down, or mixed button press rejects the fast path
+	inp.pending_chord.active = true
+	testing.expect_value(t, try_resolve_hover_fast_path(&inp, &ctx, move_same[:], false), Hover_Fast_Path_Result.Not_Pure_Hover)
+	inp.pending_chord.active = false
+
+	inp.mouse_down = true
+	testing.expect_value(t, try_resolve_hover_fast_path(&inp, &ctx, move_same[:], false), Hover_Fast_Path_Result.Not_Pure_Hover)
+	inp.mouse_down = false
+
+	mixed := [2]Input_Event{Mouse_Event{x = 5, y = 3, action = .Move}, Mouse_Event{x = 5, y = 3, button = .Left, action = .Press}}
+	testing.expect_value(t, try_resolve_hover_fast_path(&inp, &ctx, mixed[:], false), Hover_Fast_Path_Result.Not_Pure_Hover)
+}
+
+@(test)
+test_scroll_node_into_view_terminates_on_parent_cycles :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+
+	ctx: Layout_Context
+	begin_layout(&ctx, 40, 10)
+	if container(&ctx, "root", Box_Config{dir = .Column, width = fixed(40), height = fixed(10)}) {
+		if container(&ctx, "child_a", Box_Config{dir = .Column, width = fixed(40), height = fixed(10)}) {
+			leaf(&ctx, "child_b", 40, 10, Box_Config{width = fixed(40), height = fixed(10)})
+		}
+	}
+	end_layout(&ctx)
+
+	inp: Input_State
+	ctx.nodes[0].parent_idx = 0
+	scroll_node_into_view(&inp, &ctx, 1)
+
+	ctx.nodes[1].parent_idx = 2
+	ctx.nodes[2].parent_idx = 1
+	scroll_node_into_view(&inp, &ctx, 2)
 }

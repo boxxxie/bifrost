@@ -212,9 +212,9 @@ append_or_coalesce_input_event :: proc(
 }
 
 // Returns true when `events` is non-empty and every event is a pure mouse hover/leave motion
-// with no active mouse drag, splitter drag, or custom 3-phase event handler, and `dirty` is false.
-is_pure_hover_event_batch :: proc "contextless" (inp: ^Input_State, events: []Input_Event, dirty := false) -> bool {
-	if dirty || len(events) == 0 || inp.mouse_down || inp.active_splitter_id != 0 || inp.event_handler != nil {
+// with no active mouse drag, splitter drag, or custom 3-phase event handler.
+is_pure_hover_event_batch :: proc "contextless" (inp: ^Input_State, events: []Input_Event) -> bool {
+	if len(events) == 0 || inp.mouse_down || inp.active_splitter_id != 0 || inp.event_handler != nil {
 		return false
 	}
 	for ev in events {
@@ -227,9 +227,37 @@ is_pure_hover_event_batch :: proc "contextless" (inp: ^Input_State, events: []In
 }
 
 Hover_Fast_Path_Result :: enum u8 {
-	Not_Pure_Hover, // Needs normal full frame (events contain clicks/keys/scrolls or `dirty == true`)
+	Not_Pure_Hover,  // Needs normal full frame (events contain clicks/keys/scrolls or `dirty == true`)
 	Hover_Unchanged, // Pure hover inside the same widget/path; caller can return immediately (`0` layout passes)
 	Hover_Changed,   // Pure hover crossed into a new widget/path; `resolve_input` already ran, caller should rebuild UI once
+}
+
+hover_path_tracks_motion :: proc(inp: ^Input_State, ctx: ^Layout_Context) -> bool {
+	if inp.hovered_id != 0 {
+		if idx, ok := ctx.id_map[inp.hovered_id]; ok && idx >= 0 && int(idx) < len(ctx.nodes) {
+			if ctx.nodes[idx].config.track_hover_motion {
+				return true
+			}
+		}
+	}
+	for i in 0 ..< int(inp.hover_path_len) {
+		h := inp.hover_path[i]
+		if h != 0 {
+			if idx, ok := ctx.id_map[h]; ok && idx >= 0 && int(idx) < len(ctx.nodes) {
+				if ctx.nodes[idx].config.track_hover_motion {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+sync_frame_start_transitions :: proc "contextless" (inp: ^Input_State) {
+	inp.prev_focused_id     = inp.focused_id
+	inp.prev_hovered_id     = inp.hovered_id
+	inp.prev_hover_path     = inp.hover_path
+	inp.prev_hover_path_len = inp.hover_path_len
 }
 
 // Evaluates whether a frame can be short-circuited on pure mouse hover motion against an existing `Layout_Context`.
@@ -241,26 +269,36 @@ try_resolve_hover_fast_path :: proc(
 	events: []Input_Event,
 	dirty := false,
 ) -> Hover_Fast_Path_Result {
-	if len(ctx.nodes) == 0 || inp.pending_chord.active || !is_pure_hover_event_batch(inp, events, dirty) {
+	if dirty || len(ctx.nodes) == 0 || inp.pending_chord.active || !is_pure_hover_event_batch(inp, events) {
 		return .Not_Pure_Hover
 	}
 	frame_start_focused_id     := inp.focused_id
 	frame_start_hovered_id     := inp.hovered_id
 	frame_start_hover_path     := inp.hover_path
 	frame_start_hover_path_len := inp.hover_path_len
+	frame_start_mouse_pos      := inp.mouse_pos
+	frame_start_mouse_init     := inp.mouse_initialized
 
 	resolve_input(inp, ctx, ..events)
 
 	hover_same := inp.hovered_id == frame_start_hovered_id &&
-	              inp.hover_path_len == frame_start_hover_path_len &&
-	              inp.hover_path == frame_start_hover_path
+	              inp.hover_path_len == frame_start_hover_path_len
+	if hover_same {
+		for i in 0 ..< int(inp.hover_path_len) {
+			if inp.hover_path[i] != frame_start_hover_path[i] {
+				hover_same = false
+				break
+			}
+		}
+	}
 
 	inp.prev_focused_id     = frame_start_focused_id
 	inp.prev_hovered_id     = frame_start_hovered_id
 	inp.prev_hover_path     = frame_start_hover_path
 	inp.prev_hover_path_len = frame_start_hover_path_len
 
-	if hover_same {
+	coords_moved := !frame_start_mouse_init || inp.mouse_pos != frame_start_mouse_pos
+	if hover_same && !(coords_moved && hover_path_tracks_motion(inp, ctx)) {
 		return .Hover_Unchanged
 	}
 	return .Hover_Changed

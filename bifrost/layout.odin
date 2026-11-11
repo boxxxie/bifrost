@@ -2,6 +2,7 @@ package bifrost
 
 import "core:hash"
 import "core:mem"
+import vmem "core:mem/virtual"
 import "../deps/heimdall/heimdall"
 
 // =============================================================================
@@ -156,6 +157,7 @@ Box_Config :: struct {
 	text_area:          bool,
 	splitter:           bool,
 	slider:             bool,
+	track_hover_motion: bool,
 	nav_overrides:      [Nav_Dir]u64, // Optional per-direction target node id_hash overrides
 }
 
@@ -221,6 +223,9 @@ Layout_Context :: struct {
 	screen_size:      [2]i32,
 	layout_gen:       u64,
 	allocator:        mem.Allocator,
+	arena:            vmem.Arena,
+	use_arena:        bool,
+	arena_ready:      bool,
 	recorder:         ^heimdall.Recorder,
 	measure_text_fn:  Measure_Text_Intrinsic_Proc,
 	measure_userdata: rawptr,
@@ -319,15 +324,55 @@ point_in_rect :: #force_inline proc "contextless" (x, y: i32, r: Rect) -> bool {
 // Declarative Tree Construction API
 // =============================================================================
 
-begin_layout :: proc(ctx: ^Layout_Context, screen_w, screen_h: i32, allocator := context.temp_allocator) {
-	ctx.nodes           = make([dynamic]Layout_Node, 0, 128, allocator)
-	ctx.parent_stack    = make([dynamic]i32, 0, 32, allocator)
+layout_enable_arena :: proc "contextless" (ctx: ^Layout_Context) {
+	if ctx != nil {
+		ctx.use_arena = true
+	}
+}
+
+layout_destroy :: proc(ctx: ^Layout_Context) {
+	if ctx == nil {
+		return
+	}
+	if ctx.arena_ready {
+		vmem.arena_destroy(&ctx.arena)
+		ctx.arena       = {}
+		ctx.arena_ready = false
+	}
+	ctx.nodes        = nil
+	ctx.parent_stack = nil
+	ctx.id_map       = nil
+	ctx.z_order      = nil
+	ctx.allocator    = {}
+}
+
+begin_layout :: proc(ctx: ^Layout_Context, screen_w, screen_h: i32, allocator: mem.Allocator = {}) {
+	alloc := allocator
+	if alloc.procedure == nil {
+		if ctx.use_arena {
+			if !ctx.arena_ready {
+				if vmem.arena_init_growing(&ctx.arena) == nil {
+					ctx.arena_ready = true
+				}
+			} else {
+				vmem.arena_free_all(&ctx.arena)
+			}
+			if ctx.arena_ready {
+				alloc = vmem.arena_allocator(&ctx.arena)
+			}
+		}
+		if alloc.procedure == nil {
+			alloc = context.temp_allocator
+		}
+	}
+	ctx.nodes           = make([dynamic]Layout_Node, 0, 128, alloc)
+	ctx.parent_stack    = make([dynamic]i32, 0, 32, alloc)
 	ctx.scope_stack_len = 0
-	ctx.id_map          = make(map[u64]i32, 128, allocator)
+	ctx.id_map          = make(map[u64]i32, 128, alloc)
 	ctx.z_order         = nil
 	ctx.screen_size     = {screen_w, screen_h}
 	ctx.layout_gen     += 1
-	ctx.allocator       = allocator
+	ctx.allocator       = alloc
 }
 
 enter_container_node :: proc(ctx: ^Layout_Context, idx: i32) {
