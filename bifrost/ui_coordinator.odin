@@ -409,13 +409,18 @@ spawn_ui_coordinator :: proc(
 	ui_actor: ^actor.Actor(UI_Coordinator_State, UI_Msg),
 	ok: bool,
 ) {
-	init_state: UI_Coordinator_State
-	if !ui_coordinator_init(&init_state, cols, rows, shared_db, render_pass, allocator) {
+	init_ptr := new(UI_Coordinator_State, allocator)
+	if init_ptr == nil {
 		return nil, false
 	}
-	spawned, s_err := actor.spawn(sched, init_state, ui_coordinator_receive, 1, allocator)
+	defer free(init_ptr, allocator)
+
+	if !ui_coordinator_init(init_ptr, cols, rows, shared_db, render_pass, allocator) {
+		return nil, false
+	}
+	spawned, s_err := actor.spawn(sched, init_ptr^, ui_coordinator_receive, 1, allocator)
 	if s_err != nil {
-		ui_coordinator_destroy(&init_state)
+		ui_coordinator_destroy(init_ptr)
 		return nil, false
 	}
 	ui_rebind_internal_slices(&spawned.state)
