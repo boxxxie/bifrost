@@ -420,24 +420,29 @@ Showcase_App :: struct {
 	prev_self_total:      u64,
 }
 
-parse_proc_stat_line :: proc(line: string, alloc := context.temp_allocator) -> (jiffies: CPU_Jiffies, ok: bool) {
-	fields := strings.fields(line, alloc)
-	if len(fields) < 5 {
+parse_proc_stat_line :: proc(line: string) -> (jiffies: CPU_Jiffies, ok: bool) {
+	rem := line
+	if _, has_lbl := strings.fields_iterator(&rem); !has_lbl {
 		return {}, false
 	}
+	field_idx := 0
 	var_total: u64 = 0
-	var_idle: u64  = 0
-	for i := 1; i < len(fields); i += 1 {
-		v, parsed := strconv.parse_u64_of_base(fields[i], 10)
-		if !parsed {
-			continue
+	var_idle:  u64 = 0
+	for tok in strings.fields_iterator(&rem) {
+		val, v_ok := strconv.parse_u64_of_base(tok, 10)
+		if !v_ok {
+			break
 		}
-		var_total += v
-		if i == 4 || i == 5 { // idle + iowait
-			var_idle += v
+		var_total += val
+		if field_idx == 3 || field_idx == 4 { // idle + iowait
+			var_idle += val
 		}
+		field_idx += 1
 	}
-	return CPU_Jiffies{total = var_total, idle = var_idle, valid = var_total > 0}, var_total > 0
+	if field_idx < 4 || var_total == 0 {
+		return {}, false
+	}
+	return CPU_Jiffies{total = var_total, idle = var_idle, valid = true}, true
 }
 
 compute_cpu_delta_pct :: proc(prev: ^CPU_Jiffies, cur: CPU_Jiffies, fallback_pct: f64) -> f64 {
@@ -465,7 +470,7 @@ compute_cpu_delta_pct :: proc(prev: ^CPU_Jiffies, cur: CPU_Jiffies, fallback_pct
 }
 
 sample_live_system_metrics :: proc(app: ^Showcase_App) {
-	arena_buf: [65536]byte
+	arena_buf: [131072]byte
 	arena: mem.Arena
 	mem.arena_init(&arena, arena_buf[:])
 	scratch := mem.arena_allocator(&arena)
@@ -478,14 +483,14 @@ sample_live_system_metrics :: proc(app: ^Showcase_App) {
 		detected_cores := 0
 		for line in strings.split_lines_iterator(&stat_str) {
 			if strings.has_prefix(line, "cpu ") {
-				if j, ok := parse_proc_stat_line(line, scratch); ok {
+				if j, ok := parse_proc_stat_line(line); ok {
 					app.sys_cpu_pct = compute_cpu_delta_pct(&app.prev_cpu_total, j, app.sys_cpu_pct)
 				}
 			} else if strings.has_prefix(line, "cpu") {
 				sp_idx := strings.index_byte(line, ' ')
 				if sp_idx > 3 {
 					if core_idx, c_ok := strconv.parse_int(line[3:sp_idx], 10); c_ok && core_idx >= 0 && core_idx < SYS_MAX_CORES {
-						if j, ok := parse_proc_stat_line(line, scratch); ok {
+						if j, ok := parse_proc_stat_line(line); ok {
 							app.sys_core_pct[core_idx] = compute_cpu_delta_pct(&app.prev_cpu_cores[core_idx], j, app.sys_core_pct[core_idx])
 							if core_idx + 1 > detected_cores {
 								detected_cores = core_idx + 1
@@ -502,6 +507,7 @@ sample_live_system_metrics :: proc(app: ^Showcase_App) {
 	if app.sys_core_count <= 0 {
 		app.sys_core_count = 4
 	}
+	free_all(scratch)
 
 	// 2. Sample `/proc/meminfo` for RAM Used %, Page Cache %, and Swap Used %
 	if mem_bytes, mem_err := os.read_entire_file("/proc/meminfo", scratch); mem_err == nil {
@@ -514,15 +520,17 @@ sample_live_system_metrics :: proc(app: ^Showcase_App) {
 		swap_free_kb: u64 = 0
 
 		for line in strings.split_lines_iterator(&mem_str) {
-			fields := strings.fields(line, scratch)
-			if len(fields) < 2 {
+			rem := line
+			key, k_ok := strings.fields_iterator(&rem)
+			val_str, f_ok := strings.fields_iterator(&rem)
+			if !k_ok || !f_ok {
 				continue
 			}
-			val, v_ok := strconv.parse_u64_of_base(fields[1], 10)
+			val, v_ok := strconv.parse_u64_of_base(val_str, 10)
 			if !v_ok {
 				continue
 			}
-			switch fields[0] {
+			switch key {
 			case "MemTotal:":     mem_total_kb = val
 			case "MemAvailable:": mem_avail_kb = val
 			case "Buffers:":      buffers_kb   = val
@@ -544,38 +552,49 @@ sample_live_system_metrics :: proc(app: ^Showcase_App) {
 			app.sys_swap_pct = clamp(f64(swap_used) * 100.0 / f64(swap_tot_kb), 0.0, 100.0)
 		}
 	}
+	free_all(scratch)
 
-	// 2b. Sample `/proc/self/stat` and `/proc/self/status` for this process's own CPU % and RSS memory
+	// 2b. Sample `/proc/self/stat` for this process's own CPU % and RSS memory
 	if self_stat_bytes, ss_err := os.read_entire_file("/proc/self/stat", scratch); ss_err == nil {
 		ss_str := string(self_stat_bytes)
 		// Skip past `(comm)` since executable name may contain spaces/parens
 		if rparen := strings.last_index_byte(ss_str, ')'); rparen >= 0 && rparen + 2 < len(ss_str) {
-			rest_fields := strings.fields(ss_str[rparen + 2:], scratch)
-			// Field 14 (`utime`) is index 11 after `) `, Field 15 (`stime`) is index 12, Field 24 (`rss` pages) is index 21
-			if len(rest_fields) > 12 {
-				utime, u_ok := strconv.parse_u64_of_base(rest_fields[11], 10)
-				stime, s_ok := strconv.parse_u64_of_base(rest_fields[12], 10)
-				if u_ok && s_ok {
-					self_ticks := utime + stime
-					cur_total  := app.prev_cpu_total.total
-					if app.prev_self_total > 0 && cur_total > app.prev_self_total && self_ticks >= app.prev_self_ticks {
-						d_self  := self_ticks - app.prev_self_ticks
-						d_total := cur_total - app.prev_self_total
-						// Multiply by logical core count so 100% = 1 full logical core (matching `top` / `htop` %CPU)
-						ncores  := f64(max(1, app.sys_core_count))
-						app.self_cpu_pct = clamp((f64(d_self) * ncores * 100.0) / f64(d_total), 0.0, ncores * 100.0)
-					}
-					app.prev_self_ticks = self_ticks
-					app.prev_self_total = cur_total
+			rem := ss_str[rparen + 2:]
+			utime: u64 = 0
+			stime: u64 = 0
+			rss_pages: u64 = 0
+			u_ok, s_ok, r_ok := false, false, false
+			idx := 0
+			for tok in strings.fields_iterator(&rem) {
+				switch idx {
+				case 11: utime, u_ok = strconv.parse_u64_of_base(tok, 10)
+				case 12: stime, s_ok = strconv.parse_u64_of_base(tok, 10)
+				case 21:
+					rss_pages, r_ok = strconv.parse_u64_of_base(tok, 10)
+					break
 				}
+				idx += 1
 			}
-			if len(rest_fields) > 21 {
-				if rss_pages, r_ok := strconv.parse_u64_of_base(rest_fields[21], 10); r_ok {
-					app.self_rss_mb = (f64(rss_pages) * 4096.0) / (1024.0 * 1024.0)
+			// Field 14 (`utime`) is index 11 after `) `, Field 15 (`stime`) is index 12, Field 24 (`rss` pages) is index 21
+			if u_ok && s_ok {
+				self_ticks := utime + stime
+				cur_total  := app.prev_cpu_total.total
+				if app.prev_self_total > 0 && cur_total > app.prev_self_total && self_ticks >= app.prev_self_ticks {
+					d_self  := self_ticks - app.prev_self_ticks
+					d_total := cur_total - app.prev_self_total
+					// Multiply by logical core count so 100% = 1 full logical core (matching `top` / `htop` %CPU)
+					ncores  := f64(max(1, app.sys_core_count))
+					app.self_cpu_pct = clamp((f64(d_self) * ncores * 100.0) / f64(d_total), 0.0, ncores * 100.0)
 				}
+				app.prev_self_ticks = self_ticks
+				app.prev_self_total = cur_total
+			}
+			if r_ok {
+				app.self_rss_mb = (f64(rss_pages) * 4096.0) / (1024.0 * 1024.0)
 			}
 		}
 	}
+	free_all(scratch)
 
 	// 3. Shift rolling history ring (`0 ..< SYS_HISTORY_LEN`) and push latest sample at tail
 	ncores := max(1, app.sys_core_count)
@@ -769,6 +788,7 @@ showcase_init :: proc(app: ^Showcase_App, cols, rows: i32, allocator := context.
 	bifrost.bind_splitter_key(&app.input, bifrost.Key_Event{code = .Rune, ch = 'f', mods = {.Ctrl}}, "showcase_split", +4, "split.widen")
 	bifrost.register_command(&app.palette, "split.widen",  "Widen Tree Explorer Splitter (+4 cols)",  "Layout")
 	bifrost.register_command(&app.palette, "split.narrow", "Narrow Tree Explorer Splitter (-4 cols)", "Layout")
+	bifrost.layout_enable_arena(&app.layout_ctx)
 
 	return true
 }
@@ -779,6 +799,7 @@ showcase_destroy :: proc(app: ^Showcase_App) {
 	_ = os.remove_all(SHOWCASE_HEIMDALL_DIR)
 	strings.builder_destroy(&app.ansi_builder)
 	bifrost.state_store_destroy(&app.state_store)
+	bifrost.layout_destroy(&app.layout_ctx)
 	bifrost.screen_destroy(&app.screen)
 	app^ = {}
 }
@@ -1854,18 +1875,19 @@ handle_chart_timeline_scrubbing :: proc(app: ^Showcase_App, events: []bifrost.In
 }
 
 step_showcase_frame :: proc(app: ^Showcase_App, events: ..bifrost.Input_Event) {
+	defer free_all(context.temp_allocator)
+
 	tree_slice: bifrost.Tree_Slice
 	switch bifrost.try_resolve_hover_fast_path(&app.input, &app.layout_ctx, events, app.sys_dirty) {
 	case .Hover_Unchanged:
 		strings.builder_reset(&app.ansi_builder)
 		return
 	case .Hover_Changed:
-		free_all(context.temp_allocator)
 		bifrost.state_store_begin_frame(&app.state_store)
 		build_showcase_ui(app, &tree_slice)
 	case .Not_Pure_Hover:
 		app.sys_dirty = false
-		free_all(context.temp_allocator)
+		bifrost.sync_frame_start_transitions(&app.input)
 		bifrost.state_store_begin_frame(&app.state_store)
 
 		build_showcase_ui(app, &tree_slice)
@@ -1977,6 +1999,7 @@ run_showcase :: proc(live_tty: bool) -> bool {
 				if strings.builder_len(app.ansi_builder) > 0 {
 					_, _ = os.write_string(os.stdout, strings.to_string(app.ansi_builder))
 				}
+				free_all(context.temp_allocator)
 			}
 		}
 	} else {
