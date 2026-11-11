@@ -1,5 +1,6 @@
 package bifrost
 
+import "core:fmt"
 import "core:sync"
 import xitdb "../deps/xitdb/xitdb"
 
@@ -185,6 +186,9 @@ save_workspace_snapshot_internal :: proc(
 		return xitdb.marshal(&target, c.snap)
 	}, &tx_ctx)
 	_, err := xitdb.tx_commit(&tx)
+	if err != nil {
+		fmt.eprintf("save_workspace_snapshot_internal: tx_commit failed: %v\n", err)
+	}
 	return err == nil
 }
 
