@@ -123,6 +123,7 @@ workbench_init :: proc(app: ^Workbench_App, cols, rows: i32, allocator := contex
 	app.osc52_last_seq  = "none"
 	app.last_action     = "ready"
 	app.input.wants_focus_id = bifrost.hash_id("keymap_table")
+	bifrost.layout_enable_arena(&app.layout_ctx)
 
 	app.col_specs = {
 		{header = "Action ID",   kind = .Fixed,        value = 18, min_width = 14, align = .Left},
@@ -143,6 +144,7 @@ workbench_init :: proc(app: ^Workbench_App, cols, rows: i32, allocator := contex
 workbench_destroy :: proc(app: ^Workbench_App) {
 	strings.builder_destroy(&app.ansi_builder)
 	bifrost.state_store_destroy(&app.state_store)
+	bifrost.layout_destroy(&app.layout_ctx)
 	bifrost.screen_destroy(&app.screen)
 	_ = xitdb.core_destroy(&app.core)
 	app^ = {}
@@ -671,17 +673,18 @@ handle_workbench_interactions :: proc(app: ^Workbench_App, slice: bifrost.Virtua
 }
 
 step_workbench_frame :: proc(app: ^Workbench_App, events: ..bifrost.Input_Event) {
+	defer free_all(context.temp_allocator)
+
 	switch bifrost.try_resolve_hover_fast_path(&app.input, &app.layout_ctx, events) {
 	case .Hover_Unchanged:
 		strings.builder_reset(&app.ansi_builder)
 		return
 	case .Hover_Changed:
-		free_all(context.temp_allocator)
 		bifrost.state_store_begin_frame(&app.state_store)
 		slice: bifrost.Virtual_Slice
 		build_workbench_ui(app, &slice)
 	case .Not_Pure_Hover:
-		free_all(context.temp_allocator)
+		bifrost.sync_frame_start_transitions(&app.input)
 		bifrost.state_store_begin_frame(&app.state_store)
 
 		slice: bifrost.Virtual_Slice
@@ -828,6 +831,7 @@ run_workbench :: proc(live_tty: bool) -> bool {
 				if strings.builder_len(app.ansi_builder) > 0 {
 					_, _ = os.write_string(os.stdout, strings.to_string(app.ansi_builder))
 				}
+				free_all(context.temp_allocator)
 			}
 		}
 	} else {

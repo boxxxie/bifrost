@@ -750,6 +750,7 @@ run_csv_workbench :: proc(live_tty: bool, custom_file: string, track: ^mem.Track
 					if ui_actor.state.last_ansi_bytes > 0 {
 						_, _ = os.write_string(os.stdout, strings.to_string(ui_actor.state.ansi_builder))
 					}
+					free_all(context.temp_allocator)
 				}
 			}
 		}

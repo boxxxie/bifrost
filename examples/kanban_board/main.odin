@@ -261,6 +261,7 @@ kanban_init :: proc(app: ^Kanban_App, cols, rows: i32, allocator := context.allo
 	app.new_task_priority = .High
 	app.last_status       = "seeded initial board"
 	app.input.wants_focus_id = bifrost.hash_id("task_card_1")
+	bifrost.layout_enable_arena(&app.layout_ctx)
 
 	// Seed initial Kanban tasks across moments @0..@2
 	_ = commit_task_mutation(app, 1, .Backlog,     .High,     "Design Clay 6-pass layout engine",     "seed task 1")
@@ -297,6 +298,7 @@ kanban_destroy :: proc(app: ^Kanban_App) {
 	delete(app.owned_titles)
 	strings.builder_destroy(&app.ansi_builder)
 	bifrost.state_store_destroy(&app.state_store)
+	bifrost.layout_destroy(&app.layout_ctx)
 	bifrost.screen_destroy(&app.screen)
 	_ = xitdb.core_destroy(&app.core)
 	app^ = {}
@@ -726,18 +728,19 @@ handle_kanban_interactions :: proc(app: ^Kanban_App, snap: Kanban_Snapshot) -> b
 }
 
 step_kanban_frame :: proc(app: ^Kanban_App, events: ..bifrost.Input_Event) {
+	defer free_all(context.temp_allocator)
+
 	switch bifrost.try_resolve_hover_fast_path(&app.input, &app.layout_ctx, events) {
 	case .Hover_Unchanged:
 		strings.builder_reset(&app.ansi_builder)
 		return
 	case .Hover_Changed:
-		free_all(context.temp_allocator)
 		bifrost.state_store_begin_frame(&app.state_store)
 		moment := app.active_moment if app.pinned_history else -1
 		snap := read_kanban_snapshot(app, moment)
 		build_kanban_ui(app, snap)
 	case .Not_Pure_Hover:
-		free_all(context.temp_allocator)
+		bifrost.sync_frame_start_transitions(&app.input)
 		bifrost.state_store_begin_frame(&app.state_store)
 
 		moment := app.active_moment if app.pinned_history else -1
@@ -840,6 +843,7 @@ run_kanban :: proc(live_tty: bool) -> bool {
 				if strings.builder_len(app.ansi_builder) > 0 {
 					_, _ = os.write_string(os.stdout, strings.to_string(app.ansi_builder))
 				}
+				free_all(context.temp_allocator)
 			}
 		}
 	} else {

@@ -858,6 +858,7 @@ explorer_init :: proc(app: ^Explorer_App, db: ^xitdb.Database, db_label: string,
 	bifrost.bind_splitter_key(&app.input, bifrost.Key_Event{code = .Rune, ch = 'f', mods = {.Ctrl}}, "explorer_split", +4, "split.widen")
 	bifrost.register_command(&app.palette, "split.widen",  "Widen Tree Explorer Splitter (+4 cols)",  "Layout")
 	bifrost.register_command(&app.palette, "split.narrow", "Narrow Tree Explorer Splitter (-4 cols)", "Layout")
+	bifrost.layout_enable_arena(&app.layout_ctx)
 
 	return true
 }
@@ -865,6 +866,7 @@ explorer_init :: proc(app: ^Explorer_App, db: ^xitdb.Database, db_label: string,
 explorer_destroy :: proc(app: ^Explorer_App) {
 	strings.builder_destroy(&app.ansi_builder)
 	bifrost.state_store_destroy(&app.state_store)
+	bifrost.layout_destroy(&app.layout_ctx)
 	bifrost.screen_destroy(&app.screen)
 	app^ = {}
 }
@@ -1772,6 +1774,8 @@ handle_explorer_interactions :: proc(app: ^Explorer_App) -> bool {
 }
 
 step_explorer_frame :: proc(app: ^Explorer_App, events: ..bifrost.Input_Event) {
+	defer free_all(context.temp_allocator)
+
 	tree_slice: bifrost.Tree_Slice
 	slot_slice: bifrost.Virtual_Slice
 	datalog_slice: bifrost.Virtual_Slice
@@ -1782,11 +1786,10 @@ step_explorer_frame :: proc(app: ^Explorer_App, events: ..bifrost.Input_Event) {
 		strings.builder_reset(&app.ansi_builder)
 		return
 	case .Hover_Changed:
-		free_all(context.temp_allocator)
 		bifrost.state_store_begin_frame(&app.state_store)
 		build_explorer_ui(app, &tree_slice, &slot_slice, &datalog_slice, &diff_slice)
 	case .Not_Pure_Hover:
-		free_all(context.temp_allocator)
+		bifrost.sync_frame_start_transitions(&app.input)
 		bifrost.state_store_begin_frame(&app.state_store)
 
 		build_explorer_ui(app, &tree_slice, &slot_slice, &datalog_slice, &diff_slice)
@@ -1953,6 +1956,7 @@ run_explorer :: proc(live_tty: bool, seed_only: bool, custom_db_path: string) ->
 				if strings.builder_len(app.ansi_builder) > 0 {
 					_, _ = os.write_string(os.stdout, strings.to_string(app.ansi_builder))
 				}
+				free_all(context.temp_allocator)
 			}
 		}
 	} else {

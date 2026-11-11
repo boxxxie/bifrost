@@ -182,6 +182,7 @@ gallery_init :: proc(app: ^Gallery_App, cols, rows: i32, allocator := context.al
 	bifrost.bind_splitter_key(&app.input, bifrost.Key_Event{code = .Rune, ch = 'f', mods = {.Ctrl}}, "gallery_split", +4, "split.widen")
 	bifrost.register_command(&app.palette, "split.widen",  "Widen Sidebar Splitter (+4 cols)",  "Layout")
 	bifrost.register_command(&app.palette, "split.narrow", "Narrow Sidebar Splitter (-4 cols)", "Layout")
+	bifrost.layout_enable_arena(&app.layout_ctx)
 
 	return true
 }
@@ -190,6 +191,7 @@ gallery_destroy :: proc(app: ^Gallery_App) {
 	strings.builder_destroy(&app.ansi_builder)
 	bifrost.xitdb_filter_destroy(&app.filter)
 	bifrost.state_store_destroy(&app.state_store)
+	bifrost.layout_destroy(&app.layout_ctx)
 	bifrost.screen_destroy(&app.screen)
 	app^ = {}
 }
@@ -855,6 +857,8 @@ handle_gallery_interactions :: proc(app: ^Gallery_App, slice: bifrost.Virtual_Sl
 }
 
 step_gallery_frame :: proc(app: ^Gallery_App, events: ..bifrost.Input_Event) {
+	defer free_all(context.temp_allocator)
+
 	slice: bifrost.Virtual_Slice
 	has_active_toasts := app.toasts.count > 0
 	switch bifrost.try_resolve_hover_fast_path(&app.input, &app.layout_ctx, events, has_active_toasts) {
@@ -862,11 +866,10 @@ step_gallery_frame :: proc(app: ^Gallery_App, events: ..bifrost.Input_Event) {
 		strings.builder_reset(&app.ansi_builder)
 		return
 	case .Hover_Changed:
-		free_all(context.temp_allocator)
 		bifrost.state_store_begin_frame(&app.state_store)
 		build_gallery_ui(app, &slice)
 	case .Not_Pure_Hover:
-		free_all(context.temp_allocator)
+		bifrost.sync_frame_start_transitions(&app.input)
 		bifrost.toast_update(&app.toasts, 1)
 		bifrost.state_store_begin_frame(&app.state_store)
 
@@ -968,6 +971,7 @@ run_gallery :: proc(live_tty: bool) -> bool {
 				if strings.builder_len(app.ansi_builder) > 0 {
 					_, _ = os.write_string(os.stdout, strings.to_string(app.ansi_builder))
 				}
+				free_all(context.temp_allocator)
 			}
 		}
 	} else {
