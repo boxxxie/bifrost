@@ -62,7 +62,7 @@ Suite_Ctx :: struct {
 	worker_pid:      actor.PID(bifrost.Xitdb_Worker_Msg),
 	last_slice:      bifrost.Xitdb_Viewport_Slice,
 
-	// Track 15: Heimdall Telemetry Recorder & OdinArrow Segment Store
+	// Track 15: Heimdall Telemetry Recorder & Skadi Segment Store
 	heimdall_active:      bool,
 	heimdall_was_default: bool,
 	heimdall_dir_buf:     [128]u8,

@@ -7,7 +7,7 @@ import "core:os"
 import "core:slice"
 import "core:strings"
 import "core:time"
-import oa "../deps/heimdall/deps/OdinArrow/src"
+import oa "../deps/heimdall/deps/skadi/skadi"
 import "../deps/heimdall/heimdall"
 
 // =============================================================================
@@ -163,7 +163,7 @@ heimdall_format_record_value :: proc(rec: heimdall.Record, allocator := context.
 }
 
 // =============================================================================
-// 3. Zero-Copy Columnar OdinArrow Segment Store & Filter/Analytics Engine
+// 3. Zero-Copy Columnar Skadi Segment Store & Filter/Analytics Engine
 // =============================================================================
 
 MAX_HEIMDALL_SEGMENTS :: 4096
