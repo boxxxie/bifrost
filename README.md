@@ -31,7 +31,7 @@ Bifrost combines a Clay-inspired multi-pass topological Flexbox layout engine, H
 * **Zero-Allocation Columnar Telemetry & Arrow Segment Store (`heimdall_bridge.odin`):**
   * Built-in nested span and metric instrumentation across `bifrost.coordinator` (`actor_turn`, `flush_frame`, `slice_viewport`), `bifrost.layout` (`end_layout`, `layout_nodes`), `bifrost.input` (`resolve_input`, `input_events_total`, `action_triggered`), `bifrost.renderer` (`render_layout`, `screen_diff_ansi`, `ansi_diff_bytes`), and `bifrost.xitdb` (`transact_script`, `commit_batch`, `run_datalog`, `diff_moments`, `xitdb_slice_viewport`).
   * Supports explicit per-struct `recorder: ^heimdall.Recorder` configuration (`ui_coordinator_set_recorder`) with automatic fallback to `heimdall.default_recorder()`.
-  * Zero-copy `Heimdall_Segment_Store` loads `.arrow` IPC segments via `OdinArrow` and `heimdall.Record_Batch_Reader` for live TUI inspection (`ui_tree`, `ui_virtual_list`, `ui_sparkline`, `ui_canvas`).
+  * Zero-copy `Heimdall_Segment_Store` loads `.arrow` IPC segments via `Skadi` and `heimdall.Record_Batch_Reader` for live TUI inspection (`ui_tree`, `ui_virtual_list`, `ui_sparkline`, `ui_canvas`).
 
 ---
 

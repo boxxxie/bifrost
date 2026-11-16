@@ -4,7 +4,7 @@ import "core:testing"
 import "../bifrost"
 
 // =============================================================================
-// Layer 1: Executable Specifications — Heimdall Telemetry & OdinArrow Bridge
+// Layer 1: Executable Specifications — Heimdall Telemetry & Skadi Bridge
 // =============================================================================
 
 @(test)

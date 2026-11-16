@@ -28,7 +28,7 @@ odin run tools/bifrost_gen -- --atdd tests
 odin run tools/bifrost_gen -- --lint-temp <target_pkg_dir>
 ```
 
-4. **OLS Collections (`ols.json`)**: Map `bifrost` (`./bifrost`), `actor` (`./deps/heimdall/deps/sleipnir/actor`), `xitdb` (`./deps/xitdb/xitdb`), `heimdall` (`./deps/heimdall/heimdall`), and `odinarrow` (`./deps/heimdall/deps/OdinArrow/src`) in [OLS configuration](https://raw.githubusercontent.com/DanielGavin/ols/master/misc/ols.schema.json) so editor diagnostics match CLI builds.
+4. **OLS Collections (`ols.json`)**: Map `bifrost` (`./bifrost`), `actor` (`./deps/heimdall/deps/sleipnir/actor`), `xitdb` (`./deps/xitdb/xitdb`), `heimdall` (`./deps/heimdall/heimdall`), and `skadi` (`./deps/heimdall/deps/skadi/skadi`) in [OLS configuration](https://raw.githubusercontent.com/DanielGavin/ols/master/misc/ols.schema.json) so editor diagnostics match CLI builds.
 
 ## 2. Execution Modes & Mandatory 6-Step Frame Pipeline
 

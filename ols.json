@@ -5,7 +5,7 @@
 		{ "name": "actor", "path": "./deps/heimdall/deps/sleipnir/actor" },
 		{ "name": "xitdb", "path": "./deps/xitdb/xitdb" },
 		{ "name": "heimdall", "path": "./deps/heimdall/heimdall" },
-		{ "name": "odinarrow", "path": "./deps/heimdall/deps/OdinArrow/src" }
+		{ "name": "skadi", "path": "./deps/heimdall/deps/skadi/skadi" }
 	],
 	"enable_document_symbols": true,
 	"enable_hover": true,
