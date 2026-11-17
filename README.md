@@ -1,5 +1,18 @@
 # Bifrost (`package bifrost`)
 
+[![CI](https://github.com/boxxxie/bifrost/actions/workflows/ci.yml/badge.svg)](https://github.com/boxxxie/bifrost/actions/workflows/ci.yml)
+[![Odin](https://img.shields.io/badge/Odin-dev--2026--09%2B-3882D2)](https://odin-lang.org/)
+[![Platforms](https://img.shields.io/badge/Platforms-Linux%20%7C%20macOS%20%7C%20Windows-4A5568)](.github/workflows/ci.yml)
+[![Memory](https://img.shields.io/badge/Memory-Zero--Alloc%20Widgets%20%7C%200%20Leaks-00C853)](docs/WIDGETS_GUIDE.md)
+[![Layout](https://img.shields.io/badge/Layout-Clay%20Flexbox-7C4DFF)](bifrost/layout.odin)
+[![Focus](https://img.shields.io/badge/Focus-Harel%20H%2FH%2A%20%2B%202D%20Cone-00ACC1)](docs/NAVIGATION_AND_DSL_GUIDE.md)
+[![Keymaps](https://img.shields.io/badge/Keymaps-Vim%20%7C%20Helix%20%7C%20Emacs-FF6D00)](bifrost/keymap.odin)
+[![Actors](https://img.shields.io/badge/Actors-Sleipnir%20MPSC%2FSPSC-2979FF)](deps/sleipnir)
+[![State](https://img.shields.io/badge/State-xitdb%20Time--Travel-5C6BC0)](deps/xitdb)
+[![Telemetry](https://img.shields.io/badge/Telemetry-Heimdall%20Arrow%20IPC-E91E63)](deps/heimdall)
+[![DSL](https://img.shields.io/badge/DSL-AST%20Codegen%20%2B%20Linter-00897B)](tools/bifrost_gen/main.odin)
+[![Tests](https://img.shields.io/badge/Tests-4--Layer%20ATDD-2E7D32)](tests)
+
 An immediate-mode, actor-driven Terminal User Interface (TUI) framework for [Odin](https://odin-lang.org/), engineered to bridge [**Sleipnir (`package actor`)**](deps/sleipnir) lock-free actors, [**xitdb (`package xitdb`)**](deps/xitdb) immutable persistent databases, and [**Heimdall (`package heimdall`)**](deps/heimdall) columnar Apache Arrow telemetry.
 
 Bifrost combines a Clay-inspired multi-pass topological Flexbox layout engine, Harel statechart focus scopes with Shallow (H) and Deep (H*) history, 2D spatial cone navigation, multi-style modal keymaps (**Vim**, **Helix**, **Emacs**), and zero-allocation widget state slots into a single cohesive package.
