@@ -1,0 +1,151 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Git tag to package and publish (e.g. v0.1.0)'
+        required: true
+        default: 'v0.1.0'
+        type: string
+      draft:
+        description: 'Create GitHub Release as a draft'
+        required: false
+        default: true
+        type: boolean
+      prerelease:
+        description: 'Mark GitHub Release as a prerelease'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Verify, Package & Publish Release
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Determine target tag
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          VERSION="${TAG#v}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout repository metadata (CHANGELOG)
+        uses: actions/checkout@v7
+        with:
+          path: meta
+
+      - name: Checkout target tag (${{ steps.meta.outputs.tag }})
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.meta.outputs.tag }}
+          fetch-depth: 0
+          submodules: recursive
+          path: src
+
+      - name: Setup Odin compiler
+        uses: laytan/setup-odin@v2
+        with:
+          release: latest
+          token: ${{ secrets.GITHUB_TOKEN }}
+          cache: false
+
+      - name: Verify target tag builds and passes tests
+        working-directory: src
+        run: |
+          odin check bifrost -no-entry-point -custom-attribute:telemetry_schema -vet -strict-style -vet-packages:bifrost
+          odin check bifrost/codegen -no-entry-point -custom-attribute:ui_actions,ui_action,ui_scope,telemetry_schema,no_temp_lint -vet -strict-style
+          odin check tools/bifrost_gen -vet -strict-style
+          odin doc bifrost -custom-attribute:telemetry_schema > /dev/null
+          odin run tools/bifrost_gen -- --atdd tests
+          git diff --ignore-space-at-eol --exit-code tests/dsl_atdd_gen.odin
+          odin run tools/bifrost_gen -- --lint-temp bifrost examples/heimdall_inspector examples/log_monitor
+          odin test bifrost -custom-attribute:telemetry_schema -vet -strict-style -vet-packages:bifrost
+          odin test bifrost/codegen -custom-attribute:ui_actions,ui_action,ui_scope,telemetry_schema,no_temp_lint -vet -strict-style
+          odin test tests -custom-attribute:scenario,telemetry_schema -vet -strict-style -vet-packages:bifrost,bifrost_tests
+
+      - name: Package source archives and bifrost_gen binary
+        run: |
+          TAG="${{ steps.meta.outputs.tag }}"
+          VER="${{ steps.meta.outputs.version }}"
+          mkdir -p dist
+
+          git -C src archive --format=tar.gz --prefix="bifrost-${VER}/" HEAD > "dist/bifrost-${TAG}-src.tar.gz"
+          git -C src archive --format=zip --prefix="bifrost-${VER}/" HEAD > "dist/bifrost-${TAG}-src.zip"
+
+          mkdir -p "dist/bifrost_gen-${TAG}-linux-x86_64"
+          odin build src/tools/bifrost_gen -o:speed -out:"dist/bifrost_gen-${TAG}-linux-x86_64/bifrost_gen"
+          cp src/LICENSE src/README.md "dist/bifrost_gen-${TAG}-linux-x86_64/"
+          tar -C dist -czf "dist/bifrost_gen-${TAG}-linux-x86_64.tar.gz" "bifrost_gen-${TAG}-linux-x86_64"
+          rm -rf "dist/bifrost_gen-${TAG}-linux-x86_64"
+
+          (cd dist && sha256sum *.tar.gz *.zip > SHA256SUMS.txt)
+          ls -lh dist
+
+      - name: Extract release notes from CHANGELOG.md
+        id: notes
+        run: |
+          VER="${{ steps.meta.outputs.version }}"
+          python3 - "$VER" meta/CHANGELOG.md dist/RELEASE_NOTES.md <<'PY'
+          import re, sys
+
+          version, changelog_path, out_path = sys.argv[1], sys.argv[2], sys.argv[3]
+          text = open(changelog_path, "r", encoding="utf-8").read()
+          pattern = re.compile(
+              rf"^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## \[|\Z)",
+              re.MULTILINE | re.DOTALL,
+          )
+          m = pattern.search(text)
+          if m:
+              body = m.group(1).strip()
+              open(out_path, "w", encoding="utf-8").write(body + "\n")
+              print("found=true")
+          else:
+              print("found=false")
+          PY
+          if [ -s dist/RELEASE_NOTES.md ]; then
+            echo "has_notes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_notes=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create or update GitHub Release
+        run: |
+          TAG="${{ steps.meta.outputs.tag }}"
+          FLAGS=()
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ "${{ inputs.draft }}" = "true" ]; then FLAGS+=(--draft); fi
+            if [ "${{ inputs.prerelease }}" = "true" ]; then FLAGS+=(--prerelease); fi
+          elif [[ "$TAG" == *-* ]]; then
+            FLAGS+=(--prerelease)
+          fi
+
+          if [ "${{ steps.notes.outputs.has_notes }}" = "true" ]; then
+            NOTES_FLAGS=(--notes-file dist/RELEASE_NOTES.md)
+          else
+            NOTES_FLAGS=(--generate-notes)
+          fi
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/*.tar.gz dist/*.zip dist/SHA256SUMS.txt --clobber
+          else
+            gh release create "$TAG" dist/*.tar.gz dist/*.zip dist/SHA256SUMS.txt \
+              --title "Bifrost ${TAG}" \
+              "${NOTES_FLAGS[@]}" \
+              "${FLAGS[@]}"
+          fi

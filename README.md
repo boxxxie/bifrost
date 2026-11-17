@@ -1,7 +1,9 @@
 # Bifrost (`package bifrost`)
 
 [![CI](https://github.com/boxxxie/bifrost/actions/workflows/ci.yml/badge.svg)](https://github.com/boxxxie/bifrost/actions/workflows/ci.yml)
+[![Version](https://img.shields.io/badge/Version-v0.1.0-blue.svg)](CHANGELOG.md)
 [![Odin](https://img.shields.io/badge/Odin-dev--2026--09%2B-3882D2)](https://odin-lang.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Platforms](https://img.shields.io/badge/Platforms-Linux%20%7C%20macOS%20%7C%20Windows-4A5568)](.github/workflows/ci.yml)
 [![Memory](https://img.shields.io/badge/Memory-Zero--Alloc%20Widgets%20%7C%200%20Leaks-00C853)](docs/WIDGETS_GUIDE.md)
 [![Layout](https://img.shields.io/badge/Layout-Clay%20Flexbox-7C4DFF)](bifrost/layout.odin)
@@ -267,3 +269,9 @@ odin run examples/csv_workbench -custom-attribute:telemetry_schema -- --live-tty
   * [`docs/widget/command_palette.md`](docs/widget/command_palette.md) — `ui_command_palette`
   * [`docs/widget/status_bars_and_which_key.md`](docs/widget/status_bars_and_which_key.md) — `ui_focus_breadcrumb_bar`, `ui_key_hint_bar`, & `ui_which_key_overlay`
   * [`docs/widget/canvas_and_sparkline.md`](docs/widget/canvas_and_sparkline.md) — `ui_canvas` & `ui_sparkline`
+
+---
+
+## License
+
+Released under the [MIT License](LICENSE). See [`CHANGELOG.md`](CHANGELOG.md) for release history.
