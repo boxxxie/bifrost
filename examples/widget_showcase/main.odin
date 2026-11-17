@@ -726,6 +726,18 @@ draw_telemetry_braille :: proc(c: ^bifrost.Braille_Canvas, userdata: rawptr) {
 	bifrost.canvas_draw_series(c, app.latency_series[:], 0.0, 100.0, pal.series_b)
 }
 
+@(private)
+ensure_test_dir :: proc(dir: string) -> bool {
+	for _ in 0 ..< 10 {
+		err := os.make_directory_all(dir)
+		if err == nil || os.is_dir(dir) {
+			return true
+		}
+		time.sleep(5 * time.Millisecond)
+	}
+	return os.is_dir(dir)
+}
+
 showcase_init :: proc(app: ^Showcase_App, cols, rows: i32, allocator := context.allocator) -> bool {
 	if bifrost.screen_init(&app.screen, cols, rows, allocator) != nil {
 		return false
@@ -736,7 +748,12 @@ showcase_init :: proc(app: ^Showcase_App, cols, rows: i32, allocator := context.
 	}
 
 	_ = os.remove_all(SHOWCASE_HEIMDALL_DIR)
-	_ = os.make_directory_all(SHOWCASE_HEIMDALL_DIR)
+	if !ensure_test_dir(SHOWCASE_HEIMDALL_DIR) {
+		fmt.eprintln("Failed to create temporary directory for Showcase Heimdall segments")
+		bifrost.state_store_destroy(&app.state_store)
+		bifrost.screen_destroy(&app.screen)
+		return false
+	}
 	if heimdall.recorder_init(&app.recorder, heimdall.Config{
 		file_prefix      = SHOWCASE_HEIMDALL_PREFIX,
 		batches_per_file = 8,

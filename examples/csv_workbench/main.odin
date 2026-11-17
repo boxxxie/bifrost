@@ -631,16 +631,10 @@ run_csv_workbench :: proc(live_tty: bool, custom_file: string, track: ^mem.Track
 	ui_actor: ^actor.Actor(bifrost.UI_Coordinator_State, bifrost.UI_Msg)
 	defer {
 		actor.scheduler_wait_idle(&sched)
-		ui_state: bifrost.UI_Coordinator_State
-		has_ui := ui_actor != nil
-		if has_ui {
-			ui_state = ui_actor.state
-			ui_actor.state = {}
+		if ui_actor != nil {
+			bifrost.ui_coordinator_destroy(&ui_actor.state)
 		}
 		actor.scheduler_stop_and_destroy(&sched)
-		if has_ui {
-			bifrost.ui_coordinator_destroy(&ui_state)
-		}
 	}
 
 	cols := 120

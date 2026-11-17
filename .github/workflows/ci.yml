@@ -4,8 +4,47 @@ on:
   push:
     branches: [main, master]
   pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  static-analysis:
+    name: Static Analysis, Codegen & Docs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository with submodules
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Setup Odin compiler
+        uses: laytan/setup-odin@v2
+        with:
+          release: latest
+          token: ${{ secrets.GITHUB_TOKEN }}
+          cache: false
+
+      - name: Strict static analysis (core, codegen, tools, tests)
+        run: |
+          odin check bifrost -no-entry-point -custom-attribute:telemetry_schema -vet -strict-style -vet-packages:bifrost
+          odin check bifrost/codegen -no-entry-point -custom-attribute:ui_actions,ui_action,ui_scope,telemetry_schema,no_temp_lint -vet -strict-style
+          odin check tools/bifrost_gen -vet -strict-style
+          odin check tests -no-entry-point -custom-attribute:scenario,telemetry_schema -vet -strict-style -vet-packages:bifrost,bifrost_tests
+
+      - name: Verify AST ATDD Codegen & Layer 1 Scenario Purity
+        run: |
+          odin run tools/bifrost_gen -- --atdd tests
+          git diff --ignore-space-at-eol --exit-code tests/dsl_atdd_gen.odin
+
+      - name: Verify temp_allocator hygiene lint
+        run: odin run tools/bifrost_gen -- --lint-temp bifrost examples/heimdall_inspector examples/log_monitor
+
+      - name: Verify package documentation generation
+        run: odin doc bifrost -custom-attribute:telemetry_schema > /dev/null
+
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -36,25 +75,34 @@ jobs:
         run: odin test bifrost -custom-attribute:telemetry_schema -vet -strict-style -vet-packages:bifrost
 
       - name: Run AST Codegen Test Suite (with Tracking Allocator)
-        run: odin test bifrost/codegen -vet -strict-style
+        run: odin test bifrost/codegen -custom-attribute:ui_actions,ui_action,ui_scope,telemetry_schema,no_temp_lint -vet -strict-style
 
       - name: Run ATDD Executable Specification Suite
         run: odin test tests -custom-attribute:scenario,telemetry_schema -vet -strict-style -vet-packages:bifrost,bifrost_tests
 
       - name: Verify Headless Example 1 (Widget Gallery)
-        run: odin run examples/widget_gallery -custom-attribute:ui_actions,ui_action,ui_scope,telemetry_schema -vet -strict-style -vet-packages:bifrost -- --headless
+        run: odin run examples/widget_gallery -custom-attribute:ui_actions,ui_action,ui_scope,telemetry_schema -vet -strict-style -vet-packages:bifrost,main -- --headless
 
-      - name: Verify Headless Example 2 (Kanban Board)
-        run: odin run examples/kanban_board -custom-attribute:ui_actions,ui_action,ui_scope,telemetry_schema -vet -strict-style -vet-packages:bifrost -- --headless
+      - name: Verify Headless Example 2 (Widget Showcase)
+        run: odin run examples/widget_showcase -custom-attribute:ui_actions,ui_action,ui_scope,telemetry_schema -vet -strict-style -vet-packages:bifrost,main -- --headless
 
-      - name: Verify Headless Example 3 (Log Monitor)
-        run: odin run examples/log_monitor -custom-attribute:ui_actions,ui_action,ui_scope,telemetry_schema -vet -strict-style -vet-packages:bifrost -- --headless
+      - name: Verify Headless Example 3 (Kanban Board)
+        run: odin run examples/kanban_board -custom-attribute:ui_actions,ui_action,ui_scope,telemetry_schema -vet -strict-style -vet-packages:bifrost,main -- --headless
 
-      - name: Verify Headless Example 4 (xitdb Inspector)
-        run: odin run examples/xitdb_inspector -custom-attribute:ui_actions,ui_action,ui_scope,telemetry_schema -vet -strict-style -vet-packages:bifrost -- --headless
+      - name: Verify Headless Example 4 (Log Monitor)
+        run: odin run examples/log_monitor -custom-attribute:ui_actions,ui_action,ui_scope,telemetry_schema -vet -strict-style -vet-packages:bifrost,main -- --headless
 
-      - name: Verify Headless Example 5 (Keymap Workbench)
-        run: odin run examples/keymap_workbench -custom-attribute:ui_actions,ui_action,ui_scope,telemetry_schema -vet -strict-style -vet-packages:bifrost -- --headless
+      - name: Verify Headless Example 5 (xitdb Inspector)
+        run: odin run examples/xitdb_inspector -custom-attribute:ui_actions,ui_action,ui_scope,telemetry_schema -vet -strict-style -vet-packages:bifrost,main -- --headless
 
-      - name: Verify Headless Example 6 (Heimdall Telemetry Inspector)
-        run: odin run examples/heimdall_inspector -custom-attribute:ui_actions,ui_action,ui_scope,telemetry_schema -vet -strict-style -vet-packages:bifrost -- --headless
+      - name: Verify Headless Example 6 (xitdb Explorer)
+        run: odin run examples/xitdb_explorer -custom-attribute:ui_actions,ui_action,ui_scope,telemetry_schema -vet -strict-style -vet-packages:bifrost,main -- --headless
+
+      - name: Verify Headless Example 7 (Keymap Workbench)
+        run: odin run examples/keymap_workbench -custom-attribute:ui_actions,ui_action,ui_scope,telemetry_schema -vet -strict-style -vet-packages:bifrost,main -- --headless
+
+      - name: Verify Headless Example 8 (Heimdall Telemetry Inspector)
+        run: odin run examples/heimdall_inspector -custom-attribute:ui_actions,ui_action,ui_scope,telemetry_schema -vet -strict-style -vet-packages:bifrost,main -- --headless
+
+      - name: Verify Headless Example 9 (SIMD CSV Workbench)
+        run: odin run examples/csv_workbench -custom-attribute:ui_actions,ui_action,ui_scope,telemetry_schema -vet -strict-style -vet-packages:bifrost,main -- --headless
