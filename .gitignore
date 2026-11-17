@@ -1,6 +1,7 @@
 # Build artifacts & temporary files
 .tmp/
 .worktrees/
+dist/
 benchmarks/data/
 *.bin
 *.out
